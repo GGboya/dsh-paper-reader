@@ -83,18 +83,17 @@
 - ✅ **侧栏收起成 rail**（2026-09-17 用户反馈"显然不符合预期"）：`sidebar.workspaces` 槽传 `{wide, expandSidebar}`，官方 WorkspaceBrowser 在 `!wide` 时渲染图标入口并调 `expandSidebar()`；本插件注册方把槽 props 整个丢了 → 全宽树被塞进 56px 挤成竖排文字。改为 `wide === false` 时渲染 📚 图标按钮（用 `=== false` 而非 `!wide`：宿主没传该 prop 时按展开态走 = 改动前行为）。ReaderOverlay/SessionActions 始终挂载——阅读器和对话头部浮动按钮不属于侧栏，收起时不能跟着消失
 - ✅ **拖会话栏导致阅读器右移变窄**（2026-09-17 用户反馈"pdf 就乱了"，CDP 拖拽实测定位）：dsh 把右栏面板内联宽度写成 `cols.rightbar` 且锚在列右缘；换位后 col 落在 `1fr` 轨（拖动时常比配置宽度**宽**）→ 面板不撑满就缩在列右半边，锚点跟着跑（实测 iframe x=800 w=300，而列是 280..1100）。补 `minWidth:100%`——⚠️ 不碰 `width`：dsh 每次会话提交都重写内联 width，抢同一属性会持续闪烁（值守卫那套同理）。与既有 `maxWidth:100%` 合起来，面板宽度恒等于轨宽（宽则撑满、窄则钳制，两个方向都实测）
 - ✅ 阅读器工具栏窄列被压扁（「适宽」变竖排）：`#status` 缺 `min-width:0`，flex 项默认 `min-width:auto` 拒绝收缩 → 浏览器转而压旁边的按钮。改让标题自己截断（它本就有 ellipsis）+ 按钮 `flex:none`
-- Phase 3 待续：GitHub 安装自测（git 安装靠 prepare 脚本构建 dist，pnpm 默认拦 → 需 allowBuilds 或预提交 dist）、README 截图、dsh-plugin topic
+- Phase 3 待续：README 截图 / 演示 GIF、（可选）投稿 awesome-deepseek-harness 类索引仓库
 
 ## Phase 3 — 发布
 
 - [x] `dsh.bundle` / `cordis.patch.yml` 打包配置（`package.json` 的 `dsh.bundle.patch` → 仓库根 `cordis.patch.yml` 的 insert 条目）
 - [x] `dsh-plugin` topic 已生效（仓库 topics: dsh-plugin / deepseek-harness / paper-reader / pdf / agent）
-- [ ] **`dsh plugin --profile web add github:GGboya/dsh-paper-reader` 自测安装** ← 当前卡点
-  - 实测（2026-09-17，一次性 profile `dpr-test`，验完即删）：`dsh plugin add github:...` 本身成功、也自动写进 `dsh.profile.bundles`；但装出来只有 `lib` / `presets` / `reader` / `cordis.patch.yml`（`files` 字段生效），**没有 dist**
-  - 后果比"插件坏掉"更重：**整个 profile 起不来** —— `Cannot find module .../dist/index.js` → `dsh: plugin tree failed to load`，用户的 dsh 直接打不开
-  - 方案① `"prepare": "tsc -p tsconfig.json"` **实测被 pnpm 拦死**：`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED ... not in the "allowBuilds" allowlist`，且是**硬错误不是警告**，装都装不上；allowBuilds 在消费方的 `pnpm-workspace.yaml` 里，插件控制不了 → 等于要求用户先手工改配置
-  - → 结论：走 ② 把 `dist/` 移出 .gitignore 并提交（git 依赖按 `files` 打包，已提交的 dist 会被带上）。代价：每次改代码要重新 build + 提交产物，漏一次用户拿到的就是旧版
-  - 备选：发 npm 包（发布产物天然含 dist），但要多一套发布流程
+- [x] **自测安装（npm 路线，2026-09-18 完成）**：发布为 `@ggboy123/dsh-paper-reader@0.1.0`，一次性 profile 实测 `dsh plugin add @ggboy123/dsh-paper-reader` → dist 在 → 启动 → 工具/路由注册，全绿
+  - 为什么走 npm（2026-09-17 实测排除了其他路）：git 安装（`github:...`）拿不到 dist（gitignore）且**整个 profile 起不来**；`prepare` 脚本被 pnpm **硬错误**拦死（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`，allowBuilds 在消费方手里）；免构建（Node 跑 TS）被 `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING` 拒绝。`npm pack` 的 files 白名单压过 .gitignore → 发布产物天然含 dist
+  - ⚠️ 裸名 `dsh-paper-reader` 在 npm 已被占用（rantz 的另一个「精读报告」插件）→ 走 `@ggboy123` 作用域；loader 条目 id 保持 `dsh-paper-reader` 不变（与包名解耦），用户 profile 里的 `- id:` 配置定位不受影响
+  - 发布流程备忘：新账号发布被 403 强制要求 2FA → npm 网页开 2FA 后 `npm publish --access public` 走浏览器验证；**PUT 200 后 registry/unpkg/jsDelivr 全 404 约半小时**（新账号首发同步延迟，属正常，别重复发布）；每次发版前 `npm version patch/minor`
+  - 本地两个 profile（web/headless）的 link: 依赖与 bundles 已同步改为 `@ggboy123/dsh-paper-reader`
 - [ ] README 补截图 / 演示 GIF
 - [ ] （可选）投稿到 awesome-deepseek-harness 类索引仓库
 

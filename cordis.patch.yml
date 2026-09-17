@@ -1,6 +1,9 @@
 # dsh-paper-reader bundle layer — applied when a profile lists this bundle.
 # `name` is a PACKAGE NAME (resolved through the profile's node_modules or the
 # installation fallback $DSH_HOME/profiles/node_modules), NOT a relative path.
+# id 是配置定位用的短 slug（README 里 - id: dsh-paper-reader 的示例靠它命中），
+# 与 npm 包名解耦 —— npm 上 dsh-paper-reader 已被占用，包名走 @ggboy123 作用域。
+# YAML 里 @ 开头的字符串必须加引号。
 - insert:
     - id: dsh-paper-reader
-      name: dsh-paper-reader
+      name: '@ggboy123/dsh-paper-reader'

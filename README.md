@@ -16,17 +16,21 @@
 - 🀄 **中英切换**：顶栏「中」按钮原文 ↔ 纯中文切换；无译文时一键后台生成（babeldoc），生成需配置 `translate` 端点
 - 🔍 **PDF 转录 + 检索**：本地提取（python3 + PyMuPDF），页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
 
-## 安装（待发布）
+## 安装
 
 ```bash
-dsh plugin --profile web add github:GGboya/dsh-paper-reader
+dsh plugin --profile web add @ggboy123/dsh-paper-reader
 ```
+
+> npm 包名走 `@ggboy123` 作用域：裸名 `dsh-paper-reader` 已被另一个插件占用（那是「输入文献、吐精读报告」的一次性分析工具，与本插件的「阅读器 + 会话伴读」定位不同）。
+> 不要用 `github:GGboya/dsh-paper-reader` 安装 —— dist 不入库，git 安装会导致 profile 起不来（构建产物只随 npm 包分发）。
 
 本地开发：
 
 ```bash
-pnpm install && pnpm run build
-dsh plugin --profile web add ./dsh-paper-reader   # 从父目录执行
+git clone https://github.com/GGboya/dsh-paper-reader
+cd dsh-paper-reader && pnpm install && pnpm run build
+dsh plugin --profile web add ./dsh-paper-reader   # 从父目录执行，或用绝对路径
 dsh --profile web                                  # 侧栏变为文献库树
 ```
 

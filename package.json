@@ -1,9 +1,21 @@
 {
-  "name": "dsh-paper-reader",
+  "name": "@ggboy123/dsh-paper-reader",
   "version": "0.1.0",
-  "description": "DeepSeek Harness 插件：论文伴读工作台 — PDF 转录 / 检索 / 问答存档 + 内置阅读器页面。",
+  "description": "DeepSeek Harness 插件：论文伴读工作台 — PDF 转录 / 检索 / 原生对话伴读 + 内置阅读器页面。",
   "license": "MIT",
   "type": "module",
+  "author": "GGboya",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GGboya/dsh-paper-reader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GGboya/dsh-paper-reader/issues"
+  },
+  "homepage": "https://github.com/GGboya/dsh-paper-reader#readme",
+  "engines": {
+    "node": "^22.19.0 || >=24"
+  },
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
@@ -32,7 +44,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "tsc -p tsconfig.json"
   },
   "keywords": [
     "dsh-plugin",
