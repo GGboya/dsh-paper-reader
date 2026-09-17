@@ -1,0 +1,6 @@
+# --patch overlay: insert the minimal hello plugin over the composed profile tree.
+- insert:
+    - id: dsh-paper-reader-hello
+      name: /Users/didi/study/dsh-paper-reader/examples/hello-plugin/index.js
+      config:
+        greeting: hello-dsh

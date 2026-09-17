@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>论文伴读 · dsh-paper-reader</title>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #e2e5ea; --text: #24292f;
+    --text-2: #656d76; --accent: #0969da; --accent-soft: rgba(9,105,218,.12);
+    --hl: rgba(255, 196, 0, .55);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 14px/1.6 -apple-system, "SF Pro", "PingFang SC", "Helvetica Neue", sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+
+  /* ---------- 顶栏 ---------- */
+  #bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex: none; }
+  #bar button { font: inherit; }
+  .tbtn { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
+  .tbtn:hover { background: var(--bg); }
+  .tbtn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .tbtn:disabled { opacity: .45; cursor: default; }
+  #zh-toggle { font-weight: 700; }
+  #zoom-label { min-width: 44px; text-align: center; color: var(--text-2); }
+  #bar .spacer { flex: 1; }
+  #status { color: var(--text-2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ---------- PDF 区 ---------- */
+  #main { display: flex; flex: 1; min-height: 0; }
+  #pdf-pane { flex: 1; overflow: auto; padding: 16px; }
+  #pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .page { position: relative; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+  .page.flash { outline: 3px solid var(--hl); outline-offset: 2px; transition: outline .15s; }
+  .textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; }
+  .textLayer span { position: absolute; white-space: pre; color: transparent; cursor: text; transform-origin: 0 0; }
+  .textLayer ::selection { background: rgba(22,93,255,.3); }
+  #empty { margin: 60px auto; color: var(--text-2); text-align: center; max-width: 420px; }
+
+  /* ---------- 选中即问浮层 ---------- */
+  #ask-pop { position: fixed; z-index: 50; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: 320px; }
+  #ask-quote { font-size: 12px; color: var(--text-2); max-height: 64px; overflow: hidden; margin-bottom: 8px; border-left: 3px solid var(--accent-soft); padding-left: 8px; }
+  #ask-input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; resize: none; }
+  #ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+  #ask-send { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; }
+  #ask-send:disabled { opacity: .5; cursor: default; }
+  #ask-cancel { background: none; border: none; color: var(--text-2); cursor: pointer; }
+
+  #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: rgba(30,30,30,.92); color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; display: none; z-index: 99; max-width: 70%; }
+</style>
+</head>
+<body>
+
+<div id="bar">
+  <span id="status">论文伴读</span>
+  <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none">中</button>
+  <span class="spacer"></span>
+  <button id="zoom-out" class="tbtn">−</button>
+  <span id="zoom-label">100%</span>
+  <button id="zoom-in" class="tbtn">＋</button>
+  <button id="zoom-fit" class="tbtn">适宽</button>
+</div>
+
+<div id="main">
+  <div id="pdf-pane">
+    <div id="pdf-pages"></div>
+    <div id="empty" style="display:none"></div>
+  </div>
+</div>
+
+<div id="ask-pop">
+  <div id="ask-quote"></div>
+  <textarea id="ask-input" rows="2" placeholder="围绕选中内容提问…"></textarea>
+  <div id="ask-actions">
+    <button id="ask-cancel">取消</button>
+    <button id="ask-send">提问</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+/* ================= 基础 ================= */
+const $ = (id) => document.getElementById(id);
+const api = (p, opts) => fetch('/paper-reader/api' + p, opts).then(async (r) => {
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || ('HTTP ' + r.status));
+  return r.json();
+});
+function toast(msg, ms = 3200) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display = 'none', ms);
+}
+function esc(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+let current = null;        // { topic, name }
+let zhState = { zh: false, dual: false, busy: false };
+let zhVariant = null;      // null=原文 'dual'=中英对照 'zh'=纯中文
+
+/* ================= 打开文献 ================= */
+function pdfUrl(variant) {
+  const q = `topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`;
+  return `/paper-reader/api/pdf?${q}${variant ? '&variant=' + variant : ''}&t=${Date.now()}`;
+}
+
+async function openPaper(topic, name, opts = {}) {
+  if (!name) return;
+  current = { topic, name };
+  localStorage.setItem('dpr.last', JSON.stringify(current));
+  zhVariant = null;
+  $('zh-toggle').classList.remove('active');
+  $('status').textContent = '加载 PDF…';
+  const q = `topic=${encodeURIComponent(topic)}&name=${encodeURIComponent(name)}`;
+  const meta = await api('/paper?' + q);
+  $('status').textContent = meta.hasTranscript
+    ? `${name} · ${meta.pageCount ?? '?'} 页`
+    : `${name} · 未转录（提问时会自动转录）`;
+  await refreshZhState();
+  await loadPdf(pdfUrl(null));
+  if (opts.page) jumpToPage(opts.page);
+}
+
+/* ================= 中英切换 ================= */
+async function refreshZhState() {
+  zhState = await api(`/zh?topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`);
+  const btn = $('zh-toggle');
+  btn.style.display = '';
+  btn.disabled = zhState.busy;
+  btn.textContent = zhState.busy ? '译' : '中';
+  btn.title = zhState.busy ? '翻译进行中…'
+    : (zhState.zh || zhState.dual) ? '切换中文译文'
+    : '还没有中文版，点击生成（babeldoc，需要几分钟）';
+}
+
+$('zh-toggle').onclick = async () => {
+  if (!current || zhState.busy) return;
+  if (zhState.dual || zhState.zh) {
+    const order = [null, zhState.dual ? 'dual' : null, zhState.zh ? 'zh' : null].filter((v, i) => i === 0 || v !== null);
+    zhVariant = order[(order.indexOf(zhVariant) + 1) % order.length];
+    $('zh-toggle').classList.toggle('active', zhVariant !== null);
+    await loadPdf(pdfUrl(zhVariant));
+    return;
+  }
+  try {
+    await api('/zh/generate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(current) });
+    toast('开始生成中文版（babeldoc，约几分钟）…', 5000);
+  } catch (e) { toast(e.message, 8000); return; }
+  $('zh-toggle').disabled = true; $('zh-toggle').textContent = '译';
+  const timer = setInterval(async () => {
+    await refreshZhState();
+    if (!zhState.busy) {
+      clearInterval(timer);
+      if (zhState.dual || zhState.zh) { toast('中文版已生成'); $('zh-toggle').click(); }
+      else toast('生成失败：' + (zhState.error || '未知原因'), 8000);
+    }
+  }, 5000);
+};
+
+/* ================= PDF 渲染(pdf.js:缩放 + devicePixelRatio 高清,移植自 pdfqa) ================= */
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+let pdfDoc = null;
+let zoomScale = 1.5;
+let dpr = window.devicePixelRatio || 1;
+let renderToken = 0;
+
+(function watchDpr() {
+  const mq = matchMedia(`(resolution: ${dpr}dppx)`);
+  mq.addEventListener('change', function onChange() {
+    mq.removeEventListener('change', onChange);
+    dpr = window.devicePixelRatio || 1;
+    if (pdfDoc) renderAllPages();
+    watchDpr();
+  });
+})();
+
+async function loadPdf(url) {
+  pdfDoc = await pdfjsLib.getDocument(url).promise;
+  $('empty').style.display = 'none';
+  await renderAllPages();
+}
+
+async function renderAllPages() {
+  const token = ++renderToken;
+  const container = $('pdf-pages');
+  const pane = $('pdf-pane');
+  const oldPages = container.children;
+  let anchorRatio = 0;
+  if (oldPages.length) {
+    for (let i = 0; i < oldPages.length; i++) {
+      if (oldPages[i].getBoundingClientRect().bottom > pane.getBoundingClientRect().top) { anchorRatio = i / oldPages.length; break; }
+    }
+  }
+  container.innerHTML = '';
+  $('zoom-label').textContent = Math.round(zoomScale / 1.5 * 100) + '%';
+
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    if (token !== renderToken) return;
+    const page = await pdfDoc.getPage(i);
+    if (token !== renderToken) return;
+    const viewport = page.getViewport({ scale: zoomScale });
+    const div = document.createElement('div');
+    div.className = 'page';
+    div.dataset.page = i;
+    div.style.width = viewport.width + 'px';
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width * dpr);
+    canvas.height = Math.ceil(viewport.height * dpr);
+    canvas.style.width = viewport.width + 'px';
+    canvas.style.height = viewport.height + 'px';
+    div.appendChild(canvas);
+
+    const tl = document.createElement('div');
+    tl.className = 'textLayer';
+    tl.style.width = viewport.width + 'px';
+    tl.style.height = viewport.height + 'px';
+    tl.style.setProperty('--scale-factor', String(zoomScale));
+    div.appendChild(tl);
+    container.appendChild(div);
+
+    await page.render({
+      canvasContext: canvas.getContext('2d'),
+      viewport,
+      transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+    }).promise;
+    if (token !== renderToken) return;
+    const tc = await page.getTextContent();
+    if (token !== renderToken) return;
+    await pdfjsLib.renderTextLayer({ textContent: tc, container: tl, viewport, textDivs: [] }).promise;
+  }
+  pane.scrollTop = anchorRatio * pane.scrollHeight;
+}
+
+function setZoom(newScale) { zoomScale = Math.min(4.5, Math.max(0.6, newScale)); renderAllPages(); }
+let fitMode = false;
+const fitBtn = $('zoom-fit');
+function exitFitMode() { fitMode = false; fitBtn.classList.remove('active'); }
+function fitToWidth() {
+  const paneWidth = $('pdf-pane').clientWidth - 32;
+  pdfDoc.getPage(1).then((p) => setZoom(paneWidth / p.getViewport({ scale: 1 }).width));
+}
+$('zoom-in').onclick = () => { exitFitMode(); setZoom(zoomScale + 0.25); };
+$('zoom-out').onclick = () => { exitFitMode(); setZoom(zoomScale - 0.25); };
+fitBtn.onclick = () => { fitMode = true; fitBtn.classList.add('active'); fitBtn.blur(); fitToWidth(); };
+window.addEventListener('resize', () => { if (fitMode) fitToWidth(); });
+
+function jumpToPage(n) {
+  const div = document.querySelector(`.page[data-page="${n}"]`);
+  if (!div) return;
+  div.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  div.classList.add('flash');
+  setTimeout(() => div.classList.remove('flash'), 1600);
+}
+
+/* ================= 选中即问 ================= */
+const askPop = $('ask-pop');
+let askSelection = null;
+
+document.addEventListener('mouseup', (e) => {
+  if (askPop.contains(e.target)) return;
+  setTimeout(() => {
+    const sel = window.getSelection();
+    const text = sel ? sel.toString().trim() : '';
+    if (!text || !current) { askPop.style.display = 'none'; return; }
+    const node = sel.anchorNode && sel.anchorNode.parentElement;
+    if (!node || !node.closest('.textLayer')) { askPop.style.display = 'none'; return; }
+    const range = sel.getRangeAt(0).getBoundingClientRect();
+    askSelection = { text, page: +((node.closest('.page') || {}).dataset?.page || 0) || null };
+    $('ask-quote').textContent = text.length > 140 ? text.slice(0, 140) + '…' : text;
+    $('ask-input').value = '';
+    askPop.style.display = 'block';
+    // 夹在 iframe 视口内（rightbar 窄列里也要能用）
+    const popW = 336, popH = 190;
+    const x = Math.max(8, Math.min(e.clientX, window.innerWidth - popW - 8));
+    const y = Math.max(8, Math.min(range.bottom + 8, window.innerHeight - popH - 8));
+    askPop.style.left = x + 'px';
+    askPop.style.top = y + 'px';
+    $('ask-input').focus();
+  }, 10);
+});
+document.addEventListener('mousedown', (e) => { if (!askPop.contains(e.target)) askPop.style.display = 'none'; });
+$('ask-cancel').onclick = () => { askPop.style.display = 'none'; };
+
+$('ask-send').onclick = async () => {
+  const question = $('ask-input').value.trim();
+  if (!question || !askSelection || !current) return;
+  $('ask-send').disabled = true;
+  try {
+    // 会话序号由侧栏树激活时写入 localStorage（默认最新）
+    const key = `dpr.sessionN.${current.topic}/${current.name}`;
+    const n = +(localStorage.getItem(key) || 0) || undefined;
+    const r = await api('/ask', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...current, question, selectedText: askSelection.text, page: askSelection.page, ...(n ? { n } : {}) }),
+    });
+    askPop.style.display = 'none';
+    toast(`已发送到 会话${r.n}，回答见对话区`);
+  } catch (e) { toast('提问失败：' + e.message, 6000); }
+  $('ask-send').disabled = false;
+};
+$('ask-input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('ask-send').click(); } });
+
+/* ================= 启动：URL 参数 > localStorage > 第一篇 ================= */
+async function bootstrap() {
+  const params = new URLSearchParams(location.search);
+  const pTopic = params.get('topic'), pName = params.get('name');
+  const lib = await api('/library');
+  if (lib.topics.length === 0) {
+    $('empty').style.display = 'block';
+    $('empty').innerHTML = '文献库为空。<br>在左侧文献库树上传 PDF 或新建专题即可开始。';
+    return;
+  }
+  let target = null;
+  if (pTopic && pName && lib.papers.some((p) => p.topic === pTopic && p.name === pName)) target = { topic: pTopic, name: pName };
+  else {
+    const last = JSON.parse(localStorage.getItem('dpr.last') || 'null');
+    if (last && lib.papers.some((p) => p.topic === last.topic && p.name === last.name)) target = last;
+    else target = lib.papers[0];
+  }
+  if (target) await openPaper(target.topic, target.name);
+}
+bootstrap().catch((e) => {
+  $('empty').style.display = 'block';
+  $('empty').textContent = '文献库加载失败：' + e.message;
+});
+
+window.dpr = { openPaper: (topic, name, page) => openPaper(topic, name, { page }), jumpToPage };
+</script>
+</body>
+</html>
