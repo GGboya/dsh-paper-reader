@@ -87,10 +87,13 @@
 
 ## Phase 3 — 发布
 
-- [ ] `dsh.bundle` / `cordis.patch.yml` 打包配置
-- [ ] `dsh plugin --profile web add github:GGboya/dsh-paper-reader` 自测安装
+- [x] `dsh.bundle` / `cordis.patch.yml` 打包配置（`package.json` 的 `dsh.bundle.patch` → 仓库根 `cordis.patch.yml` 的 insert 条目）
+- [x] `dsh-plugin` topic 已生效（仓库 topics: dsh-plugin / deepseek-harness / paper-reader / pdf / agent）
+- [ ] **`dsh plugin --profile web add github:GGboya/dsh-paper-reader` 自测安装** ← 当前卡点
+  - `dist/` 在 .gitignore 里，git 安装拿不到构建产物，而 `main: ./dist/index.js` 指向它 → 装上也是坏的
+  - 两条路：① `"prepare": "tsc -p tsconfig.json"` ② 把 dist 从 .gitignore 移除并提交
+  - ⚠️ 走 ① 会被 pnpm 默认拦掉 git 依赖的 build script（需 allowBuilds 或在文档里写明），② 则是每次改代码要记得重新提交产物
 - [ ] README 补截图 / 演示 GIF
-- [ ] 确认 `dsh-plugin` topic 生效，可被 GitHub topic 页检索到
 - [ ] （可选）投稿到 awesome-deepseek-harness 类索引仓库
 
 ## 备忘
