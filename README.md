@@ -1,18 +1,20 @@
 # dsh-paper-reader
 
-[DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件：论文伴读工作台 —— PDF 转录 / 检索 / 问答 + 内置阅读器页面。
+[DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件：论文伴读工作台 —— PDF 转录 / 检索 + 原生对话伴读 + 内置阅读器。
 
-功能迁移自本地独立产品 pdfqa（Go 实现的论文伴读工具），agent 循环 / 模型层交给 dsh 框架，插件只做「转录 + 检索 + 存档 + 阅读器 UI」。
+功能迁移自本地独立产品 pdfqa（Go 实现的论文伴读工具）。原则：agent 循环 / 模型层 / 会话持久化全部交给 dsh 框架，插件只做「转录 + 检索 + 阅读器 UI」的薄壳组合。
 
 ## 功能
 
-- 📄 **PDF 转录**：本地提取（python3 + PyMuPDF）优先，页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
-- 🔍 **`search_paper` 工具**：长文档分段检索，返回带页码的原文片段
-- 📖 **内置阅读器页面**：dsh Web UI 侧栏一键进入；PDF.js 缩放 / Retina 高清 / 文本层选择
-- 💬 **选中即问**：选中文字 → 弹出提问框 → 注入该文献的专属伴读会话（每篇文献一个 dsh 会话，重启可续）
-- 💾 **问答存档**：每轮问答自动追加为 Markdown（`<文献>-qa/<会话>.md`），阅读器侧栏实时展示
-- 📍 **引用定位**：存档回答里的「第 N 页」可点击，平滑跳回 PDF 对应页
-- 📚 **专题 × 文献管理**：`<dataDir>/<专题>/<文献>.pdf` 两级布局，兼容 pdfqa 文献库
+- 📚 **侧栏文献库树**：接管工作区侧栏，专题 → 论文两级；支持新建专题、上传 PDF
+- 💬 **原生对话伴读**：点击论文即在右侧打开它的 dsh 原生会话（流式 / 工具卡 / 用量条全是官方 UI）；默认只呈现当前对话，对话列头部的 🕐 下拉回看**历史对话**（真实标题+日期，点哪条进哪条），＋ 新建对话
+- 🔗 **会话绑定论文**：会话 id 编码文献身份，工具调用自动定位当前论文——直接在输入框提问无需点名论文，回答必带页码
+- 🤖 **专用 agent preset「论文伴读」**：paper 会话自动使用专用 preset —— 像老师一样带读：制定分步阅读计划（每步带页码和思考题）→ 逐节指导、点评 → 出题检验、逐题批改 → 成绩与薄弱点记入 `<文献>.study.json` 学习档案，跨会话累积；快速问答（选中即问）则直接回答，不上课
+- 📖 **PDF 阅读器居中**：中间是论文（PDF.js 缩放 / Retina 高清 / 文本层选择 / 适宽模式），最右是该论文的原生对话 —— 视觉换位实现，列宽拖拽/折叠仍是 dsh 原生行为，关掉 PDF 页签即还原官方布局
+- 💬 **选中即问**：阅读器里选中文字 → 弹出提问框 → 注入当前会话，原生对话区实时回答
+- 📍 **引用定位**：回答里的「第 N 页」可点击，平滑跳回 PDF 对应页并闪烁
+- 🀄 **中英切换**：顶栏「中」按钮原文 ↔ 纯中文切换；无译文时一键后台生成（babeldoc），生成需配置 `translate` 端点
+- 🔍 **PDF 转录 + 检索**：本地提取（python3 + PyMuPDF），页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
 
 ## 安装（待发布）
 
@@ -25,7 +27,7 @@ dsh plugin --profile web add github:GGboya/dsh-paper-reader
 ```bash
 pnpm install && pnpm run build
 dsh plugin --profile web add ./dsh-paper-reader   # 从父目录执行
-dsh --profile web                                  # 侧栏出现「Paper Reader」入口
+dsh --profile web                                  # 侧栏变为文献库树
 ```
 
 文献库目录默认 `~/.dsh-paper-reader/data`；在 profile 的 `cordis.patch.yml` 里可改：
@@ -34,21 +36,36 @@ dsh --profile web                                  # 侧栏出现「Paper Reader
 - id: dsh-paper-reader
   config:
     dataDir: /path/to/pdfqa/data   # 直接指向 pdfqa 文献库即可复用全部缓存
+    # translate:                    # 可选：生成中文版（babeldoc）用的 OpenAI 兼容端点。
+    #   baseUrl: https://api.deepseek.com/v1   # 一般不用写在这里——阅读器里点「中」
+    #   apiKey: sk-...                          # 或右上角 ⚙ 可直接填，存到
+    #   model: deepseek-chat                    # ~/.dsh/.dsh-paper-reader/translate.json（0600）
 ```
+
+> 中文版端点：**优先在阅读器 UI 里填**（点「中」→ 没配会自动弹表单，或点 ⚙）——填完会先测连接再落盘，不用重启。
+> 上面的 `translate` 配置退为**部署方默认值**，仅当 UI 未配置时生效。babeldoc 只支持 OpenAI 协议端点，
+> Anthropic 协议的端点（如 `api.kimi.com/coding/`）不能直连。
+
+⚠️ 本插件按「论文伴读专用 profile」设计：侧栏的 `sidebar.workspaces` 被文献库树接管，官方工作区/会话列表在该 profile 侧栏不可见（从 `cordis.patch.yml` 删掉本插件即恢复）。
 
 ## 架构
 
 ```
 src/
-  index.ts      Cordis 壳：inject tools；webServer 出现时挂路由
-  tools.ts      4 个 agent 工具：list_papers / transcribe_pdf / search_paper / archive_qa
-  host.ts       webServer 路由（/paper-reader/*），connection.requestRejection 鉴权
+  index.ts      Cordis 壳：inject tools；webServer 等服务就绪后挂路由
+  tools.ts      5 个 agent 工具：list_papers / transcribe_pdf / search_paper / study_progress / study_update
+  host.ts       webServer 路由（/paper-reader/*），connection.requestRejection 鉴权；
+                sessionController.create/prompt（agentPreset=paper-reader）+ follow SSE 桥
   library.ts    纯函数：文献库目录约定与解析
   transcribe.ts 纯函数：PyMuPDF 提取 + 页码偏移表（视觉兜底后置）
   search.ts     纯函数：分段 + 关键词打分 + 页码映射
-  archive.ts    纯函数：问答 Markdown 追加存档
-reader/index.html  阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）
-lib/client.js      浏览器半边：main 面板 + sidebar.panellist 入口
+  study.ts      纯函数：学习档案（计划 + 检验成绩）读写
+  translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）
+  translate-config.ts 纯函数：翻译端点配置读写（$DSH_HOME 下 0600）+ 保存前连接预检
+  preset.ts     纯函数：自带 agent preset 安装到 $DSH_HOME/.agent-presets/
+presets/paper-reader/  「论文伴读」agent preset（persona 完整提示词 + compaction）
+reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）
+lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管) + PDF 页签 + 主面板
 ```
 
 ## License

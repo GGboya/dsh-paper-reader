@@ -18,19 +18,23 @@
   /* ---------- 顶栏 ---------- */
   #bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex: none; }
   #bar button { font: inherit; }
-  .tbtn { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
+  /* flex:none —— 列被拖窄时按钮不许被压缩（否则文字竖排、按钮变窄条） */
+  .tbtn { flex: none; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
   .tbtn:hover { background: var(--bg); }
   .tbtn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .tbtn:disabled { opacity: .45; cursor: default; }
   #zh-toggle { font-weight: 700; }
-  #zoom-label { min-width: 44px; text-align: center; color: var(--text-2); }
+  #zoom-label { flex: none; min-width: 44px; text-align: center; color: var(--text-2); }
   #bar .spacer { flex: 1; }
-  #status { color: var(--text-2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* min-width:0 —— flex 项默认 min-width:auto 会拒绝收缩，空间不够时转而去挤按钮；
+     让标题自己截断（已有 ellipsis），按钮才能保持原样 */
+  #status { min-width: 0; color: var(--text-2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* ---------- PDF 区 ---------- */
   #main { display: flex; flex: 1; min-height: 0; }
   #pdf-pane { flex: 1; overflow: auto; padding: 16px; }
-  #pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  /* safe center：页宽超过视口时退回左对齐——普通 center 会让左右同时溢出且左侧滚不到 */
+  #pdf-pages { display: flex; flex-direction: column; align-items: safe center; gap: 14px; }
   .page { position: relative; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
   .page.flash { outline: 3px solid var(--hl); outline-offset: 2px; transition: outline .15s; }
   .textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; }
@@ -47,6 +51,18 @@
   #ask-send:disabled { opacity: .5; cursor: default; }
   #ask-cancel { background: none; border: none; color: var(--text-2); cursor: pointer; }
 
+  /* ---------- 翻译端点设置浮层 ---------- */
+  /* 阅读器在窄 iframe 里，宽度要能收缩 */
+  #cfg-pop { position: fixed; z-index: 60; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: min(320px, calc(100vw - 32px)); }
+  #cfg-pop h3 { margin: 0; font-size: 13px; }
+  #cfg-hint { font-size: 12px; color: var(--text-2); margin: 4px 0 2px; }
+  #cfg-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 2px; }
+  #cfg-pop input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; }
+  #cfg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+  #cfg-save { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; }
+  #cfg-save:disabled { opacity: .5; cursor: default; }
+  #cfg-cancel { background: none; border: none; color: var(--text-2); cursor: pointer; }
+
   #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: rgba(30,30,30,.92); color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; display: none; z-index: 99; max-width: 70%; }
 </style>
 </head>
@@ -56,6 +72,7 @@
   <span id="status">论文伴读</span>
   <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none">中</button>
   <span class="spacer"></span>
+  <button id="cfg-open" class="tbtn" title="翻译端点设置">⚙</button>
   <button id="zoom-out" class="tbtn">−</button>
   <span id="zoom-label">100%</span>
   <button id="zoom-in" class="tbtn">＋</button>
@@ -78,6 +95,21 @@
   </div>
 </div>
 
+<div id="cfg-pop">
+  <h3>翻译端点</h3>
+  <div id="cfg-hint">填 OpenAI 兼容端点即可（DeepSeek / 通义 / 本地 vLLM 等）。保存前会先测试连接。</div>
+  <label for="cfg-url">端点 URL</label>
+  <input id="cfg-url" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off">
+  <label for="cfg-key">API Key</label>
+  <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="new-password">
+  <label for="cfg-model">模型</label>
+  <input id="cfg-model" type="text" placeholder="deepseek-chat" autocomplete="off">
+  <div id="cfg-actions">
+    <button id="cfg-cancel">取消</button>
+    <button id="cfg-save">保存</button>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -85,7 +117,14 @@
 /* ================= 基础 ================= */
 const $ = (id) => document.getElementById(id);
 const api = (p, opts) => fetch('/paper-reader/api' + p, opts).then(async (r) => {
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || ('HTTP ' + r.status));
+  if (!r.ok) {
+    // 服务端错误体有两种：{error}（参数/权限）与 {reason}（zh/generate 的未启动原因，带完整说明）
+    const body = await r.json().catch(() => ({}));
+    const err = new Error(body.error || body.reason || ('HTTP ' + r.status));
+    err.code = body.code;   // 机器可读码（如 no-endpoint）——让调用方靠它分支，别去匹配中文文案
+    err.status = r.status;
+    throw err;
+  }
   return r.json();
 });
 function toast(msg, ms = 3200) {
@@ -136,16 +175,22 @@ async function refreshZhState() {
 $('zh-toggle').onclick = async () => {
   if (!current || zhState.busy) return;
   if (zhState.dual || zhState.zh) {
-    const order = [null, zhState.dual ? 'dual' : null, zhState.zh ? 'zh' : null].filter((v, i) => i === 0 || v !== null);
-    zhVariant = order[(order.indexOf(zhVariant) + 1) % order.length];
+    // 两态切换：原文 ↔ 纯中文；只存在对照版时退到对照
+    zhVariant = zhVariant === null ? (zhState.zh ? 'zh' : 'dual') : null;
     $('zh-toggle').classList.toggle('active', zhVariant !== null);
+    // 切换变体后强制适宽：译文版页宽与原文不同（对照双栏≈2×），不重算会溢出裁切
+    fitMode = true; fitBtn.classList.add('active');
     await loadPdf(pdfUrl(zhVariant));
     return;
   }
   try {
     await api('/zh/generate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(current) });
     toast('开始生成中文版（babeldoc，约几分钟）…', 5000);
-  } catch (e) { toast(e.message, 8000); return; }
+  } catch (e) {
+    // 没配端点 → 直接弹配置表单；填好保存后自动回来重试生成
+    if (e.code === 'no-endpoint') { openCfgPop(true); return; }
+    toast(e.message, 8000); return;
+  }
   $('zh-toggle').disabled = true; $('zh-toggle').textContent = '译';
   const timer = setInterval(async () => {
     await refreshZhState();
@@ -155,6 +200,59 @@ $('zh-toggle').onclick = async () => {
       else toast('生成失败：' + (zhState.error || '未知原因'), 8000);
     }
   }, 5000);
+};
+
+/* ================= 翻译端点设置 ================= */
+// 保存成功后是否自动接着生成：点「中」发现没配 → 弹本表单 → 填完直接开跑
+let cfgRetryGenerate = false;
+
+async function openCfgPop(retryGenerate) {
+  cfgRetryGenerate = Boolean(retryGenerate);
+  let cfg;
+  try {
+    cfg = await api('/translate/config');
+  } catch (e) { toast('读取配置失败：' + e.message, 8000); return; }
+  $('cfg-url').value = cfg.baseUrl || '';
+  $('cfg-model').value = cfg.model || '';
+  // 明文 key 不回传：留空 = 沿用已存的那把
+  $('cfg-key').value = '';
+  $('cfg-key').placeholder = cfg.hasApiKey ? `已保存（${cfg.apiKeyHint}），留空则不修改` : 'sk-...';
+  const pop = $('cfg-pop');
+  pop.style.display = 'block';
+  // 先显示再量尺寸（不像 #ask-pop 那样写死尺寸常量，免得跟 CSS 漂移）
+  pop.style.left = Math.max(8, (window.innerWidth - pop.offsetWidth) / 2) + 'px';
+  pop.style.top = Math.max(8, (window.innerHeight - pop.offsetHeight) / 3) + 'px';
+  $('cfg-url').focus();
+}
+function closeCfgPop() { $('cfg-pop').style.display = 'none'; cfgRetryGenerate = false; }
+
+$('cfg-open').onclick = () => openCfgPop(false);
+$('cfg-cancel').onclick = closeCfgPop;
+
+$('cfg-save').onclick = async () => {
+  const btn = $('cfg-save'), label = btn.textContent, retry = cfgRetryGenerate;
+  btn.disabled = true; btn.textContent = '测试中…';
+  try {
+    // 服务端先打一发极小的 chat/completions 验证 url/key/model，通过才落盘
+    await api('/translate/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        baseUrl: $('cfg-url').value.trim(),
+        apiKey: $('cfg-key').value.trim(),
+        model: $('cfg-model').value.trim(),
+      }),
+    });
+  } catch (e) {
+    toast('保存失败：' + e.message, 8000);
+    return;
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+  closeCfgPop();
+  await refreshZhState();
+  if (retry) $('zh-toggle').click();  // 复用「中」的生成逻辑（含它自己的 toast）
+  else toast('翻译端点已保存');
 };
 
 /* ================= PDF 渲染(pdf.js:缩放 + devicePixelRatio 高清,移植自 pdfqa) ================= */
@@ -178,6 +276,7 @@ let renderToken = 0;
 async function loadPdf(url) {
   pdfDoc = await pdfjsLib.getDocument(url).promise;
   $('empty').style.display = 'none';
+  if (fitMode) { fitToWidth(); return; } // fitToWidth 内部 setZoom → renderAllPages
   await renderAllPages();
 }
 
@@ -185,13 +284,10 @@ async function renderAllPages() {
   const token = ++renderToken;
   const container = $('pdf-pages');
   const pane = $('pdf-pane');
-  const oldPages = container.children;
-  let anchorRatio = 0;
-  if (oldPages.length) {
-    for (let i = 0; i < oldPages.length; i++) {
-      if (oldPages[i].getBoundingClientRect().bottom > pane.getBoundingClientRect().top) { anchorRatio = i / oldPages.length; break; }
-    }
-  }
+  if (pane.clientHeight === 0) return; // 悬浮层隐藏期间不重渲（否则锚点恢复会把滚动清零）
+  // 滚动比例锚点：不用 DOM rect（并发重渲时旧页可能已被清空，rect 全灭 → 锚点归零）
+  const range = pane.scrollHeight - pane.clientHeight;
+  const anchorRatio = range > 0 ? pane.scrollTop / range : 0;
   container.innerHTML = '';
   $('zoom-label').textContent = Math.round(zoomScale / 1.5 * 100) + '%';
 
@@ -230,20 +326,25 @@ async function renderAllPages() {
     if (token !== renderToken) return;
     await pdfjsLib.renderTextLayer({ textContent: tc, container: tl, viewport, textDivs: [] }).promise;
   }
-  pane.scrollTop = anchorRatio * pane.scrollHeight;
+  const newRange = pane.scrollHeight - pane.clientHeight;
+  pane.scrollTop = anchorRatio * Math.max(0, newRange);
 }
 
-function setZoom(newScale) { zoomScale = Math.min(4.5, Math.max(0.6, newScale)); renderAllPages(); }
-let fitMode = false;
+function setZoom(newScale) { if (!pdfDoc) return; zoomScale = Math.min(4.5, Math.max(0.6, newScale)); renderAllPages(); }
+// 默认适宽：rightbar 窄列里 1.5 倍缩放会把页面撑出视口（中英对照双栏页宽≈2×，更明显）
+let fitMode = true;
 const fitBtn = $('zoom-fit');
+fitBtn.classList.add('active');
 function exitFitMode() { fitMode = false; fitBtn.classList.remove('active'); }
 function fitToWidth() {
-  const paneWidth = $('pdf-pane').clientWidth - 32;
-  pdfDoc.getPage(1).then((p) => setZoom(paneWidth / p.getViewport({ scale: 1 }).width));
+  if (!pdfDoc) return // resize 可能先于首次 loadPdf 触发（布局换位/条带注入会改容器尺寸）
+  const paneWidth = $('pdf-pane').clientWidth - 32
+  if (paneWidth <= 0) return // 隐藏期间尺寸为 0，算出的缩放无意义
+  pdfDoc.getPage(1).then((p) => setZoom(paneWidth / p.getViewport({ scale: 1 }).width))
 }
 $('zoom-in').onclick = () => { exitFitMode(); setZoom(zoomScale + 0.25); };
 $('zoom-out').onclick = () => { exitFitMode(); setZoom(zoomScale - 0.25); };
-fitBtn.onclick = () => { fitMode = true; fitBtn.classList.add('active'); fitBtn.blur(); fitToWidth(); };
+fitBtn.onclick = () => { if (!pdfDoc) return; fitMode = true; fitBtn.classList.add('active'); fitBtn.blur(); fitToWidth(); };
 window.addEventListener('resize', () => { if (fitMode) fitToWidth(); });
 
 function jumpToPage(n) {

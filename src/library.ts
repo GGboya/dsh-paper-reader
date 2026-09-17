@@ -4,8 +4,8 @@
 //   <dataDir>/<专题>/<文献>.pdf          原始 PDF
 //   <dataDir>/<专题>/<文献>.txt          转录缓存（清洗后的全文文本）
 //   <dataDir>/<专题>/<文献>.pages.json   页码偏移表（转录时生成，检索映射页码用）
-//   <dataDir>/<专题>/<文献>-qa/<会话>.md 问答存档
 // pdf2zh 的产物（-en / -zh / -dual）不算用户文献。
+// （问答不落盘存档——会话持久化交给 dsh 自己；pdfqa 时代的 -qa/ 目录不再读写。）
 
 import { readdirSync, existsSync, mkdirSync, statSync } from 'node:fs'
 import { join, resolve, extname, basename } from 'node:path'
@@ -22,8 +22,6 @@ export interface PaperRef {
   txtPath: string
   /** 页码偏移表路径 */
   pagesPath: string
-  /** 问答存档目录 */
-  qaDir: string
 }
 
 const PDF2ZH_SUFFIXES = ['-en', '-zh', '-dual']
@@ -33,6 +31,12 @@ export function isPaperPDF(filename: string): boolean {
   if (!filename.toLowerCase().endsWith('.pdf')) return false
   const stem = filename.slice(0, -extname(filename).length)
   return !PDF2ZH_SUFFIXES.some((s) => stem.endsWith(s))
+}
+
+/** dsh home：$DSH_HOME > ~/.dsh（与 dsh-home-paths 的解析顺序一致）。 */
+export function dshHome(env: NodeJS.ProcessEnv = process.env): string {
+  const fromEnv = env.DSH_HOME?.trim()
+  return fromEnv || join(homedir(), '.dsh')
 }
 
 /** 解析数据目录：显式配置 > 环境变量 > 默认 ~/.dsh-paper-reader/data */
@@ -76,7 +80,6 @@ function refFor(topic: string, name: string, pdfPath: string): PaperRef {
     pdfPath,
     txtPath: base + '.txt',
     pagesPath: base + '.pages.json',
-    qaDir: base + '-qa',
   }
 }
 

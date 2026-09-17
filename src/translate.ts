@@ -76,7 +76,7 @@ export async function startTranslation(
   ref: PaperRef,
   dataDir: string,
   endpoint: TranslateEndpoint,
-): Promise<{ started: boolean; reason?: string }> {
+): Promise<{ started: boolean; reason?: string; code?: string }> {
   const st = zhStatus(ref)
   if (st.zh || st.dual) return { started: false, reason: 'already-exists' }
   if (st.busy) return { started: false, reason: 'busy' }
@@ -84,7 +84,12 @@ export async function startTranslation(
   const bin = await findBabeldoc(dataDir)
   if (!bin) return { started: false, reason: '未找到 babeldoc（pip install babeldoc，或复用 pdfqa 的 .venv-pdf2zh）' }
   if (!endpoint.baseUrl || !endpoint.apiKey || !endpoint.model) {
-    return { started: false, reason: '未配置翻译端点：在 profile cordis.patch.yml 给 dsh-paper-reader 配 translate.{baseUrl,apiKey,model}（OpenAI 兼容，DeepSeek 官方 API 即可）' }
+    // code 供前端判定「该弹配置表单了」，别让它去匹配中文文案
+    return {
+      started: false,
+      code: 'no-endpoint',
+      reason: '未配置翻译端点：在阅读器里点「中」按钮填写（OpenAI 兼容端点即可），或改 profile 的 translate 配置',
+    }
   }
 
   const tmpDir = join(dataDir, '.pdf2zh-tmp')

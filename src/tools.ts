@@ -1,11 +1,11 @@
-// tools.ts — 工具注册（Cordis 壳；核心逻辑在 library/transcribe/search/archive 纯函数里）。
+// tools.ts — 工具注册（Cordis 壳；核心逻辑在 library/transcribe/search 纯函数里）。
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { listPapers, listTopics, resolveDataDir, resolvePaper, type PaperRef } from './library.ts'
 import { transcribePaper, readTranscript } from './transcribe.ts'
 import { chunkText, searchChunks, formatHits } from './search.ts'
-import { appendQa } from './archive.ts'
+import { completeStep, formatStudy, readStudy, recordQuiz, setPlan } from './study.ts'
 
 export interface PluginConfig {
   /** 文献库数据目录；默认 ~/.dsh-paper-reader/data */
@@ -28,15 +28,35 @@ interface LocateArgs {
 const locateParams = {
   path: { type: 'string', description: 'PDF 绝对路径。与 topic+name 二选一。' },
   topic: { type: 'string', description: '专题名（文献库一级目录）。' },
-  name: { type: 'string', description: '文献名（不带 .pdf 后缀），在文献库中查找。' },
+  name: { type: 'string', description: '文献名（不带 .pdf 后缀）。省略时自动使用当前会话绑定的论文（伴读会话），只有查询别的论文才需要显式指定。' },
 } as const
 
-function locate(dataDir: string, args: LocateArgs): PaperRef {
+function locate(dataDir: string, args: LocateArgs, exec?: { agent?: { id?: string } }): PaperRef {
   const refArgs: { path?: string; topic?: string; name?: string } = {}
   if (args.path) refArgs.path = args.path
   if (args.topic) refArgs.topic = args.topic
   if (args.name) refArgs.name = args.name
+  // 未指定论文时回退到「当前会话绑定的论文」：伴读会话 id 形如 dpr-<base64url(topic/name)>-N，
+  // 工具执行上下文里的 agent.id 就是会话 id。直接在输入框提问（不经选中即问）时靠它定位。
+  if (!refArgs.path && !refArgs.name) {
+    const paper = paperFromSessionId(exec?.agent?.id)
+    if (paper) return resolvePaper(dataDir, { topic: paper.topic, name: paper.name })
+  }
   return resolvePaper(dataDir, refArgs)
+}
+
+/** 从伴读会话 id 反解论文（dpr-<base64url(topic/name)>[-N]）；非伴读会话返回 null。 */
+export function paperFromSessionId(sessionId: string | undefined): { topic: string; name: string } | null {
+  if (!sessionId?.startsWith('dpr-')) return null
+  try {
+    const body = sessionId.slice(4).replace(/-\d+$/, '')
+    const decoded = Buffer.from(body, 'base64url').toString('utf8')
+    const sep = decoded.indexOf('/')
+    if (sep <= 0 || sep === decoded.length - 1) return null
+    return { topic: decoded.slice(0, sep), name: decoded.slice(sep + 1) }
+  } catch {
+    return null
+  }
 }
 
 export function registerTools(ctx: Context, config: PluginConfig) {
@@ -78,7 +98,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         },
       ],
     },
-    execute: async (args) => {
+    execute: async (args, exec) => {
       const papers = listPapers(dataDir, args.topic).map((p) => `${p.topic}/${p.name}`)
       return { dataDir, topics: listTopics(dataDir), papers }
     },
@@ -116,8 +136,8 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         },
       ],
     },
-    execute: async (args) => {
-      const ref = locate(dataDir, args)
+    execute: async (args, exec) => {
+      const ref = locate(dataDir, args, exec)
       const t = await transcribePaper(ref, { force: args.force === true })
       return {
         paper: `${ref.topic}/${ref.name}`,
@@ -184,8 +204,8 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         },
       ],
     },
-    execute: async (args) => {
-      const ref = locate(dataDir, args)
+    execute: async (args, exec) => {
+      const ref = locate(dataDir, args, exec)
       let cached = await readTranscript(ref)
       if (!cached) {
         await transcribePaper(ref)
@@ -205,41 +225,111 @@ export function registerTools(ctx: Context, config: PluginConfig) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'archive_qa',
+    name: 'study_progress',
     description:
-      '把一轮关于论文的问答追加存档为 Markdown（<文献>-qa/<会话>.md），永久留存。' +
-      '仅当回答涉及论文内容（引用了论文的观点、数据、章节，通常带页码）时才调用本工具，pages 填引用到的页码。' +
-      '寒暄（你好/谢谢）、元问题（你是谁/你的系统提示词）、与论文无关的问答一律不要调用，否则存档会被垃圾内容污染。' +
-      '同一会话里连续多轮关于论文的问答，每轮存档一次。',
-    parameters: {
-      question: { type: 'string', required: true, description: '用户的问题。' },
-      answer: { type: 'string', required: true, description: '你的回答全文。' },
-      pages: {
-        type: 'array',
-        items: { type: 'integer' },
-        description: '回答引用到的页码列表。',
+      '读取一篇论文的学习档案：分步阅读计划（每步状态）和历次检验成绩。' +
+      '开始伴读、或用户想继续学习/查看进度时先调用；没有记录时返回空，此时应制定计划（study_update 的 set_plan）。',
+    parameters: { ...locateParams },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          paper: { type: 'string', required: true },
+          hasRecord: { type: 'boolean', required: true },
+          plan: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'integer', required: true },
+                title: { type: 'string', required: true },
+                status: { type: 'string', required: true, enum: ['pending', 'current', 'done'] },
+                note: { type: 'string' },
+              },
+              additionalProperties: false,
+            },
+          },
+          quizzes: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              properties: {
+                time: { type: 'string', required: true },
+                score: { type: 'integer', required: true },
+                total: { type: 'integer', required: true },
+                summary: { type: 'string' },
+              },
+              additionalProperties: false,
+            },
+          },
+        },
+        additionalProperties: false,
       },
-      session: { type: 'string', description: '会话名，默认 "会话1"。' },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: `《${value.paper}》学习档案：\n` + formatStudy(
+            value.hasRecord ? { paper: value.paper, plan: value.plan, quizzes: value.quizzes } : null,
+          ),
+        },
+      ],
+    },
+    execute: async (args, exec) => {
+      const ref = locate(dataDir, args, exec)
+      const record = await readStudy(ref)
+      return {
+        paper: `${ref.topic}/${ref.name}`,
+        hasRecord: record !== null,
+        plan: record?.plan ?? [],
+        quizzes: record?.quizzes ?? [],
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'study_update',
+    description:
+      '更新一篇论文的学习档案（老师用）：' +
+      'set_plan=制定阅读计划（steps 为 3~6 个分步标题，会重置计划但保留历史成绩）；' +
+      'complete_step=学生完成某一步（step_id + 可选 note 点评，自动推进到下一步）；' +
+      'record_quiz=记录一次检验成绩（score/total + 可选 summary 薄弱点小结）。',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['set_plan', 'complete_step', 'record_quiz'] },
+      steps: { type: 'array', items: { type: 'string' }, description: 'set_plan 用：分步标题列表，如 "读摘要与引言（第 1 页），说出论文要解决的问题"。' },
+      step_id: { type: 'integer', description: 'complete_step 用：完成的步骤号。' },
+      note: { type: 'string', description: 'complete_step 用：对学生这一步表现的点评。' },
+      score: { type: 'integer', description: 'record_quiz 用：得分。' },
+      total: { type: 'integer', description: 'record_quiz 用：满分。' },
+      summary: { type: 'string', description: 'record_quiz 用：本次检验小结（考点/薄弱点）。' },
       ...locateParams,
     },
     output: {
       schema: {
         type: 'object',
         properties: {
-          file: { type: 'string', required: true, description: '存档文件路径。' },
+          paper: { type: 'string', required: true },
+          summary: { type: 'string', required: true, description: '更新后的档案摘要。' },
         },
         additionalProperties: false,
       },
-      render: (_args, value) => [{ type: 'text', text: `已存档到 ${value.file}` }],
+      render: (_args, value) => [{ type: 'text', text: `《${value.paper}》档案已更新：\n${value.summary}` }],
     },
-    execute: async (args) => {
-      const ref = locate(dataDir, args)
-      const file = await appendQa(ref, args.session ?? '会话1', {
-        question: args.question,
-        answer: args.answer,
-        ...(args.pages ? { pages: args.pages } : {}),
-      })
-      return { file }
+    execute: async (args, exec) => {
+      const ref = locate(dataDir, args, exec)
+      let record
+      if (args.action === 'set_plan') {
+        if (!args.steps?.length) throw new Error('set_plan 需要 steps')
+        record = await setPlan(ref, args.steps)
+      } else if (args.action === 'complete_step') {
+        if (!args.step_id) throw new Error('complete_step 需要 step_id')
+        record = await completeStep(ref, args.step_id, args.note)
+      } else {
+        if (args.score === undefined || args.total === undefined) throw new Error('record_quiz 需要 score 和 total')
+        record = await recordQuiz(ref, args.score, args.total, args.summary)
+      }
+      return { paper: `${ref.topic}/${ref.name}`, summary: formatStudy(record) }
     },
   }))
 }

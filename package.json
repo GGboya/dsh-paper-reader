@@ -14,6 +14,7 @@
     "dist",
     "lib",
     "reader",
+    "presets",
     "cordis.patch.yml"
   ],
   "dsh": {
