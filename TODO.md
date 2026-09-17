@@ -83,7 +83,9 @@
 - ✅ **侧栏收起成 rail**（2026-09-17 用户反馈"显然不符合预期"）：`sidebar.workspaces` 槽传 `{wide, expandSidebar}`，官方 WorkspaceBrowser 在 `!wide` 时渲染图标入口并调 `expandSidebar()`；本插件注册方把槽 props 整个丢了 → 全宽树被塞进 56px 挤成竖排文字。改为 `wide === false` 时渲染 📚 图标按钮（用 `=== false` 而非 `!wide`：宿主没传该 prop 时按展开态走 = 改动前行为）。ReaderOverlay/SessionActions 始终挂载——阅读器和对话头部浮动按钮不属于侧栏，收起时不能跟着消失
 - ✅ **拖会话栏导致阅读器右移变窄**（2026-09-17 用户反馈"pdf 就乱了"，CDP 拖拽实测定位）：dsh 把右栏面板内联宽度写成 `cols.rightbar` 且锚在列右缘；换位后 col 落在 `1fr` 轨（拖动时常比配置宽度**宽**）→ 面板不撑满就缩在列右半边，锚点跟着跑（实测 iframe x=800 w=300，而列是 280..1100）。补 `minWidth:100%`——⚠️ 不碰 `width`：dsh 每次会话提交都重写内联 width，抢同一属性会持续闪烁（值守卫那套同理）。与既有 `maxWidth:100%` 合起来，面板宽度恒等于轨宽（宽则撑满、窄则钳制，两个方向都实测）
 - ✅ 阅读器工具栏窄列被压扁（「适宽」变竖排）：`#status` 缺 `min-width:0`，flex 项默认 `min-width:auto` 拒绝收缩 → 浏览器转而压旁边的按钮。改让标题自己截断（它本就有 ellipsis）+ 按钮 `flex:none`
-- Phase 3 待续：README 截图 / 演示 GIF、（可选）投稿 awesome-deepseek-harness 类索引仓库
+- ✅ **论文伴读模式开关（2026-09-18 用户决策「不要一装就覆盖人家」）**：sidebar.workspaces 从常驻接管改为**按需注册**——默认不注册（官方侧栏原样），sidebar.footer.action（list slot，侧栏底部常驻）放「📚 论文伴读」开关行，点击注册/再点注销，localStorage `dpr.mode` 记忆。两个配套迁移：① ReaderOverlay/SessionActions 从 LibraryTree 挪到 shell.overlay 常驻注册（官方钦定的整页浮层自留地，list slot）——退出模式时已打开的 PDF 页签/伴读会话照常活着 ② LibrarySection 移到模块级 applyPaperMode() 里注册/注销。坑：list slot 注册要 `options.id` 不是 `key`（报 "list slot requires options.id"，shell.overlay / footer.action 都踩了；sidebar.right.pane.tab 用 key 是历史兼容）。CDP 四态实测：默认官方+开关行 → 点开树现 → 开论文 anchor 在 → 再点官方还原且 anchor 仍在
+- ✅ README 截图（CDP headless Chrome 实拍）：docs/screenshot-default.png（默认安装=官方侧栏+开关行）、docs/screenshot-reading.png（伴读模式三栏全景）；README 用 GitHub raw 绝对 URL 引用（npm 页面也能显示）。演示 GIF 待做
+- Phase 3 待续：（可选）演示 GIF、（可选）投稿 awesome-deepseek-harness 类索引仓库
 
 ## Phase 3 — 发布
 
@@ -94,7 +96,7 @@
   - ⚠️ 裸名 `dsh-paper-reader` 在 npm 已被占用（rantz 的另一个「精读报告」插件）→ 走 `@ggboy123` 作用域；loader 条目 id 保持 `dsh-paper-reader` 不变（与包名解耦），用户 profile 里的 `- id:` 配置定位不受影响
   - 发布流程备忘：新账号发布被 403 强制要求 2FA → npm 网页开 2FA 后 `npm publish --access public` 走浏览器验证；**PUT 200 后 registry/unpkg/jsDelivr 全 404 约半小时**（新账号首发同步延迟，属正常，别重复发布）；每次发版前 `npm version patch/minor`
   - 本地两个 profile（web/headless）的 link: 依赖与 bundles 已同步改为 `@ggboy123/dsh-paper-reader`
-- [ ] README 补截图 / 演示 GIF
+- [x] README 补截图（CDP 实拍两张：默认态 + 伴读模式全景）；演示 GIF 仍可选
 - [ ] （可选）投稿到 awesome-deepseek-harness 类索引仓库
 
 ## 备忘
