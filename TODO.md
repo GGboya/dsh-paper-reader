@@ -90,9 +90,11 @@
 - [x] `dsh.bundle` / `cordis.patch.yml` 打包配置（`package.json` 的 `dsh.bundle.patch` → 仓库根 `cordis.patch.yml` 的 insert 条目）
 - [x] `dsh-plugin` topic 已生效（仓库 topics: dsh-plugin / deepseek-harness / paper-reader / pdf / agent）
 - [ ] **`dsh plugin --profile web add github:GGboya/dsh-paper-reader` 自测安装** ← 当前卡点
-  - `dist/` 在 .gitignore 里，git 安装拿不到构建产物，而 `main: ./dist/index.js` 指向它 → 装上也是坏的
-  - 两条路：① `"prepare": "tsc -p tsconfig.json"` ② 把 dist 从 .gitignore 移除并提交
-  - ⚠️ 走 ① 会被 pnpm 默认拦掉 git 依赖的 build script（需 allowBuilds 或在文档里写明），② 则是每次改代码要记得重新提交产物
+  - 实测（2026-09-17，一次性 profile `dpr-test`，验完即删）：`dsh plugin add github:...` 本身成功、也自动写进 `dsh.profile.bundles`；但装出来只有 `lib` / `presets` / `reader` / `cordis.patch.yml`（`files` 字段生效），**没有 dist**
+  - 后果比"插件坏掉"更重：**整个 profile 起不来** —— `Cannot find module .../dist/index.js` → `dsh: plugin tree failed to load`，用户的 dsh 直接打不开
+  - 方案① `"prepare": "tsc -p tsconfig.json"` **实测被 pnpm 拦死**：`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED ... not in the "allowBuilds" allowlist`，且是**硬错误不是警告**，装都装不上；allowBuilds 在消费方的 `pnpm-workspace.yaml` 里，插件控制不了 → 等于要求用户先手工改配置
+  - → 结论：走 ② 把 `dist/` 移出 .gitignore 并提交（git 依赖按 `files` 打包，已提交的 dist 会被带上）。代价：每次改代码要重新 build + 提交产物，漏一次用户拿到的就是旧版
+  - 备选：发 npm 包（发布产物天然含 dist），但要多一套发布流程
 - [ ] README 补截图 / 演示 GIF
 - [ ] （可选）投稿到 awesome-deepseek-harness 类索引仓库
 
