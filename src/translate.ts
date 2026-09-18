@@ -69,6 +69,31 @@ async function findBabeldoc(dataDir: string): Promise<string | null> {
 }
 
 /**
+ * 探测 babeldoc 支持的 CLI 参数（按 bin 缓存，进程内只跑一次 --help）。
+ * 必要性：--skip-figure-text 目前只在 GGboya 的 fork（PR#616）里，PyPI 版没有；
+ * 不认识的参数会让 babeldoc 启动即报错，所以可选参数必须探测后再传。
+ * 探测失败返回空集合——只丢可选功能，不影响核心参数。
+ */
+const flagSupport = new Map<string, Promise<Set<string>>>()
+function babeldocFlags(bin: string): Promise<Set<string>> {
+  let p = flagSupport.get(bin)
+  if (!p) {
+    p = new Promise<Set<string>>((res) => {
+      execFile(bin, ['--help'], { timeout: 60000 }, (err, stdout, stderr) => {
+        if (err) console.warn('[dsh-paper-reader] babeldoc --help 探测失败，按最老参数集运行')
+        const flags = new Set<string>()
+        for (const m of (stdout + '\n' + stderr).matchAll(/--[a-z0-9-]+/g)) {
+          flags.add(m[0].slice(2))
+        }
+        res(flags)
+      })
+    })
+    flagSupport.set(bin, p)
+  }
+  return p
+}
+
+/**
  * 启动 babeldoc 后台翻译。幂等：已生成或进行中直接返回 false 表示未新启动。
  * 完成/失败结果写进 busy map，由 zhStatus 暴露。
  */
@@ -138,8 +163,11 @@ async function launch(
   // 推理型模型（glm-5.x / k3 / deepseek-flash）默认每段都先跑隐藏推理，翻译慢好几倍还偶尔返回空。
   // 这三家的 OpenAI 兼容端点都接受 DeepSeek 风格 thinking 开关（babeldoc --openai-thinking 即发该字段）；
   // 自定义端点不加——OpenAI 官方等严格校验参数的端点会因未知字段 400。
+  // 可选参数统一过一遍探测：babeldoc 对不认识的参数直接报错退出，探测不到就不传（功能降级但不炸）。
+  const supported = await babeldocFlags(bin)
+  const opt = (flag: string) => (supported.has(flag) ? [`--${flag}`] : [])
   const noThink = /bigmodel|kimi|moonshot|deepseek/i.test(endpoint.baseUrl)
-    ? ['--openai-thinking', 'disabled']
+    ? opt('openai-thinking').flatMap((f) => [f, 'disabled'])
     : []
   const child = execFile(bin, [
     '--files', ref.pdfPath,
@@ -148,10 +176,11 @@ async function launch(
     '--openai-base-url', endpoint.baseUrl, '--openai-api-key', endpoint.apiKey,
     ...noThink,
     '--qps', '16', '--no-watermark', '--output', tmpDir,
-    '--skip-figure-text', // 图/图片区域内的文字保持原文（架构图术语不翻）
+    // 图/图片区域内的文字保持原文（架构图术语不翻）——目前仅 fork(PR#616)支持
+    ...opt('skip-figure-text'),
     // 跳过术语表自动抽取：该阶段要额外跑十几轮 LLM（推理型模型上能拖十几分钟，比正文还慢），
     // 换来的术语一致性提升有限
-    '--no-auto-extract-glossary',
+    ...opt('no-auto-extract-glossary'),
   ], {
     env: { ...process.env, HF_ENDPOINT: 'https://hf-mirror.com' }, // 版面模型走国内镜像
     timeout: 45 * 60 * 1000,
