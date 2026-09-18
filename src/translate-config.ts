@@ -100,7 +100,16 @@ export async function testTranslateEndpoint(ep: TranslateEndpoint): Promise<{ ok
       body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 }),
       signal: AbortSignal.timeout(15_000),
     })
-    if (r.ok) return { ok: true }
+    if (r.ok) {
+      // 智谱系网关切错路径时（如 /api/v1）会回 HTTP 200 + {"code":1001,"success":false}，
+      // 只看状态码会误判成功，babeldoc 跑起来才炸。真成功必须有 choices。
+      const text = (await r.text().catch(() => '')).slice(0, 300)
+      try {
+        const data = JSON.parse(text) as { choices?: unknown }
+        if (Array.isArray(data.choices)) return { ok: true }
+      } catch { /* 非 JSON 也算失败，走下面报 body */ }
+      return { ok: false, detail: `HTTP 200 但响应不是补全结果：${text.slice(0, 200)}（多半是端点路径不对，如智谱应为 /api/paas/v4）` }
+    }
     const text = (await r.text().catch(() => '')).slice(0, 200)
     return { ok: false, detail: `HTTP ${r.status}${text ? ' ' + text : ''}` }
   } catch (err) {

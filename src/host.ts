@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import type { PluginConfig } from './tools.ts'
 import { listPapers, listTopics, resolveDataDir, resolvePaper } from './library.ts'
 import { readTranscript, transcribePaper } from './transcribe.ts'
-import { pdfVariantPath, startTranslation, zhStatus } from './translate.ts'
+import { pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
 import {
   clearTranslateConfig,
   maskApiKey,
@@ -334,18 +334,27 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       return
     }
 
-    // 中文版状态：zh=纯中文 dual=中英对照 busy=翻译中
+    // 中文版状态：zh=纯中文 dual=中英对照 busy=翻译中。
+    // 顺带返回生效端点的脱敏信息，让 UI 能回答「正在用哪个模型/key 翻」——key 只给掩码。
     if (sub === '/api/zh' && req.method === 'GET') {
-      json(res, 200, zhStatus(locate(url)))
+      const { endpoint, source } = await resolveTranslateEndpoint(config.translate)
+      json(res, 200, {
+        ...zhStatus(locate(url)),
+        model: endpoint.model ?? null,
+        apiKeyHint: endpoint.apiKey ? maskApiKey(endpoint.apiKey) : null,
+        endpointSource: source,
+      })
       return
     }
 
-    // 启动后台翻译（幂等）。端点：UI 里填的 > profile 的 translate
+    // 启动后台翻译（幂等；force=true 为重翻：先删已有译文再启动）。端点：UI 里填的 > profile 的 translate
     if (sub === '/api/zh/generate' && req.method === 'POST') {
-      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }
+      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; force?: boolean }
       const ref = resolvePaper(dataDir, body)
       const { endpoint } = await resolveTranslateEndpoint(config.translate)
-      const r = await startTranslation(ref, dataDir, endpoint)
+      const r = body.force
+        ? await restartTranslation(ref, dataDir, endpoint)
+        : await startTranslation(ref, dataDir, endpoint)
       json(res, r.started ? 200 : 409, r)
       return
     }

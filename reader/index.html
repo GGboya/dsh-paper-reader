@@ -57,7 +57,9 @@
   #cfg-pop h3 { margin: 0; font-size: 13px; }
   #cfg-hint { font-size: 12px; color: var(--text-2); margin: 4px 0 2px; }
   #cfg-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 2px; }
-  #cfg-pop input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; }
+  #cfg-pop input, #cfg-pop select { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; background: var(--panel); color: var(--text); }
+  #cfg-model-hint, #cfg-source { font-size: 11.5px; color: var(--text-2); margin-top: 4px; line-height: 1.5; }
+  #cfg-source:empty { display: none; }
   #cfg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
   #cfg-save { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; }
   #cfg-save:disabled { opacity: .5; cursor: default; }
@@ -71,6 +73,7 @@
 <div id="bar">
   <span id="status">论文伴读</span>
   <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none">中</button>
+  <button id="zh-regen" class="tbtn" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none">↻</button>
   <span class="spacer"></span>
   <button id="cfg-open" class="tbtn" title="翻译端点设置">⚙</button>
   <button id="zoom-out" class="tbtn">−</button>
@@ -97,13 +100,18 @@
 
 <div id="cfg-pop">
   <h3>翻译端点</h3>
-  <div id="cfg-hint">填 OpenAI 兼容端点即可（DeepSeek / 通义 / 本地 vLLM 等）。保存前会先测试连接。</div>
+  <div id="cfg-hint">选预设供应商，或选「自定义」填任意 OpenAI 兼容端点（通义 / 本地 vLLM 等）。保存前会先测试连接。</div>
+  <div id="cfg-source"></div>
+  <label for="cfg-provider">供应商</label>
+  <select id="cfg-provider"></select>
   <label for="cfg-url">端点 URL</label>
   <input id="cfg-url" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off">
   <label for="cfg-key">API Key</label>
   <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="new-password">
   <label for="cfg-model">模型</label>
-  <input id="cfg-model" type="text" placeholder="deepseek-chat" autocomplete="off">
+  <input id="cfg-model" type="text" placeholder="deepseek-chat" autocomplete="off" list="cfg-model-list">
+  <datalist id="cfg-model-list"></datalist>
+  <div id="cfg-model-hint">glm-5.x / k3 / deepseek-flash 是推理型模型，服务端已自动关闭思考；选自定义端点时建议用非推理模型，否则会慢好几倍。</div>
   <div id="cfg-actions">
     <button id="cfg-cancel">取消</button>
     <button id="cfg-save">保存</button>
@@ -167,9 +175,14 @@ async function refreshZhState() {
   btn.style.display = '';
   btn.disabled = zhState.busy;
   btn.textContent = zhState.busy ? '译' : '中';
-  btn.title = zhState.busy ? '翻译进行中…'
+  btn.title = zhState.busy ? `翻译进行中${zhState.model ? `（${zhState.model}）` : ''}…`
     : (zhState.zh || zhState.dual) ? '切换中文译文'
     : '还没有中文版，点击生成（babeldoc，需要几分钟）';
+  // ↻ 只在「已有译文且空闲」时出现；状态变化时顺手拆掉两击确认的待确认态
+  const regen = $('zh-regen');
+  const canRegen = (zhState.zh || zhState.dual) && !zhState.busy;
+  regen.style.display = canRegen ? '' : 'none';
+  if (!canRegen) disarmRegen();
 }
 
 $('zh-toggle').onclick = async () => {
@@ -183,28 +196,95 @@ $('zh-toggle').onclick = async () => {
     await loadPdf(pdfUrl(zhVariant));
     return;
   }
+  await startGenerate(false);
+};
+
+// 生成/重翻共用：force=true 时服务端先删旧译文再启动；成功后轮询到完成
+async function startGenerate(force) {
   try {
-    await api('/zh/generate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(current) });
-    toast('开始生成中文版（babeldoc，约几分钟）…', 5000);
+    await api('/zh/generate', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(force ? { ...current, force: true } : current),
+    });
+    const m = zhState.model ? `（${zhState.model}）` : '';
+    toast(force ? `已删除旧译文，开始重新翻译${m}…` : `开始生成中文版${m}（约几分钟）…`, 5000);
   } catch (e) {
-    // 没配端点 → 直接弹配置表单；填好保存后自动回来重试生成
-    if (e.code === 'no-endpoint') { openCfgPop(true); return; }
+    // 没配端点 → 直接弹配置表单；填好保存后自动回来重试（记住是不是重翻）
+    if (e.code === 'no-endpoint') { cfgRetryForce = force; openCfgPop(true); return; }
     toast(e.message, 8000); return;
   }
   $('zh-toggle').disabled = true; $('zh-toggle').textContent = '译';
+  $('zh-regen').style.display = 'none';
   const timer = setInterval(async () => {
     await refreshZhState();
     if (!zhState.busy) {
       clearInterval(timer);
-      if (zhState.dual || zhState.zh) { toast('中文版已生成'); $('zh-toggle').click(); }
+      if (zhState.dual || zhState.zh) {
+        toast('中文版已生成');
+        // 重翻完成时用户可能正停在译文视图：原地刷新同一变体，而不是来回切换
+        if (zhVariant) await loadPdf(pdfUrl(zhVariant));
+        else $('zh-toggle').click();
+      }
       else toast('生成失败：' + (zhState.error || '未知原因'), 8000);
     }
   }, 5000);
+}
+
+/* ================= 重新翻译（↻，两击确认） ================= */
+// 不用原生 confirm：阅读器跑在 dsh 桌面壳的 iframe 里，原生对话框行为不可靠。
+// 第一击把按钮变成「重翻?」待确认态（3 秒有效），第二击才真删真跑。
+let regenArmTimer = null;
+function disarmRegen() {
+  clearTimeout(regenArmTimer); regenArmTimer = null;
+  const btn = $('zh-regen');
+  btn.textContent = '↻'; btn.classList.remove('active');
+}
+$('zh-regen').onclick = async () => {
+  if (!current || zhState.busy) return;
+  const btn = $('zh-regen');
+  if (regenArmTimer) {           // 第二击：确认执行
+    disarmRegen();
+    await startGenerate(true);
+    return;
+  }
+  btn.textContent = '重翻?';      // 第一击：进入待确认态
+  btn.classList.add('active');
+  regenArmTimer = setTimeout(disarmRegen, 3000);
 };
 
 /* ================= 翻译端点设置 ================= */
-// 保存成功后是否自动接着生成：点「中」发现没配 → 弹本表单 → 填完直接开跑
+// 供应商预设（OpenAI 兼容端点，对齐 lflow 的供应商清单）：选中即回填 URL + 推荐模型。
+// 一律走 Coding 套餐端点——买套餐是常态；套餐 key 走按量口会报余额不足。按量用户选「自定义」手填。
+// models 仅作 datalist 建议，输入框仍可自由填写（新型号上线不用发版）。
+// glm-5.x / k3 / deepseek-flash 是推理型，服务端会对这三家域名自动关 thinking（translate.ts）。
+const PROVIDERS = [
+  { id: 'custom',   name: '自定义（OpenAI 兼容）', baseUrl: '', models: [] },
+  { id: 'deepseek', name: 'DeepSeek',  baseUrl: 'https://api.deepseek.com',                     models: ['deepseek-v4-pro', 'deepseek-flash'] },
+  { id: 'glm',      name: '智谱 GLM',   baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4', models: ['glm-5.3-flash', 'glm-5.3', 'glm-4.6'] },
+  { id: 'kimi',     name: 'Kimi',      baseUrl: 'https://api.kimi.com/coding/v1',              models: ['k3'] },
+];
+const normUrl = (u) => (u || '').trim().replace(/\/+$/, '');
+// 按 baseUrl 反查预设（打开表单时回显选中项）；查不到就是 custom
+const providerOf = (baseUrl) => PROVIDERS.find((p) => p.id !== 'custom' && normUrl(p.baseUrl) === normUrl(baseUrl)) || PROVIDERS[0];
+
+(function initProviderSelect() {
+  const sel = $('cfg-provider');
+  for (const p of PROVIDERS) {
+    const opt = document.createElement('option');
+    opt.value = p.id; opt.textContent = p.name;
+    sel.appendChild(opt);
+  }
+  sel.onchange = () => {
+    const p = PROVIDERS.find((x) => x.id === sel.value) || PROVIDERS[0];
+    if (p.baseUrl) $('cfg-url').value = p.baseUrl;   // custom 不动用户已填的 URL
+    $('cfg-model-list').innerHTML = p.models.map((m) => `<option value="${esc(m)}">`).join('');
+    if (p.models.length && !p.models.includes($('cfg-model').value.trim())) $('cfg-model').value = p.models[0];
+  };
+})();
+
+// 保存成功后是否自动接着生成：点「中」/「↻」发现没配 → 弹本表单 → 填完直接开跑
 let cfgRetryGenerate = false;
+let cfgRetryForce = false;   // 待重试的是不是「重翻」（↻ 进来时旧译文还在，zh-toggle 点击语义不对，必须带 force）
 
 async function openCfgPop(retryGenerate) {
   cfgRetryGenerate = Boolean(retryGenerate);
@@ -214,23 +294,36 @@ async function openCfgPop(retryGenerate) {
   } catch (e) { toast('读取配置失败：' + e.message, 8000); return; }
   $('cfg-url').value = cfg.baseUrl || '';
   $('cfg-model').value = cfg.model || '';
+  // 按已存 URL 回显供应商，并触发一次 onchange 补齐模型候选（但不覆盖已存模型/URL）
+  const sel = $('cfg-provider');
+  sel.value = providerOf(cfg.baseUrl).id;
+  const keepUrl = $('cfg-url').value, keepModel = $('cfg-model').value;
+  sel.onchange();
+  $('cfg-url').value = keepUrl || $('cfg-url').value;
+  $('cfg-model').value = keepModel || $('cfg-model').value;
   // 明文 key 不回传：留空 = 沿用已存的那把
   $('cfg-key').value = '';
   $('cfg-key').placeholder = cfg.hasApiKey ? `已保存（${cfg.apiKeyHint}），留空则不修改` : 'sk-...';
+  // 生效配置的来源：界面保存的文件 优先于 profile 的 YAML 默认值——两条来源都有时不说明会分不清生效的是谁
+  $('cfg-source').textContent =
+    cfg.source === 'file' ? `当前生效：本界面保存的配置（key ${cfg.apiKeyHint}）`
+    : cfg.source === 'profile' ? '当前生效：profile 默认配置（在本界面保存后会被覆盖）'
+    : '';
   const pop = $('cfg-pop');
   pop.style.display = 'block';
   // 先显示再量尺寸（不像 #ask-pop 那样写死尺寸常量，免得跟 CSS 漂移）
   pop.style.left = Math.max(8, (window.innerWidth - pop.offsetWidth) / 2) + 'px';
   pop.style.top = Math.max(8, (window.innerHeight - pop.offsetHeight) / 3) + 'px';
-  $('cfg-url').focus();
+  $('cfg-key').focus();
 }
-function closeCfgPop() { $('cfg-pop').style.display = 'none'; cfgRetryGenerate = false; }
+function closeCfgPop() { $('cfg-pop').style.display = 'none'; cfgRetryGenerate = false; cfgRetryForce = false; }
 
 $('cfg-open').onclick = () => openCfgPop(false);
 $('cfg-cancel').onclick = closeCfgPop;
 
 $('cfg-save').onclick = async () => {
-  const btn = $('cfg-save'), label = btn.textContent, retry = cfgRetryGenerate;
+  // retry/force 先捞出来：closeCfgPop 会把这两个待确认态清零
+  const btn = $('cfg-save'), label = btn.textContent, retry = cfgRetryGenerate, force = cfgRetryForce;
   btn.disabled = true; btn.textContent = '测试中…';
   try {
     // 服务端先打一发极小的 chat/completions 验证 url/key/model，通过才落盘
@@ -251,7 +344,7 @@ $('cfg-save').onclick = async () => {
   }
   closeCfgPop();
   await refreshZhState();
-  if (retry) $('zh-toggle').click();  // 复用「中」的生成逻辑（含它自己的 toast）
+  if (retry) startGenerate(force);  // 沿用触发来源的语义：「中」=生成，「↻」=重翻
   else toast('翻译端点已保存');
 };
 

@@ -5,7 +5,7 @@
 
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, rename } from 'node:fs/promises'
+import { mkdir, rename, rm } from 'node:fs/promises'
 import { glob } from 'node:fs/promises'
 import { join, dirname, basename, extname } from 'node:path'
 import type { PaperRef } from './library.ts'
@@ -81,6 +81,16 @@ export async function startTranslation(
   if (st.zh || st.dual) return { started: false, reason: 'already-exists' }
   if (st.busy) return { started: false, reason: 'busy' }
 
+  const pre = await precheck(dataDir, endpoint)
+  if (pre) return pre
+  return launch(ref, dataDir, endpoint as Required<TranslateEndpoint>)
+}
+
+/** 端点/babeldoc 预检：不齐全时返回与 startTranslation 同形的失败结果。 */
+async function precheck(
+  dataDir: string,
+  endpoint: TranslateEndpoint,
+): Promise<{ started: false; reason: string; code?: string } | null> {
   const bin = await findBabeldoc(dataDir)
   if (!bin) return { started: false, reason: '未找到 babeldoc（pip install babeldoc，或复用 pdfqa 的 .venv-pdf2zh）' }
   if (!endpoint.baseUrl || !endpoint.apiKey || !endpoint.model) {
@@ -91,20 +101,57 @@ export async function startTranslation(
       reason: '未配置翻译端点：在阅读器里点「中」按钮填写（OpenAI 兼容端点即可），或改 profile 的 translate 配置',
     }
   }
+  return null
+}
 
+/**
+ * 重新翻译：删除已有译文产物后再启动（换模型/翻得不好时用）。
+ * 先预检再删——端点不齐或 babeldoc 缺失时不动旧译文，免得删完才发现跑不起来。
+ * babeldoc 的段落缓存 key 含模型名，换模型自然失效，无需 --ignore-cache。
+ */
+export async function restartTranslation(
+  ref: PaperRef,
+  dataDir: string,
+  endpoint: TranslateEndpoint,
+): Promise<{ started: boolean; reason?: string; code?: string }> {
+  if (zhStatus(ref).busy) return { started: false, reason: 'busy' }
+  const pre = await precheck(dataDir, endpoint)
+  if (pre) return pre
+  await rm(zhPdfPath(ref), { force: true })
+  await rm(dualPdfPath(ref), { force: true })
+  return launch(ref, dataDir, endpoint as Required<TranslateEndpoint>)
+}
+
+/** 真正拉起 babeldoc 子进程（precheck 已通过、产物不存在/已删）。 */
+async function launch(
+  ref: PaperRef,
+  dataDir: string,
+  endpoint: Required<TranslateEndpoint>,
+): Promise<{ started: boolean; reason?: string; code?: string }> {
+  const bin = (await findBabeldoc(dataDir))!
   const tmpDir = join(dataDir, '.pdf2zh-tmp')
   await mkdir(tmpDir, { recursive: true })
   busy.set(ref.pdfPath, null)
 
   const stem = basename(ref.pdfPath, extname(ref.pdfPath))
   const dstStem = ref.pdfPath.slice(0, -extname(ref.pdfPath).length)
+  // 推理型模型（glm-5.x / k3 / deepseek-flash）默认每段都先跑隐藏推理，翻译慢好几倍还偶尔返回空。
+  // 这三家的 OpenAI 兼容端点都接受 DeepSeek 风格 thinking 开关（babeldoc --openai-thinking 即发该字段）；
+  // 自定义端点不加——OpenAI 官方等严格校验参数的端点会因未知字段 400。
+  const noThink = /bigmodel|kimi|moonshot|deepseek/i.test(endpoint.baseUrl)
+    ? ['--openai-thinking', 'disabled']
+    : []
   const child = execFile(bin, [
     '--files', ref.pdfPath,
     '--lang-in', 'en', '--lang-out', 'zh-CN',
     '--openai', '--openai-model', endpoint.model,
     '--openai-base-url', endpoint.baseUrl, '--openai-api-key', endpoint.apiKey,
-    '--qps', '8', '--no-watermark', '--output', tmpDir,
+    ...noThink,
+    '--qps', '16', '--no-watermark', '--output', tmpDir,
     '--skip-figure-text', // 图/图片区域内的文字保持原文（架构图术语不翻）
+    // 跳过术语表自动抽取：该阶段要额外跑十几轮 LLM（推理型模型上能拖十几分钟，比正文还慢），
+    // 换来的术语一致性提升有限
+    '--no-auto-extract-glossary',
   ], {
     env: { ...process.env, HF_ENDPOINT: 'https://hf-mirror.com' }, // 版面模型走国内镜像
     timeout: 45 * 60 * 1000,
