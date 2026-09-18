@@ -107,7 +107,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
   ctx.tools.register(defineTool({
     name: 'transcribe_pdf',
     description:
-      '把一篇 PDF 论文转录为纯文本（本地 PyMuPDF 提取，带页码索引），结果落盘缓存。' +
+      '把一篇 PDF 论文转录为纯文本（本地 pdf.js 提取，带页码索引），结果落盘缓存。' +
       '读一篇新论文的第一步：先转录，再用 search_paper 检索。已有缓存时秒回。',
     parameters: {
       ...locateParams,

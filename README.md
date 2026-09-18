@@ -20,7 +20,7 @@
 - 💬 **选中即问**：阅读器里选中文字 → 弹出提问框 → 注入当前会话，原生对话区实时回答
 - 📍 **引用定位**：回答里的「第 N 页」可点击，平滑跳回 PDF 对应页并闪烁
 - 🀄 **中英切换**：顶栏「中」按钮原文 ↔ 纯中文切换；无译文时一键后台生成（babeldoc），生成需配置 `translate` 端点
-- 🔍 **PDF 转录 + 检索**：本地提取（python3 + PyMuPDF），页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
+- 🔍 **PDF 转录 + 检索**：本地提取（pdf.js，纯 Node 无需 Python），页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
 
 ## 安装
 
@@ -67,7 +67,7 @@ src/
   host.ts       webServer 路由（/paper-reader/*），connection.requestRejection 鉴权；
                 sessionController.create/prompt（agentPreset=paper-reader）+ follow SSE 桥
   library.ts    纯函数：文献库目录约定与解析
-  transcribe.ts 纯函数：PyMuPDF 提取 + 页码偏移表（视觉兜底后置）
+  transcribe.ts 纯函数：pdf.js 提取 + 页码偏移表（视觉兜底后置）
   search.ts     纯函数：分段 + 关键词打分 + 页码映射
   study.ts      纯函数：学习档案（计划 + 检验成绩）读写
   translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）

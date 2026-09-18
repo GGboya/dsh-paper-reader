@@ -2,20 +2,20 @@
 //
 // 移植 pdfqa 的三级策略（视觉兜底后置）：
 //  1. 缓存：.txt 已存在直接复用
-//  2. 快路径：python3 + PyMuPDF 本地提取文本层（文本型 PDF 毫秒级）
+//  2. 快路径：pdfjs-dist（pdf.js）本地提取文本层（文本型 PDF 毫秒级，纯 Node，无需 Python）
 //  3. 慢路径：视觉转录（扫描件兜底）— 暂不支持，返回明确错误
 //
 // 与 pdfqa 的差异：输出附带 pages.json 页码偏移表（每页文本在全文中的 [start,end) 区间），
-// 让 search_paper 能把片段映射回页码。清洗（连字/断词/段落重排）全部在 Python 侧、
-// 偏移计算之前完成，保证偏移与最终文本严格一致。
+// 让 search_paper 能把片段映射回页码。清洗（连字/断词/段落重排）全部在偏移计算之前完成，
+// 保证偏移与最终文本严格一致。
+//
+// 历史上快路径用 python3 + PyMuPDF，0.3.0 起换成 pdfjs-dist：阅读器本来就用 pdf.js 渲染，
+// 提取能力等价，且消除了对用户机 Python 环境的依赖。清洗规则与 PyMuPDF 版逐条对齐，
+// 缓存格式（.txt + .pages.json）不变，旧缓存继续兼容。
 
-import { execFile } from 'node:child_process'
 import { readFile, writeFile } from 'node:fs/promises'
-import { promisify } from 'node:util'
 import type { PaperRef } from './library.ts'
 import { transcriptCached } from './library.ts'
-
-const execFileP = promisify(execFile)
 
 export interface PageSpan {
   page: number
@@ -32,100 +32,122 @@ export interface Transcript {
   source: 'cache' | 'local'
 }
 
-// Python 脚本：提取文本层 → 剔页眉页脚 → 清洗 → 带偏移拼页。
-// 退出码 3 = 文本过少（扫描件），交给上层决定兜底策略。
-const EXTRACT_SCRIPT = String.raw`
-import fitz, sys, re, json
-from collections import Counter
+/** 扫描件信号：文本层过少，换提取器也没用，上层据此给专门提示。 */
+class ScannedPdfError extends Error {}
 
-LIG = {'ﬁ':'fi','ﬂ':'fl','ﬀ':'ff','ﬃ':'ffi','ﬄ':'ffl','ﬅ':'st'}
-def ligature(s):
-    for k, v in LIG.items():
-        s = s.replace(k, v)
-    return s
+// ---- 以下为 PyMuPDF 版清洗规则的逐条 TS 移植 ----
 
-doc = fitz.open(sys.argv[1])
-raw_pages = []
-for page in doc:
-    lines = [l.strip() for l in page.get_text().splitlines()]
-    raw_pages.append([l for l in lines if l])
+const LIGATURES: [string, string][] = [
+  ['ﬁ', 'fi'], ['ﬂ', 'fl'], ['ﬀ', 'ff'], ['ﬃ', 'ffi'], ['ﬄ', 'ffl'], ['ﬅ', 'st'],
+]
+function ligature(s: string): string {
+  for (const [k, v] of LIGATURES) s = s.replaceAll(k, v)
+  return s
+}
 
-# 页眉页脚识别：页首 2 行/页尾 3 行归一化（去数字标点，页码归一为空串），
-# 在 >=1/5 页面边缘反复出现即剔除；只剔边缘行，正文相同行不受影响。
-thresh = max(3, len(raw_pages) // 5)
-def norm(l): return re.sub(r'[\d\W]+', '', l).lower()
-edge = Counter()
-for p in raw_pages:
-    for l in p[:2] + p[-3:]:
-        edge[norm(l)] += 1
-bad = {l for l, n in edge.items() if n >= thresh}
+/** 页眉页脚归一化：去数字标点（对应 Python re.sub(r'[\d\W]+','',l).lower()，保留 unicode 字母）。 */
+function norm(l: string): string {
+  return l.replace(/[^\p{L}_]/gu, '').toLowerCase()
+}
 
-page_texts = []
-for p in raw_pages:
-    while p and norm(p[0]) in bad:
-        p.pop(0)
-    while p and norm(p[-1]) in bad:
-        p.pop()
-    t = '\n'.join(p)
-    t = ligature(t)
-    t = re.sub(r'(\w)-\n(\w)', r'\1\2', t)  # 页内断词愈合
-    page_texts.append(t.strip())
+const SENT_END = /[.!?:;]["'”’)\]]*$/
 
-total = sum(len(t) for t in page_texts)
-if total < 100 * max(1, len(doc)):
-    sys.exit(3)  # 扫描件
-
-# 段落重排拼页：PDF 分页会把一个句子拆到相邻两页（页眉页脚剔除后就挨在一起）。
-# 上一页不以句末标点结束、且下一页以小写字母开头 → 同句延续，用空格衔接；
-# 该页的偏移区间只覆盖它自己的文字（跨页句引用起始页）。
-SENT_END = re.compile(r'[.!?:;]["\'”’)\]]*$')
-buf = ''
-spans = []
-for i, t in enumerate(page_texts):
-    if not t:
-        continue
-    if not buf:
-        spans.append((i + 1, 0, len(t)))
-        buf = t
-        continue
-    if not SENT_END.search(buf) and t[0].islower():
-        buf = buf.rstrip(' \n')
-        start = len(buf) + 1
-        buf = buf + ' ' + t
-    else:
-        start = len(buf) + 2
-        buf = buf + '\n\n' + t
-    spans.append((i + 1, start, len(buf)))
-
-print(json.dumps({
-    'pageCount': len(doc),
-    'chars': len(buf),
-    'text': buf,
-    'pages': [{'page': p, 'start': s, 'end': e} for p, s, e in spans],
-}, ensure_ascii=False))
-`
-
-/** 逐个尝试 python 候选（多个 python 里不一定都装了 fitz）。 */
-async function runPyMuPDF(script: string, pdfPath: string): Promise<{ ok: boolean; stdout: string; scanned: boolean }> {
-  const candidates = ['python3', '/opt/homebrew/Caskroom/miniconda/base/bin/python3', '/usr/bin/python3']
-  let sawScanned = false
-  for (const py of candidates) {
-    try {
-      const { stdout } = await execFileP(py, ['-c', script, pdfPath], {
-        maxBuffer: 64 * 1024 * 1024,
-        timeout: 120_000,
-      })
-      return { ok: true, stdout, scanned: false }
-    } catch (err) {
-      // 退出码 3 = 扫描件信号，换一个 python 也没用，但记住这个结论
-      if (err && typeof err === 'object' && (err as { code?: unknown }).code === 3) sawScanned = true
-    }
-  }
-  return { ok: false, stdout: '', scanned: sawScanned }
+interface RawExtract {
+  pageCount: number
+  chars: number
+  text: string
+  pages: PageSpan[]
 }
 
 /**
- * 转录一篇文献：缓存优先，否则本地 PyMuPDF 提取并落盘（.txt + .pages.json）。
+ * pdfjs 提取文本层 → 剔页眉页脚 → 清洗 → 带偏移拼页。
+ * 扫描件（文本过少）抛 ScannedPdfError，交给上层决定兜底策略。
+ * pdfjs-dist 体积不小，动态 import，首次转录时才加载。
+ */
+async function extractWithPdfjs(pdfPath: string): Promise<RawExtract> {
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const data = new Uint8Array(await readFile(pdfPath))
+  const loadingTask = getDocument({ data, disableFontFace: true, verbosity: 0 })
+  const doc = await loadingTask.promise
+  try {
+    // 每页拼行：getTextContent 的 hasEOL 标记行尾，等价于 PyMuPDF get_text().splitlines()
+    const rawPages: string[][] = []
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i)
+      const tc = await page.getTextContent()
+      const lines: string[] = []
+      let cur = ''
+      for (const item of tc.items) {
+        if (typeof (item as { str?: unknown }).str !== 'string') continue
+        cur += (item as { str: string }).str
+        if ((item as { hasEOL?: boolean }).hasEOL) {
+          lines.push(cur.trim())
+          cur = ''
+        }
+      }
+      if (cur.trim()) lines.push(cur.trim())
+      rawPages.push(lines.filter((l) => l))
+      page.cleanup()
+    }
+
+    // 页眉页脚识别：页首 2 行/页尾 3 行归一化（去数字标点），
+    // 在 >=1/5 页面边缘反复出现即剔除；只剔边缘行，正文相同行不受影响。
+    const thresh = Math.max(3, Math.floor(rawPages.length / 5))
+    const edge = new Map<string, number>()
+    for (const p of rawPages) {
+      for (const l of [...p.slice(0, 2), ...p.slice(-3)]) {
+        const n = norm(l)
+        edge.set(n, (edge.get(n) ?? 0) + 1)
+      }
+    }
+    const bad = new Set([...edge].filter(([, n]) => n >= thresh).map(([l]) => l))
+
+    const pageTexts: string[] = []
+    for (const p of rawPages) {
+      while (p.length && bad.has(norm(p[0]!))) p.shift()
+      while (p.length && bad.has(norm(p[p.length - 1]!))) p.pop()
+      let t = p.join('\n')
+      t = ligature(t)
+      t = t.replace(/(\w)-\n(\w)/g, '$1$2') // 页内断词愈合
+      pageTexts.push(t.trim())
+    }
+
+    const total = pageTexts.reduce((s, t) => s + t.length, 0)
+    if (total < 100 * Math.max(1, doc.numPages)) throw new ScannedPdfError()
+
+    // 段落重排拼页：PDF 分页会把一个句子拆到相邻两页（页眉页脚剔除后就挨在一起）。
+    // 上一页不以句末标点结束、且下一页以小写字母开头 → 同句延续，用空格衔接；
+    // 该页的偏移区间只覆盖它自己的文字（跨页句引用起始页）。
+    let buf = ''
+    const spans: PageSpan[] = []
+    for (let i = 0; i < pageTexts.length; i++) {
+      const t = pageTexts[i]!
+      if (!t) continue
+      if (!buf) {
+        spans.push({ page: i + 1, start: 0, end: t.length })
+        buf = t
+        continue
+      }
+      let start: number
+      if (!SENT_END.test(buf) && /^\p{Ll}/u.test(t)) {
+        buf = buf.replace(/[ \n]+$/, '')
+        start = buf.length + 1
+        buf = buf + ' ' + t
+      } else {
+        start = buf.length + 2
+        buf = buf + '\n\n' + t
+      }
+      spans.push({ page: i + 1, start, end: buf.length })
+    }
+
+    return { pageCount: doc.numPages, chars: buf.length, text: buf, pages: spans }
+  } finally {
+    await loadingTask.destroy()
+  }
+}
+
+/**
+ * 转录一篇文献：缓存优先，否则本地 pdfjs 提取并落盘（.txt + .pages.json）。
  * 扫描件（文本层过少）抛错并说明视觉兜底尚未实现。
  */
 export async function transcribePaper(ref: PaperRef, opts: { force?: boolean } = {}): Promise<Transcript> {
@@ -150,15 +172,15 @@ export async function transcribePaper(ref: PaperRef, opts: { force?: boolean } =
 
 /** 本地提取（不落盘）。 */
 async function extractLocal(pdfPath: string): Promise<Transcript> {
-  const { ok, stdout, scanned } = await runPyMuPDF(EXTRACT_SCRIPT, pdfPath)
-  if (!ok) {
-    throw new Error(
-      scanned
-        ? '本地提取的文本过少，该 PDF 可能是扫描件。视觉转录兜底尚未实现（Phase 1 后置项），请换文本型 PDF 或手动放置同名 .txt 缓存。'
-        : '未找到可用的 python3 + PyMuPDF 环境。请安装：python3 -m pip install PyMuPDF',
-    )
+  let data: RawExtract
+  try {
+    data = await extractWithPdfjs(pdfPath)
+  } catch (err) {
+    if (err instanceof ScannedPdfError) {
+      throw new Error('本地提取的文本过少，该 PDF 可能是扫描件。视觉转录兜底尚未实现（Phase 1 后置项），请换文本型 PDF 或手动放置同名 .txt 缓存。')
+    }
+    throw new Error(`PDF 文本提取失败：${err instanceof Error ? err.message : String(err)}`)
   }
-  const data = JSON.parse(stdout) as { pageCount: number; chars: number; text: string; pages: PageSpan[] }
   if (data.text.length < 1000) {
     throw new Error(`转录结果过短(${data.text.length} 字符)，疑似失败，请重试`)
   }
@@ -183,7 +205,7 @@ async function tryUpgradePageIndex(ref: PaperRef, cachedLen: number): Promise<{ 
     await writeFile(ref.pagesPath, JSON.stringify({ pageCount: t.pageCount, pages: t.pages }, null, 2), 'utf8')
     return { text: t.text, pages: t.pages }
   } catch {
-    return null // 无 python 环境或扫描件：保持旧缓存，页码索引缺席
+    return null // 提取失败或扫描件：保持旧缓存，页码索引缺席
   }
 }
 

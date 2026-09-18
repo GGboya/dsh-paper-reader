@@ -1,6 +1,6 @@
 {
   "name": "@ggboy123/dsh-paper-reader",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "DeepSeek Harness 插件：论文伴读工作台 — PDF 转录 / 检索 / 原生对话伴读 + 内置阅读器页面。",
   "license": "MIT",
   "type": "module",
@@ -55,7 +55,8 @@
     "reader"
   ],
   "dependencies": {
-    "@deepseek-ai/dsh-tools": "0.1.5-rc.2"
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
+    "pdfjs-dist": "^6.3.289"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"
