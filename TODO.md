@@ -104,3 +104,4 @@
 - dsh 处于 Developer Preview，插件 API 可能破坏性变更 → 插件壳保持薄，核心逻辑（转录/检索）写成不依赖 Cordis 的纯函数模块，方便日后迁移
 - Node 版本要求：`^22.19.0 || >=24`
 - 本机 git 推 GitHub 需代理：`https_proxy=http://127.0.0.1:7897 git push`
+- ✅ **babeldoc 可选参数探测（0.2.1，2026-09-18）**：`--skip-figure-text` 只在 fork（funstory-ai/BabelDOC PR#616）里，PyPI 版不认识 → 其他用户翻译必炸（"unrecognized arguments" 启动即退）。`launch()` 前对 bin 跑一次 `--help` 提取支持参数集（`babeldocFlags()` 进程内按 bin 缓存），skip-figure-text / no-auto-extract-glossary / openai-thinking 三个可选参数探测不到就不传：功能降级但核心流程可用。探测失败按最老参数集运行。重叠修复本身在 BabelDOC 侧（fork 分支 fix/merge-vertically-contained-paragraphs，上游 PR#617，本机 pdfqa venv editable 安装实时生效），其他用户要等上游合并发版
