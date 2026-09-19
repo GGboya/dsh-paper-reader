@@ -106,6 +106,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
   const dataDir = resolveDataDir(config.dataDir)
   // dist/host.js → 包根/reader/index.html
   const readerHtml = new URL('../reader/index.html', import.meta.url)
+  const readerVendorDir = new URL('../reader/vendor/', import.meta.url)
   // 自带「论文伴读」agent preset → $DSH_HOME/.agent-presets/（实时扫描，免重启）；
   // 失败（旧版 dsh/无权限）则回退默认 preset，功能不受影响。
   const presetDir = installPaperPreset(new URL('../', import.meta.url))
@@ -211,6 +212,24 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const html = await readFile(readerHtml)
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': html.length })
       res.end(html)
+      return
+    }
+
+    // 阅读器静态资源（本地 vendor 的 pdf.js 等；拒绝路径穿越）
+    if (sub.startsWith('/vendor/') && req.method === 'GET') {
+      const name = sub.slice('/vendor/'.length)
+      if (!/^[\w.-]+$/.test(name)) {
+        json(res, 400, { error: 'bad asset name' })
+        return
+      }
+      const mime: Record<string, string> = { '.mjs': 'text/javascript', '.js': 'text/javascript', '.css': 'text/css', '.map': 'application/json' }
+      try {
+        const body = await readFile(new URL(name, readerVendorDir))
+        res.writeHead(200, { 'content-type': (mime[name.slice(name.lastIndexOf('.'))] ?? 'application/octet-stream') + '; charset=utf-8', 'content-length': body.length, 'cache-control': 'max-age=3600' })
+        res.end(body)
+      } catch {
+        json(res, 404, { error: 'not found' })
+      }
       return
     }
 

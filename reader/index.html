@@ -4,7 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>论文伴读 · dsh-paper-reader</title>
-<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<!-- pdf.js 6.x 本地 vendor（不再走 CDN）：3.11 的字体解析对 babeldoc 嵌入的 CID 字体会回退成黑体 -->
+<script type="module">
+  import * as pdfjsLib from '/paper-reader/vendor/pdf.min.mjs';
+  window.pdfjsLib = pdfjsLib;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/paper-reader/vendor/pdf.worker.min.mjs';
+</script>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #e2e5ea; --text: #24292f;
@@ -349,7 +354,7 @@ $('cfg-save').onclick = async () => {
 };
 
 /* ================= PDF 渲染(pdf.js:缩放 + devicePixelRatio 高清,移植自 pdfqa) ================= */
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+/* pdfjsLib 与 workerSrc 由头部 module 脚本设置（本地 vendor，pdf.js 6.x） */
 
 let pdfDoc = null;
 let zoomScale = 1.5;
@@ -367,7 +372,7 @@ let renderToken = 0;
 })();
 
 async function loadPdf(url) {
-  pdfDoc = await pdfjsLib.getDocument(url).promise;
+  pdfDoc = await pdfjsLib.getDocument({ url }).promise; // v6 起不接受字符串参数，必须传对象
   $('empty').style.display = 'none';
   if (fitMode) { fitToWidth(); return; } // fitToWidth 内部 setZoom → renderAllPages
   await renderAllPages();
@@ -417,7 +422,8 @@ async function renderAllPages() {
     if (token !== renderToken) return;
     const tc = await page.getTextContent();
     if (token !== renderToken) return;
-    await pdfjsLib.renderTextLayer({ textContent: tc, container: tl, viewport, textDivs: [] }).promise;
+    // pdf.js 6.x: renderTextLayer() 移除，改 TextLayer 类
+    await new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport }).render();
   }
   const newRange = pane.scrollHeight - pane.clientHeight;
   pane.scrollTop = anchorRatio * Math.max(0, newRange);
