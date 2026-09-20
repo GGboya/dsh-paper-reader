@@ -66,9 +66,9 @@
   .textLayer .markedContent { display: contents; }
   .textLayer ::selection { background: rgba(22,93,255,.3); }
   .textLayer br::selection { background: transparent; }
-  /* 跳转链接的片段高亮（&q= 引文定位）：停留约 3.5s 后淡出 */
-  .textLayer span.dpr-hl { animation: dpr-hl-fade 5s ease forwards; border-radius: 2px; }
-  @keyframes dpr-hl-fade { 0%, 70% { background: rgba(255,196,0,.5); } 100% { background: transparent; } }
+  /* 跳转链接的片段高亮（&q= 引文定位）：常驻不淡出，用户在阅读器里任意点一下即消
+     （同代码编辑器的选中高亮语义：消失由用户触发，不由计时器触发） */
+  .textLayer span.dpr-hl { background: rgba(255,196,0,.45); border-radius: 2px; }
   #empty { margin: 60px auto; color: var(--text-2); text-align: center; max-width: 420px; }
 
   /* ---------- 选中即问浮层 ---------- */
@@ -492,7 +492,12 @@ function jumpToPage(n) {
 /* 片段定位高亮（跳转链接的 &q= 引文）：在指定页 textLayer 里找 q、高亮并滚到它。
    归一化时忽略空白/连字符/软连字符、大小写 —— 论文跨行断词（dis-tributed）也能命中。
    找不到（如用户在中文界面而 q 是英文原文）返回 false，调用方退回仅跳页。 */
-let hlTimer = null;
+function clearHighlights() {
+  document.querySelectorAll('.textLayer span.dpr-hl').forEach((sp) => sp.classList.remove('dpr-hl'));
+}
+// 高亮的消失交给用户：阅读器里任意点一下即清（mousedown 比 click 早，划选文字的那一下也算）
+document.addEventListener('mousedown', clearHighlights);
+
 function highlightSnippet(page, q) {
   const spans = [...(document.querySelector(`.page[data-page="${page}"]`)?.querySelectorAll('.textLayer span:not(.markedContent)') ?? [])];
   if (!spans.length || !q) return false;
@@ -513,11 +518,9 @@ function highlightSnippet(page, q) {
   const from = map[at], to = map[at + needle.length - 1] + 1;
   const hit = spans.filter((sp, i) => startOf[i] < to && startOf[i] + sp.textContent.length > from);
   if (!hit.length) return false;
-  clearTimeout(hlTimer);
-  document.querySelectorAll('.textLayer span.dpr-hl').forEach((sp) => sp.classList.remove('dpr-hl'));
+  clearHighlights();
   for (const sp of hit) sp.classList.add('dpr-hl');
   hit[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-  hlTimer = setTimeout(() => hit.forEach((sp) => sp.classList.remove('dpr-hl')), 5200);
   return true;
 }
 
