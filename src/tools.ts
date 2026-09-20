@@ -6,6 +6,7 @@ import { listPapers, listTopics, resolveDataDir, resolvePaper, type PaperRef } f
 import { transcribePaper, readTranscript } from './transcribe.ts'
 import { chunkText, searchChunks, formatHits } from './search.ts'
 import { completeStep, formatStudy, readStudy, recordQuiz, setPlan } from './study.ts'
+import { readerOrigin } from './origin.ts'
 
 export interface PluginConfig {
   /** 文献库数据目录；默认 ~/.dsh-paper-reader/data */
@@ -58,6 +59,23 @@ export function paperFromSessionId(sessionId: string | undefined): { topic: stri
     return null
   }
 }
+
+/** 某篇论文的阅读器链接基址（拼 &page=N 即跳转链接）；origin 未捕获到时为 null。 */
+function readerUrl(ref: PaperRef): string | null {
+  const o = readerOrigin()
+  if (!o) return null
+  return `${o}/paper-reader/?topic=${encodeURIComponent(ref.topic)}&name=${encodeURIComponent(ref.name)}`
+}
+
+/** 输出 schema 里的 readerUrl 字段声明（nullable：没有任何浏览器请求过时尚未捕获 origin）。 */
+const readerUrlSchema = {
+  oneOf: [{ type: 'string' }, { type: 'null' }],
+  required: true,
+  description: '阅读器链接基址。引用页码时在末尾拼 &page=N 生成可点击跳转链接；为 null 时本次不带链接。',
+} as const
+
+/** render 文本尾部统一带出的链接基址行（preset 规定了用法，这里只暴露值）。 */
+const readerUrlLine = (url: string | null) => (url ? `\n阅读器链接基址：${url}` : '')
 
 export function registerTools(ctx: Context, config: PluginConfig) {
   const dataDir = resolveDataDir(config.dataDir)
@@ -123,6 +141,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
           pageCount: { type: 'integer', required: true },
           hasPageIndex: { type: 'boolean', required: true, description: '是否有页码索引（检索结果能否带页码）。' },
           source: { type: 'string', required: true, enum: ['cache', 'local'] },
+          readerUrl: readerUrlSchema,
         },
         additionalProperties: false,
       },
@@ -132,7 +151,8 @@ export function registerTools(ctx: Context, config: PluginConfig) {
           text:
             `已转录《${value.paper}》：${value.chars} 字符，${value.pageCount} 页` +
             `（${value.source === 'cache' ? '缓存复用' : '本地提取'}${value.hasPageIndex ? '，含页码索引' : '，无页码索引'}）。` +
-            `接下来可用 search_paper 检索具体内容。`,
+            `接下来可用 search_paper 检索具体内容。` +
+            readerUrlLine(value.readerUrl),
         },
       ],
     },
@@ -146,6 +166,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         pageCount: t.pageCount,
         hasPageIndex: t.pages.length > 0,
         source: t.source,
+        readerUrl: readerUrl(ref),
       }
     },
   }))
@@ -186,6 +207,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
               additionalProperties: false,
             },
           },
+          readerUrl: readerUrlSchema,
         },
         additionalProperties: false,
       },
@@ -200,7 +222,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
             })),
             value.totalChunks,
             value.query,
-          ),
+          ) + readerUrlLine(value.readerUrl),
         },
       ],
     },
@@ -220,6 +242,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         query: args.query,
         totalChunks: chunks.length,
         hits: hits.map((h) => ({ chunk: h.chunk.index, page: h.page, text: h.chunk.text })),
+        readerUrl: readerUrl(ref),
       }
     },
   }))
@@ -264,6 +287,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
               additionalProperties: false,
             },
           },
+          readerUrl: readerUrlSchema,
         },
         additionalProperties: false,
       },
@@ -272,7 +296,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
           type: 'text',
           text: `《${value.paper}》学习档案：\n` + formatStudy(
             value.hasRecord ? { paper: value.paper, plan: value.plan, quizzes: value.quizzes } : null,
-          ),
+          ) + readerUrlLine(value.readerUrl),
         },
       ],
     },
@@ -284,6 +308,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         hasRecord: record !== null,
         plan: record?.plan ?? [],
         quizzes: record?.quizzes ?? [],
+        readerUrl: readerUrl(ref),
       }
     },
   }))

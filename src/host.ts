@@ -19,6 +19,7 @@ import {
   writeTranslateConfig,
 } from './translate-config.ts'
 import { installPaperPreset, PAPER_PRESET_ID } from './preset.ts'
+import { noteOrigin } from './origin.ts'
 
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse
@@ -550,6 +551,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           json(res, rejection, { error: rejection === 401 ? 'unauthorized' : 'forbidden' })
           return
         }
+        // 借浏览器请求的 Host 头记录服务 origin（工具结果里的 readerUrl 链接基址靠它拼）
+        noteOrigin(req.headers.host)
         const url = new URL(req.url ?? '/', 'http://x')
         dispatch(req, res, url).catch((err) => {
           if (!res.headersSent) json(res, 500, { error: String(err instanceof Error ? err.message : err) })

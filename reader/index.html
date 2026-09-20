@@ -170,6 +170,9 @@ function esc(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;
 let current = null;        // { topic, name }
 let zhState = { zh: false, dual: false, busy: false };
 let zhVariant = null;      // null=原文 'dual'=中英对照 'zh'=纯中文
+// 每篇论文记住上次用的语言版本：伴读会话的跳转链接原地跳页不重载，
+// 加上这里的恢复，「中文界面跳中文」在同篇跳转/重开/跨论文三条路径上都成立
+const variantKey = (topic, name) => `dpr.variant.${topic}/${name}`;
 
 /* ================= 打开文献 ================= */
 function pdfUrl(variant) {
@@ -181,8 +184,6 @@ async function openPaper(topic, name, opts = {}) {
   if (!name) return;
   current = { topic, name };
   localStorage.setItem('dpr.last', JSON.stringify(current));
-  zhVariant = null;
-  $('zh-toggle').classList.remove('active');
   $('status').textContent = '加载 PDF…';
   const q = `topic=${encodeURIComponent(topic)}&name=${encodeURIComponent(name)}`;
   const meta = await api('/paper?' + q);
@@ -190,7 +191,12 @@ async function openPaper(topic, name, opts = {}) {
     ? `${name} · ${meta.pageCount ?? '?'} 页`
     : `${name} · 未转录（提问时会自动转录）`;
   await refreshZhState();
-  await loadPdf(pdfUrl(null));
+  // 恢复该论文上次的语言版本（译文已不存在时回落原文）
+  const saved = localStorage.getItem(variantKey(topic, name));
+  zhVariant = (saved === 'zh' && zhState.zh) || (saved === 'dual' && zhState.dual) ? saved : null;
+  $('zh-toggle').classList.toggle('active', zhVariant !== null);
+  if (zhVariant) { fitMode = true; fitBtn.classList.add('active'); } // 译文版页宽不同，强制适宽
+  await loadPdf(pdfUrl(zhVariant));
   if (opts.page) jumpToPage(opts.page);
 }
 
@@ -218,6 +224,7 @@ $('zh-toggle').onclick = async () => {
   if (zhState.dual || zhState.zh) {
     // 两态切换：原文 ↔ 纯中文；只存在对照版时退到对照
     zhVariant = zhVariant === null ? (zhState.zh ? 'zh' : 'dual') : null;
+    localStorage.setItem(variantKey(current.topic, current.name), zhVariant ?? '');
     $('zh-toggle').classList.toggle('active', zhVariant !== null);
     // 切换变体后强制适宽：译文版页宽与原文不同（对照双栏≈2×），不重算会溢出裁切
     fitMode = true; fitBtn.classList.add('active');
@@ -531,6 +538,8 @@ $('ask-input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.
 async function bootstrap() {
   const params = new URLSearchParams(location.search);
   const pTopic = params.get('topic'), pName = params.get('name');
+  // 伴读会话里的跳转链接（[重读第 N 页](…?page=N)）经此直达目标页
+  const pPage = +(params.get('page') || 0) || undefined;
   const lib = await api('/library');
   if (lib.topics.length === 0) {
     $('empty').style.display = 'block';
@@ -544,14 +553,19 @@ async function bootstrap() {
     if (last && lib.papers.some((p) => p.topic === last.topic && p.name === last.name)) target = last;
     else target = lib.papers[0];
   }
-  if (target) await openPaper(target.topic, target.name);
+  if (target) await openPaper(target.topic, target.name, { page: pPage });
 }
 bootstrap().catch((e) => {
   $('empty').style.display = 'block';
   $('empty').textContent = '文献库加载失败：' + e.message;
 });
 
-window.dpr = { openPaper: (topic, name, page) => openPaper(topic, name, { page }), jumpToPage };
+window.dpr = {
+  openPaper: (topic, name, page) => openPaper(topic, name, { page }),
+  jumpToPage,
+  // 伴读会话的跳转链接用：当前文档里原地跳页，不重载 —— 用户正在看中文版就落在中文版第 N 页
+  jumpPage: (n) => { if (pdfDoc) jumpToPage(Math.min(Math.max(1, (n | 0) || 1), pdfDoc.numPages)); },
+};
 </script>
 </body>
 </html>
