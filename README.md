@@ -19,7 +19,7 @@
 - 📖 **PDF 阅读器居中**：中间是论文（PDF.js 缩放 / Retina 高清 / 文本层选择 / 适宽模式），最右是该论文的原生对话 —— 视觉换位实现，列宽拖拽/折叠仍是 dsh 原生行为，关掉 PDF 页签即还原官方布局
 - 💬 **选中即问**：阅读器里选中文字 → 弹出提问框 → 注入当前会话，原生对话区实时回答
 - 📍 **引用定位**：回答里的「第 N 页」可点击，平滑跳回 PDF 对应页并闪烁
-- 🀄 **中英切换**：顶栏「中」按钮原文 ↔ 纯中文切换；无译文时一键后台生成（babeldoc），生成需配置 `translate` 端点
+- 🀄 **中英切换**：顶栏「中」按钮原文 ↔ 纯中文切换；无译文时一键后台生成（babeldoc），生成需配置 `translate` 端点；**无需预装 Python**——首次生成时自动下载 uv + 托管 Python + babeldoc（macOS/Linux，约几分钟），全程落在用户目录
 - 🔍 **PDF 转录 + 检索**：本地提取（pdf.js，纯 Node 无需 Python），页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
 
 ## 安装
@@ -55,6 +55,10 @@ dsh --profile web                                  # 侧栏变为文献库树
 > 中文版端点：**优先在阅读器 UI 里填**（点「中」→ 没配会自动弹表单，或点 ⚙）——填完会先测连接再落盘，不用重启。
 > 上面的 `translate` 配置退为**部署方默认值**，仅当 UI 未配置时生效。babeldoc 只支持 OpenAI 协议端点，
 > Anthropic 协议的端点（如 `api.kimi.com/coding/`）不能直连。
+>
+> 翻译引擎**零预装**：找不到 babeldoc 时自动走 uv 链路安装——uv 独立二进制（GitHub Releases API 下载 + sha256 校验）→
+> uv 托管 Python 3.12 → `uv pip install babeldoc`，落在 `~/.dsh/.dsh-paper-reader/bin/` 与文献库同级 `.venv-pdf2zh/`，
+> 不碰系统 Python。已装有 uv / babeldoc（含 pdfqa 的 `.venv-pdf2zh`）则直接复用。Windows 暂不支持自动安装，需手动装 uv 后重试。
 
 > 伴读模式是**按需开启**的：默认不注册 `sidebar.workspaces`（官方工作区/会话列表原样），侧栏底部「📚 论文伴读」开关点击才接管，再点还原；模式选择记在 localStorage。退出模式时已打开的 PDF 页签和伴读会话不受影响。
 
@@ -71,6 +75,7 @@ src/
   search.ts     纯函数：分段 + 关键词打分 + 页码映射
   study.ts      纯函数：学习档案（计划 + 检验成绩）读写
   translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）
+  babeldoc-install.ts 纯函数：无 Python 环境时自动安装 babeldoc（uv → 托管 Python → venv）
   translate-config.ts 纯函数：翻译端点配置读写（$DSH_HOME 下 0600）+ 保存前连接预检
   preset.ts     纯函数：自带 agent preset 安装到 $DSH_HOME/.agent-presets/
 presets/paper-reader/  「论文伴读」agent preset（persona 完整提示词 + compaction）

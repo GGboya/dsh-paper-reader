@@ -180,9 +180,11 @@ async function refreshZhState() {
   btn.style.display = '';
   btn.disabled = zhState.busy;
   btn.textContent = zhState.busy ? '译' : '中';
-  btn.title = zhState.busy ? `翻译进行中${zhState.model ? `（${zhState.model}）` : ''}…`
+  btn.title = zhState.busy ? (zhState.phase || `翻译进行中${zhState.model ? `（${zhState.model}）` : ''}…`)
     : (zhState.zh || zhState.dual) ? '切换中文译文'
     : '还没有中文版，点击生成（babeldoc，需要几分钟）';
+  // 安装/准备阶段在状态栏持续可见（轮询每 5s 刷新一次）
+  if (zhState.busy && zhState.phase) $('status').textContent = zhState.phase;
   // ↻ 只在「已有译文且空闲」时出现；状态变化时顺手拆掉两击确认的待确认态
   const regen = $('zh-regen');
   const canRegen = (zhState.zh || zhState.dual) && !zhState.busy;
@@ -207,12 +209,14 @@ $('zh-toggle').onclick = async () => {
 // 生成/重翻共用：force=true 时服务端先删旧译文再启动；成功后轮询到完成
 async function startGenerate(force) {
   try {
-    await api('/zh/generate', {
+    const r = await api('/zh/generate', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify(force ? { ...current, force: true } : current),
     });
     const m = zhState.model ? `（${zhState.model}）` : '';
-    toast(force ? `已删除旧译文，开始重新翻译${m}…` : `开始生成中文版${m}（约几分钟）…`, 5000);
+    toast(r.firstRun
+      ? '首次使用：正在自动安装翻译引擎（uv + Python + babeldoc，约几分钟），装完自动开始翻译…'
+      : (force ? `已删除旧译文，开始重新翻译${m}…` : `开始生成中文版${m}（约几分钟）…`), 6000);
   } catch (e) {
     // 没配端点 → 直接弹配置表单；填好保存后自动回来重试（记住是不是重翻）
     if (e.code === 'no-endpoint') { cfgRetryForce = force; openCfgPop(true); return; }

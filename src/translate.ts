@@ -9,6 +9,8 @@ import { mkdir, rename, rm } from 'node:fs/promises'
 import { glob } from 'node:fs/promises'
 import { join, dirname, basename, extname } from 'node:path'
 import type { PaperRef } from './library.ts'
+import { dshHome } from './library.ts'
+import { ensureBabeldoc } from './babeldoc-install.ts'
 
 export interface TranslateEndpoint {
   baseUrl?: string
@@ -23,6 +25,8 @@ export interface ZhStatus {
   dual: boolean
   busy: boolean
   error?: string
+  /** busy 时的阶段说明（如首次自动安装翻译引擎），UI 直接展示 */
+  phase?: string
 }
 
 export function zhPdfPath(ref: PaperRef): string {
@@ -33,7 +37,8 @@ export function dualPdfPath(ref: PaperRef): string {
 }
 
 /** 进程内每篇文献一个翻译任务（幂等：进行中/已生成直接返回）。 */
-const busy = new Map<string, string | null>() // key=pdfPath, value=error|null(进行中)
+// key=pdfPath；null=进行中（无阶段说明）；{phase}=进行中；{error}=已失败
+const busy = new Map<string, { error?: string; phase?: string } | null>()
 
 export function zhStatus(ref: PaperRef): ZhStatus {
   const zh = existsSync(zhPdfPath(ref))
@@ -42,8 +47,9 @@ export function zhStatus(ref: PaperRef): ZhStatus {
   return {
     zh,
     dual,
-    busy: b === null,
-    ...(typeof b === 'string' ? { error: b } : {}),
+    busy: b === null || Boolean(b && !b.error),
+    ...(b?.error ? { error: b.error } : {}),
+    ...(b && !b.error && b.phase ? { phase: b.phase } : {}),
   }
 }
 
@@ -96,28 +102,29 @@ function babeldocFlags(bin: string): Promise<Set<string>> {
 /**
  * 启动 babeldoc 后台翻译。幂等：已生成或进行中直接返回 false 表示未新启动。
  * 完成/失败结果写进 busy map，由 zhStatus 暴露。
+ * babeldoc 缺失时不再报错：后台自动走 uv 安装链路（首次约几分钟），
+ * 期间 zhStatus.phase 展示安装进度，装完直接接着翻译。
  */
 export async function startTranslation(
   ref: PaperRef,
   dataDir: string,
   endpoint: TranslateEndpoint,
-): Promise<{ started: boolean; reason?: string; code?: string }> {
+): Promise<{ started: boolean; reason?: string; code?: string; firstRun?: boolean }> {
   const st = zhStatus(ref)
   if (st.zh || st.dual) return { started: false, reason: 'already-exists' }
   if (st.busy) return { started: false, reason: 'busy' }
 
-  const pre = await precheck(dataDir, endpoint)
+  const pre = precheck(endpoint)
   if (pre) return pre
-  return launch(ref, dataDir, endpoint as Required<TranslateEndpoint>)
+  const firstRun = !(await findBabeldoc(dataDir))
+  void runPipeline(ref, dataDir, endpoint as Required<TranslateEndpoint>)
+  return { started: true, firstRun }
 }
 
-/** 端点/babeldoc 预检：不齐全时返回与 startTranslation 同形的失败结果。 */
-async function precheck(
-  dataDir: string,
+/** 端点预检：不齐全时返回与 startTranslation 同形的失败结果。 */
+function precheck(
   endpoint: TranslateEndpoint,
-): Promise<{ started: false; reason: string; code?: string } | null> {
-  const bin = await findBabeldoc(dataDir)
-  if (!bin) return { started: false, reason: '未找到 babeldoc（pip install babeldoc，或复用 pdfqa 的 .venv-pdf2zh）' }
+): { started: false; reason: string; code?: string } | null {
   if (!endpoint.baseUrl || !endpoint.apiKey || !endpoint.model) {
     // code 供前端判定「该弹配置表单了」，别让它去匹配中文文案
     return {
@@ -129,34 +136,54 @@ async function precheck(
   return null
 }
 
+/** 后台流水线：确保 babeldoc 可用（缺失则自动安装）→ 拉起翻译。 */
+async function runPipeline(
+  ref: PaperRef,
+  dataDir: string,
+  endpoint: Required<TranslateEndpoint>,
+): Promise<void> {
+  const setPhase = (phase: string) => busy.set(ref.pdfPath, { phase })
+  try {
+    setPhase('正在检查翻译引擎…')
+    const bin = await ensureBabeldoc(dataDir, dshHome(), () => findBabeldoc(dataDir), setPhase)
+    await launch(ref, dataDir, endpoint, bin)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    console.error('[dsh-paper-reader] babeldoc 自动安装失败:', msg)
+    busy.set(ref.pdfPath, { error: `翻译引擎安装失败：${msg}` })
+  }
+}
+
 /**
  * 重新翻译：删除已有译文产物后再启动（换模型/翻得不好时用）。
- * 先预检再删——端点不齐或 babeldoc 缺失时不动旧译文，免得删完才发现跑不起来。
+ * 先预检再删——端点不齐时不动旧译文，免得删完才发现跑不起来。
  * babeldoc 的段落缓存 key 含模型名，换模型自然失效，无需 --ignore-cache。
  */
 export async function restartTranslation(
   ref: PaperRef,
   dataDir: string,
   endpoint: TranslateEndpoint,
-): Promise<{ started: boolean; reason?: string; code?: string }> {
+): Promise<{ started: boolean; reason?: string; code?: string; firstRun?: boolean }> {
   if (zhStatus(ref).busy) return { started: false, reason: 'busy' }
-  const pre = await precheck(dataDir, endpoint)
+  const pre = precheck(endpoint)
   if (pre) return pre
   await rm(zhPdfPath(ref), { force: true })
   await rm(dualPdfPath(ref), { force: true })
-  return launch(ref, dataDir, endpoint as Required<TranslateEndpoint>)
+  const firstRun = !(await findBabeldoc(dataDir))
+  void runPipeline(ref, dataDir, endpoint as Required<TranslateEndpoint>)
+  return { started: true, firstRun }
 }
 
-/** 真正拉起 babeldoc 子进程（precheck 已通过、产物不存在/已删）。 */
+/** 真正拉起 babeldoc 子进程（bin 已就绪、产物不存在/已删）。 */
 async function launch(
   ref: PaperRef,
   dataDir: string,
   endpoint: Required<TranslateEndpoint>,
-): Promise<{ started: boolean; reason?: string; code?: string }> {
-  const bin = (await findBabeldoc(dataDir))!
+  bin: string,
+): Promise<void> {
   const tmpDir = join(dataDir, '.pdf2zh-tmp')
   await mkdir(tmpDir, { recursive: true })
-  busy.set(ref.pdfPath, null)
+  busy.set(ref.pdfPath, null) // 清掉安装阶段说明，回到「翻译进行中」
 
   const stem = basename(ref.pdfPath, extname(ref.pdfPath))
   const dstStem = ref.pdfPath.slice(0, -extname(ref.pdfPath).length)
@@ -189,7 +216,7 @@ async function launch(
       if (err) {
         const tail = (stdout + '\n' + stderr).slice(-400)
         console.error('[dsh-paper-reader] babeldoc failed:', tail)
-        busy.set(ref.pdfPath, `babeldoc 执行失败: ${err.message}`)
+        busy.set(ref.pdfPath, { error: `babeldoc 执行失败: ${err.message}` })
         return
       }
       // 产出从 scratch 挪回文献目录：<名>.zh-CN.mono.pdf → -zh.pdf，.dual.pdf → -dual.pdf
@@ -201,18 +228,17 @@ async function launch(
           await rename(f, dstStem + '-dual.pdf')
         }
         if (!existsSync(zhPdfPath(ref)) && !existsSync(dualPdfPath(ref))) {
-          busy.set(ref.pdfPath, 'babeldoc 未产出译文 PDF')
+          busy.set(ref.pdfPath, { error: 'babeldoc 未产出译文 PDF' })
           return
         }
         busy.delete(ref.pdfPath)
         console.log(`[dsh-paper-reader] babeldoc done: ${ref.name}`)
       } catch (e) {
-        busy.set(ref.pdfPath, `移动译文产物失败: ${e instanceof Error ? e.message : String(e)}`)
+        busy.set(ref.pdfPath, { error: `移动译文产物失败: ${e instanceof Error ? e.message : String(e)}` })
       }
     })()
   })
   child.unref?.()
-  return { started: true }
 }
 
 /** 解析 PDF 变体路径（原文/zh/dual）。 */
