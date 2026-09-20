@@ -42,9 +42,30 @@
   #pdf-pages { display: flex; flex-direction: column; align-items: safe center; gap: 14px; }
   .page { position: relative; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
   .page.flash { outline: 3px solid var(--hl); outline-offset: 2px; transition: outline .15s; }
-  .textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; }
-  .textLayer span { position: absolute; white-space: pre; color: transparent; cursor: text; transform-origin: 0 0; }
+  /* textLayer CSS 必须是 pdf.js 6.x 官方规则的子集：TextLayer 只往 span 写 --font-height/--scale-x/--rotate
+     变量，font-size 和 transform 全靠这里的 calc 表达式撑开；缺了的话 span 会按 body 字号渲染，
+     盒子与 canvas 字形错位 —— 表现为选中高亮缺字符。--scale-factor 由 JS 在渲染时写入 */
+  .textLayer {
+    position: absolute; inset: 0; overflow: clip; line-height: 1; text-align: initial;
+    letter-spacing: normal; word-spacing: normal; text-size-adjust: none;
+    forced-color-adjust: none; transform-origin: 0 0; caret-color: CanvasText; z-index: 0;
+    --total-scale-factor: calc(var(--scale-factor, 1) * var(--user-unit, 1));
+    --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size, 1));
+    --min-font-size-inv: calc(1 / var(--min-font-size, 1));
+    --scale-round-x: 1px; --scale-round-y: 1px;
+  }
+  .textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0 0; user-select: text; }
+  .textLayer > :not(.markedContent),
+  .textLayer .markedContent span:not(.markedContent) {
+    z-index: 1;
+    --font-height: 0;
+    font-size: calc(var(--text-scale-factor) * var(--font-height));
+    --scale-x: 1; --rotate: 0deg;
+    transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+  }
+  .textLayer .markedContent { display: contents; }
   .textLayer ::selection { background: rgba(22,93,255,.3); }
+  .textLayer br::selection { background: transparent; }
   #empty { margin: 60px auto; color: var(--text-2); text-align: center; max-width: 420px; }
 
   /* ---------- 选中即问浮层 ---------- */
