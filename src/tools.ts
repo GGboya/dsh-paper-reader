@@ -71,7 +71,8 @@ function readerUrl(ref: PaperRef): string | null {
 const readerUrlSchema = {
   oneOf: [{ type: 'string' }, { type: 'null' }],
   required: true,
-  description: '阅读器链接基址。引用页码时在末尾拼 &page=N 生成可点击跳转链接；为 null 时本次不带链接。',
+  description:
+    '阅读器链接基址。引用页码时在末尾拼 &page=N 生成跳转链接；要定位到具体段落再拼 &q=<该段落原文短引文，3~8个词，URL编码>，点击会高亮对应片段。为 null 时本次不带链接。',
 } as const
 
 /** render 文本尾部统一带出的链接基址行（preset 规定了用法，这里只暴露值）。 */

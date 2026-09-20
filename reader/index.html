@@ -66,6 +66,9 @@
   .textLayer .markedContent { display: contents; }
   .textLayer ::selection { background: rgba(22,93,255,.3); }
   .textLayer br::selection { background: transparent; }
+  /* 跳转链接的片段高亮（&q= 引文定位）：停留约 3.5s 后淡出 */
+  .textLayer span.dpr-hl { animation: dpr-hl-fade 5s ease forwards; border-radius: 2px; }
+  @keyframes dpr-hl-fade { 0%, 70% { background: rgba(255,196,0,.5); } 100% { background: transparent; } }
   #empty { margin: 60px auto; color: var(--text-2); text-align: center; max-width: 420px; }
 
   /* ---------- 选中即问浮层 ---------- */
@@ -197,7 +200,7 @@ async function openPaper(topic, name, opts = {}) {
   $('zh-toggle').classList.toggle('active', zhVariant !== null);
   if (zhVariant) { fitMode = true; fitBtn.classList.add('active'); } // 译文版页宽不同，强制适宽
   await loadPdf(pdfUrl(zhVariant));
-  if (opts.page) jumpToPage(opts.page);
+  if (opts.page) jumpTo(opts.page, opts.q); // 不 await：跳转内部自带「等页面渲出来」轮询
 }
 
 /* ================= 中英切换 ================= */
@@ -486,6 +489,52 @@ function jumpToPage(n) {
   setTimeout(() => div.classList.remove('flash'), 1600);
 }
 
+/* 片段定位高亮（跳转链接的 &q= 引文）：在指定页 textLayer 里找 q、高亮并滚到它。
+   归一化时忽略空白/连字符/软连字符、大小写 —— 论文跨行断词（dis-tributed）也能命中。
+   找不到（如用户在中文界面而 q 是英文原文）返回 false，调用方退回仅跳页。 */
+let hlTimer = null;
+function highlightSnippet(page, q) {
+  const spans = [...(document.querySelector(`.page[data-page="${page}"]`)?.querySelectorAll('.textLayer span:not(.markedContent)') ?? [])];
+  if (!spans.length || !q) return false;
+  let hay = '';
+  const startOf = [];
+  for (const sp of spans) { startOf.push(hay.length); hay += sp.textContent; }
+  // 归一化串 + 回原串的索引映射（归一化改变长度，不能直接用原索引）
+  const map = [];
+  let nh = '';
+  for (let i = 0; i < hay.length; i++) {
+    const c = hay[i].toLowerCase();
+    if (/\s/.test(c) || c === '-' || c === '­') continue;
+    nh += c; map.push(i);
+  }
+  const needle = q.toLowerCase().replace(/[\s\-­]+/g, '');
+  const at = needle ? nh.indexOf(needle) : -1;
+  if (at < 0) return false;
+  const from = map[at], to = map[at + needle.length - 1] + 1;
+  const hit = spans.filter((sp, i) => startOf[i] < to && startOf[i] + sp.textContent.length > from);
+  if (!hit.length) return false;
+  clearTimeout(hlTimer);
+  document.querySelectorAll('.textLayer span.dpr-hl').forEach((sp) => sp.classList.remove('dpr-hl'));
+  for (const sp of hit) sp.classList.add('dpr-hl');
+  hit[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  hlTimer = setTimeout(() => hit.forEach((sp) => sp.classList.remove('dpr-hl')), 5200);
+  return true;
+}
+
+/* 统一跳转入口：先等目标页渲染出来（fit 模式下 loadPdf 返回时页面可能还在渲），
+   有 q 就尝试片段高亮，否则整页跳转 + 边框闪烁 */
+async function jumpTo(page, q) {
+  const p0 = Math.max(1, (page | 0) || 1);
+  for (let i = 0; i < 100; i++) {
+    if (pdfDoc && document.querySelector(`.page[data-page="${Math.min(p0, pdfDoc.numPages)}"]`)) {
+      const p = Math.min(p0, pdfDoc.numPages);
+      if (!(q && highlightSnippet(p, q))) jumpToPage(p);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 /* ================= 选中即问 ================= */
 const askPop = $('ask-pop');
 let askSelection = null;
@@ -540,6 +589,7 @@ async function bootstrap() {
   const pTopic = params.get('topic'), pName = params.get('name');
   // 伴读会话里的跳转链接（[重读第 N 页](…?page=N)）经此直达目标页
   const pPage = +(params.get('page') || 0) || undefined;
+  const pQ = params.get('q') || undefined;
   const lib = await api('/library');
   if (lib.topics.length === 0) {
     $('empty').style.display = 'block';
@@ -553,7 +603,7 @@ async function bootstrap() {
     if (last && lib.papers.some((p) => p.topic === last.topic && p.name === last.name)) target = last;
     else target = lib.papers[0];
   }
-  if (target) await openPaper(target.topic, target.name, { page: pPage });
+  if (target) await openPaper(target.topic, target.name, { page: pPage, q: pQ });
 }
 bootstrap().catch((e) => {
   $('empty').style.display = 'block';
@@ -561,10 +611,11 @@ bootstrap().catch((e) => {
 });
 
 window.dpr = {
-  openPaper: (topic, name, page) => openPaper(topic, name, { page }),
+  openPaper: (topic, name, page, q) => openPaper(topic, name, { page, q }),
   jumpToPage,
-  // 伴读会话的跳转链接用：当前文档里原地跳页，不重载 —— 用户正在看中文版就落在中文版第 N 页
-  jumpPage: (n) => { if (pdfDoc) jumpToPage(Math.min(Math.max(1, (n | 0) || 1), pdfDoc.numPages)); },
+  // 伴读会话的跳转链接用：当前文档里原地跳转，不重载 —— 用户正在看中文版就落在中文版；
+  // 带 q（原文短引文）时定位并闪烁高亮对应片段，找不到则退回整页跳转
+  jumpPage: (n, q) => { jumpTo(n, q); },
 };
 </script>
 </body>
