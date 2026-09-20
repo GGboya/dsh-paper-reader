@@ -103,7 +103,9 @@ export async function testTranslateEndpoint(ep: TranslateEndpoint): Promise<{ ok
     if (r.ok) {
       // 智谱系网关切错路径时（如 /api/v1）会回 HTTP 200 + {"code":1001,"success":false}，
       // 只看状态码会误判成功，babeldoc 跑起来才炸。真成功必须有 choices。
-      const text = (await r.text().catch(() => '')).slice(0, 300)
+      // 上限放宽到 4000：GLM 等响应字段多，max_tokens:1 也有几百字节；
+      // 历史上 slice(0,300) 把合法 JSON 截断导致 parse 失败、误报「不是补全结果」（0.6.2 修复）
+      const text = (await r.text().catch(() => '')).slice(0, 4000)
       try {
         const data = JSON.parse(text) as { choices?: unknown }
         if (Array.isArray(data.choices)) return { ok: true }

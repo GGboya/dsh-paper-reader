@@ -98,6 +98,7 @@
   - 本地两个 profile（web/headless）的 link: 依赖与 bundles 已同步改为 `@ggboy123/dsh-paper-reader`
 - [x] README 补截图（CDP 实拍两张：默认态 + 伴读模式全景）；演示 GIF 仍可选
 - [ ] （可选）投稿到 awesome-deepseek-harness 类索引仓库
+- [ ] 阅读器显示插件版本号（2026-09-20 用户反馈定位需求）：从 package.json 注入版本到阅读器页脚或「论文伴读」开关行，用户截图反馈时一眼可见版本，不用远程指挥敲命令
 
 ## 备忘
 
