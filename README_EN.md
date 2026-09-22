@@ -13,6 +13,8 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 
 **Does not modify the official UI on install** — a single "📚 Paper Reading" toggle appears at the bottom of the sidebar. Click it to enter reading mode (sidebar becomes a paper library tree), click again to restore the official workspace list:
 
+![Demo: select-to-ask, answers cite page numbers, click a page to jump back to the highlighted passage](docs/demo.gif)
+
 ![Default: official sidebar untouched, just one extra toggle](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/screenshot-default.png)
 
 ![Reading mode: paper library + PDF reader + native chat](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/screenshot-reading.png)

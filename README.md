@@ -13,6 +13,8 @@
 
 **安装后不改动官方界面** —— 侧栏底部多一行「📚 论文伴读」开关，点击才进入伴读模式（左侧变为文献库树），再点即还原官方工作区列表：
 
+![演示：选中即问 → 回答带页码 → 点页码跳回 PDF 并高亮原文](docs/demo.gif)
+
 ![默认安装：官方侧栏原样，只多一行开关](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/screenshot-default.png)
 
 ![伴读模式：文献库 + PDF 阅读器 + 原生对话](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/screenshot-reading.png)
