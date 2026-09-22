@@ -18,6 +18,13 @@ import {
   testTranslateEndpoint,
   writeTranslateConfig,
 } from './translate-config.ts'
+import {
+  clearTypesafeConfig,
+  readTypesafeConfig,
+  resolveTypesafeConfig,
+  testTypesafeEndpoint,
+  writeTypesafeConfig,
+} from './typesafe-config.ts'
 import { installPaperPreset, PAPER_PRESET_ID } from './preset.ts'
 import { noteOrigin } from './origin.ts'
 
@@ -427,6 +434,53 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // DELETE：清掉文件，回落到 profile 的 translate
     if (sub === '/api/translate/config' && req.method === 'DELETE') {
       await clearTranslateConfig()
+      json(res, 200, { ok: true })
+      return
+    }
+
+    // ── Jev/TypeSafe 端点配置（设置面板的读写口）─────────────────────────
+    // 与翻译配置同一套约定：GET 只回显掩码 key；POST 预检通过才落盘；DELETE 回落
+    if (sub === '/api/typesafe/config' && req.method === 'GET') {
+      const { cfg, source } = await resolveTypesafeConfig(config.typesafe)
+      json(res, 200, {
+        baseUrl: cfg.baseUrl ?? '',
+        model: cfg.model ?? '',
+        hasApiKey: Boolean(cfg.apiKey),
+        apiKeyHint: cfg.apiKey ? maskApiKey(cfg.apiKey) : '',
+        source,
+      })
+      return
+    }
+
+    // POST：baseUrl/model 可空（SDK 有默认值）；key 留空 = 沿用已存的那把。
+    // 校验 → 预检 → 通了才落盘：重排失败会静默降级，key 填错很难察觉，这里先拦。
+    if (sub === '/api/typesafe/config' && req.method === 'POST') {
+      const body = (await readBody(req)) as { baseUrl?: string; apiKey?: string; model?: string }
+      const baseUrl = body.baseUrl?.trim() ?? ''
+      const model = body.model?.trim() ?? ''
+      const prev = await readTypesafeConfig()
+      const apiKey = body.apiKey?.trim() || prev?.apiKey || ''
+      if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
+        json(res, 400, { error: '端点 URL 需要以 http:// 或 https:// 开头（留空用官方默认）' })
+        return
+      }
+      if (!apiKey) {
+        json(res, 400, { error: 'API Key 不能为空' })
+        return
+      }
+      const test = await testTypesafeEndpoint({ apiKey, ...(baseUrl ? { baseUrl } : {}), ...(model ? { model } : {}) })
+      if (!test.ok) {
+        json(res, 400, { error: `连接测试失败：${test.detail ?? '未知原因'}` })
+        return
+      }
+      await writeTypesafeConfig({ apiKey, ...(baseUrl ? { baseUrl } : {}), ...(model ? { model } : {}) })
+      json(res, 200, { ok: true })
+      return
+    }
+
+    // DELETE：清掉文件，回落到 profile 的 typesafe / 环境变量
+    if (sub === '/api/typesafe/config' && req.method === 'DELETE') {
+      await clearTypesafeConfig()
       json(res, 200, { ok: true })
       return
     }

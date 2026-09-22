@@ -5,6 +5,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { listPapers, listTopics, resolveDataDir, resolvePaper, type PaperRef } from './library.ts'
 import { transcribePaper, readTranscript } from './transcribe.ts'
 import { chunkText, searchChunks, formatHits } from './search.ts'
+import { resolveRerankClient, resolveShortlistSize, rerankHits, type RerankConfig } from './rerank.ts'
 import { completeStep, formatStudy, readStudy, recordQuiz, setPlan } from './study.ts'
 import { readerOrigin } from './origin.ts'
 
@@ -17,6 +18,8 @@ export interface PluginConfig {
     apiKey?: string
     model?: string
   }
+  /** 检索语义重排（Jev / TypeSafe）。凭据优先级：设置面板 > 此 YAML > 环境变量 TYPESAFE_API_KEY；都没有时退回纯关键词排序 */
+  typesafe?: RerankConfig
 }
 
 /** 文献定位参数（三工具共用的 args 子集）。 */
@@ -80,6 +83,7 @@ const readerUrlLine = (url: string | null) => (url ? `\n阅读器链接基址：
 
 export function registerTools(ctx: Context, config: PluginConfig) {
   const dataDir = resolveDataDir(config.dataDir)
+  const shortlistSize = resolveShortlistSize(config.typesafe)
 
   ctx.tools.register(defineTool({
     name: 'list_papers',
@@ -191,6 +195,11 @@ export function registerTools(ctx: Context, config: PluginConfig) {
           paper: { type: 'string', required: true },
           query: { type: 'string', required: true },
           totalChunks: { type: 'integer', required: true },
+          reranked: {
+            type: 'boolean',
+            required: true,
+            description: '返回片段是否经过语义重排（配置了 Jev/TypeSafe 凭据且候选充足时为 true）。',
+          },
           hits: {
             type: 'array',
             required: true,
@@ -237,12 +246,27 @@ export function registerTools(ctx: Context, config: PluginConfig) {
       if (!cached) throw new Error('转录失败，无法检索')
       const chunks = chunkText(cached.text, 1500)
       const k = Math.max(1, Math.min(args.k ?? 5, 8))
-      const hits = searchChunks(chunks, cached.pages, args.query, k)
+      // 两段式检索:关键词快搜捞 shortlist(宽召回),Jev 按语义重排取 top-k。
+      // 凭据每次现查(设置面板保存即生效);无凭据或候选不超过 k 时跳过重排。
+      const rerankClient = await resolveRerankClient(config.typesafe)
+      let hits = searchChunks(chunks, cached.pages, args.query, rerankClient ? shortlistSize : k)
+      let reranked = false
+      if (rerankClient && hits.length > k) {
+        try {
+          hits = await rerankHits(rerankClient, args.query, hits, k, config.typesafe?.deadlineMs ?? 1500)
+          reranked = true
+        } catch (e) {
+          // 超预算/网络/鉴权任何失败都退回关键词 top-k(结果已算好,零成本降级)
+          console.warn('[dsh-paper-reader] 检索重排失败，退回关键词排序:', e)
+          hits = hits.slice(0, k)
+        }
+      }
       return {
         paper: `${ref.topic}/${ref.name}`,
         query: args.query,
         totalChunks: chunks.length,
         hits: hits.map((h) => ({ chunk: h.chunk.index, page: h.page, text: h.chunk.text })),
+        reranked,
         readerUrl: readerUrl(ref),
       }
     },
