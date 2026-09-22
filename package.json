@@ -50,9 +50,18 @@
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
+    "deepseek",
     "pdf",
+    "pdf-reader",
     "paper",
-    "reader"
+    "paper-reading",
+    "research-paper",
+    "citation",
+    "reader",
+    "arxiv",
+    "ai-assistant",
+    "rag",
+    "translation"
   ],
   "dependencies": {
     "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
