@@ -172,6 +172,7 @@ function esc(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;
 
 let current = null;        // { topic, name }
 let zhState = { zh: false, dual: false, busy: false };
+let statusMeta = ''; // openPaper 的「name · N 页」基线，翻译阶段标签褪去后恢复它
 let zhVariant = null;      // null=原文 'dual'=中英对照 'zh'=纯中文
 // 每篇论文记住上次用的语言版本：伴读会话的跳转链接原地跳页不重载，
 // 加上这里的恢复，「中文界面跳中文」在同篇跳转/重开/跨论文三条路径上都成立
@@ -190,9 +191,10 @@ async function openPaper(topic, name, opts = {}) {
   $('status').textContent = '加载 PDF…';
   const q = `topic=${encodeURIComponent(topic)}&name=${encodeURIComponent(name)}`;
   const meta = await api('/paper?' + q);
-  $('status').textContent = meta.hasTranscript
+  statusMeta = meta.hasTranscript
     ? `${name} · ${meta.pageCount ?? '?'} 页`
     : `${name} · 未转录（提问时会自动转录）`;
+  $('status').textContent = statusMeta;
   await refreshZhState();
   // 恢复该论文上次的语言版本（译文已不存在时回落原文）
   const saved = localStorage.getItem(variantKey(topic, name));
@@ -213,8 +215,15 @@ async function refreshZhState() {
   btn.title = zhState.busy ? (zhState.phase || `翻译进行中${zhState.model ? `（${zhState.model}）` : ''}…`)
     : (zhState.zh || zhState.dual) ? '切换中文译文'
     : '还没有中文版，点击生成（babeldoc，需要几分钟）';
-  // 安装/准备阶段在状态栏持续可见（轮询每 5s 刷新一次）
-  if (zhState.busy && zhState.phase) $('status').textContent = zhState.phase;
+  // 安装/准备阶段在状态栏持续可见（轮询每 5s 刷新一次）；翻译结束后恢复论文基线信息
+  const statusEl = $('status');
+  if (zhState.busy && zhState.phase) {
+    statusEl.textContent = zhState.phase;
+    statusEl.dataset.phaseShown = '1';
+  } else if (!zhState.busy && statusEl.dataset.phaseShown) {
+    delete statusEl.dataset.phaseShown;
+    if (statusMeta) statusEl.textContent = statusMeta;
+  }
   // ↻ 只在「已有译文且空闲」时出现；状态变化时顺手拆掉两击确认的待确认态
   const regen = $('zh-regen');
   const canRegen = (zhState.zh || zhState.dual) && !zhState.busy;

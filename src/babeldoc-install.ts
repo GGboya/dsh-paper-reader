@@ -3,9 +3,11 @@
 // 链路：uv 独立二进制（GitHub Releases，带 sha256 校验）
 //   → `uv venv`（uv 自动下载托管 Python，系统没有 Python 也能跑）
 //   → `uv pip install babeldoc`
-// 全部落在用户目录：uv 二进制在 <dshHome>/.dsh-paper-reader/bin/uv，
+// 全部落在用户目录：uv 二进制在 <dshHome>/.dsh-paper-reader/bin/uv（win32 为 uv.exe），
 // venv 在 文献库同级 .venv-pdf2zh（必须与 translate.ts findBabeldoc 的第一候选位一致），
-// 不碰系统 Python、不需要 sudo。win32 不在支持范围（tar 解 zip、exe 后缀都要分叉），直接给手动指引。
+// 不碰系统 Python、不需要 sudo。
+// win32 差异：uv 发 zip 而非 tar.gz（Win10 1803+ 自带 bsdtar 可解 zip，tar -xf 通吃两种格式）、
+// exe 后缀、venv 用 Scripts/ 而非 bin/、PATH 查找用 where 替代 which、不需要 chmod。
 
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -17,10 +19,13 @@ import { homedir } from 'node:os'
 /** 安装进度回调：phase 文案会原样显示在阅读器状态栏。 */
 export type PhaseFn = (phase: string) => void
 
+const isWin = process.platform === 'win32'
+
 /** uv 发布的 target triple；不支持的平台返回 null（给手动安装指引）。 */
 function uvTriple(): string | null {
   const { platform, arch } = process
   if (platform === 'darwin') return arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin'
+  if (platform === 'win32') return arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc'
   // musl 静态构建：不依赖系统 glibc 版本，最省心
   if (platform === 'linux') {
     if (arch === 'x64') return 'x86_64-unknown-linux-musl'
@@ -49,14 +54,15 @@ function run(
 }
 
 async function whichOk(cmd: string): Promise<boolean> {
+  // win32 没有 which，用 where（两者都找不到时都只是跳下一个候选，不算错误）
   return new Promise((res) => {
-    execFile('which', [cmd], (err, stdout) => res(!err && stdout.trim() !== ''))
+    execFile(isWin ? 'where' : 'which', [cmd], (err, stdout) => res(!err && stdout.trim() !== ''))
   })
 }
 
 /** 插件托管的 uv 位置（不落系统目录，删插件目录即清干净）。 */
 export function uvPath(home: string): string {
-  return join(home, '.dsh-paper-reader', 'bin', 'uv')
+  return join(home, '.dsh-paper-reader', 'bin', isWin ? 'uv.exe' : 'uv')
 }
 
 /** 找 uv：插件托管 → PATH → 常见安装位。 */
@@ -64,7 +70,10 @@ async function findUv(home: string): Promise<string | null> {
   const own = uvPath(home)
   if (existsSync(own)) return own
   if (await whichOk('uv')) return 'uv'
-  for (const c of [join(homedir(), '.local', 'bin', 'uv'), join(homedir(), '.cargo', 'bin', 'uv')]) {
+  const candidates = isWin
+    ? [join(homedir(), '.local', 'bin', 'uv.exe')]
+    : [join(homedir(), '.local', 'bin', 'uv'), join(homedir(), '.cargo', 'bin', 'uv')]
+  for (const c of candidates) {
     if (existsSync(c)) return c
   }
   return null
@@ -85,7 +94,7 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
       `当前平台（${process.platform}/${process.arch}）暂不支持自动安装：请手动安装 uv（https://docs.astral.sh/uv/）后重试`,
     )
   }
-  const want = `uv-${triple}.tar.gz`
+  const want = isWin ? `uv-${triple}.zip` : `uv-${triple}.tar.gz`
   const tmp = join(home, '.dsh-paper-reader', 'bin', `.uv-install-${Date.now()}`)
   await mkdir(tmp, { recursive: true })
   try {
@@ -116,14 +125,16 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
     const actual = createHash('sha256').update(body).digest('hex')
     if (actual !== expect) throw new Error('uv 下载文件校验和不匹配，已丢弃（请重试）')
 
-    const tgzPath = join(tmp, 'uv.tar.gz')
-    await writeFile(tgzPath, body)
-    await run('tar', ['-xzf', tgzPath, '-C', tmp], { timeout: 60_000 })
-    const extracted = join(tmp, `uv-${triple}`, 'uv')
+    const pkgPath = join(tmp, isWin ? 'uv.zip' : 'uv.tar.gz')
+    await writeFile(pkgPath, body)
+    // 不带 -z：bsdtar（macOS 自带 / Win10 1803+ 的 tar.exe）和 GNU tar 解包时都自动探测格式，
+    // 同一条命令通吃 tar.gz 与 zip（win32 的 uv 只发 zip）
+    await run('tar', ['-xf', pkgPath, '-C', tmp], { timeout: 60_000 })
+    const extracted = join(tmp, `uv-${triple}`, isWin ? 'uv.exe' : 'uv')
     if (!existsSync(extracted)) throw new Error('uv 解包结果不符合预期')
     const dst = uvPath(home)
     await rename(extracted, dst)
-    await chmod(dst, 0o755)
+    if (!isWin) await chmod(dst, 0o755) // win32 无可执行位概念
     return dst
   } finally {
     await rm(tmp, { recursive: true, force: true })
@@ -135,10 +146,11 @@ async function installBabeldoc(uv: string, venvDir: string, onPhase: PhaseFn): P
   onPhase('正在安装翻译引擎（2/3 安装 Python）…')
   // --python-preference only-managed：不碰用户系统里可能残缺/带 externally-managed 标记的 Python
   await run(uv, ['venv', venvDir, '--python', '3.12', '--python-preference', 'only-managed'], { timeout: 10 * 60_000 })
-  const py = join(venvDir, 'bin', 'python')
+  // win32 venv 用 Scripts/ 而非 bin/，可执行文件带 .exe
+  const py = isWin ? join(venvDir, 'Scripts', 'python.exe') : join(venvDir, 'bin', 'python')
   onPhase('正在安装翻译引擎（3/3 安装 babeldoc，首次约几分钟）…')
   await run(uv, ['pip', 'install', '--python', py, 'babeldoc'], { timeout: 20 * 60_000 })
-  const bin = join(venvDir, 'bin', 'babeldoc')
+  const bin = isWin ? join(venvDir, 'Scripts', 'babeldoc.exe') : join(venvDir, 'bin', 'babeldoc')
   if (!existsSync(bin)) throw new Error('babeldoc 安装完成但未找到可执行文件')
   return bin
 }

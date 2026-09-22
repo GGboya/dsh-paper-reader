@@ -28,10 +28,24 @@
 - 📖 **PDF 阅读器居中**：中间是论文（PDF.js 缩放 / Retina 高清 / 文本层选择 / 适宽模式），最右是该论文的原生对话 —— 视觉换位实现，列宽拖拽/折叠仍是 dsh 原生行为，关掉 PDF 页签即还原官方布局
 - 💬 **选中即问**：阅读器里选中文字 → 弹出提问框 → 注入当前会话，原生对话区实时回答
 - 📍 **引用定位**：回答里的「第 N 页」可点击，平滑跳回 PDF 对应页并闪烁
-- 🀄 **中英切换**：顶栏「中」按钮原文 ↔ 纯中文切换；无译文时一键后台生成（babeldoc），生成需配置 `translate` 端点；**无需预装 Python**——首次生成时自动下载 uv + 托管 Python + babeldoc（macOS/Linux，约几分钟），全程落在用户目录
-- 🔍 **PDF 转录 + 检索**：本地提取（pdf.js，纯 Node 无需 Python），页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
+- 🀄 **中英切换**：顶栏「中」按钮原文 ↔ 纯中文切换；无译文时一键后台生成（babeldoc），生成需配置 `translate` 端点；**无需预装 Python**——首次生成时自动下载 uv + 托管 Python + babeldoc（macOS / Linux / Windows，约几分钟），全程落在用户目录
+- 🔍 **PDF 转录 + 检索**：本地提取（pdf.js，纯 Node 无需 Python），页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；可选接入 TypeSafe/Jev 语义重排（设置面板填端点即启用，不配置时退回纯关键词排序）；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
 
 ## 安装
+
+### 方式一：DSH Desktop（零环境，推荐普通用户）
+
+[DSH Desktop](https://github.com/anywhere-labs/dsh-desktop) 是社区的 DeepSeek Harness 桌面客户端（macOS / Windows，开箱即用，不需要装 Node.js）：
+
+1. 下载安装 DSH Desktop 并启动
+2. 托盘菜单 → **Open DSH Terminal**（终端里自带 `dsh`/`pnpm`，只对那个终端生效）
+3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.1.0`
+4. 退出并重开 DSH Desktop（插件变更要重启才进 Loader 组合）
+
+> 已在 DSH Desktop 2.0.13（内置 dsh 0.1.5-rc.2）上实测通过：侧栏文献库、PDF 阅读器、选中即问、页码跳转、原生对话伴读、翻译引擎自动安装（uv + Python + babeldoc 全程落在用户目录）全部可用。
+> 注意：Desktop 的 `desktop` profile 被 Electron 独占管理，外部 CLI 直接 `dsh plugin --profile desktop add` 会被拒（`managed exclusively by the Electron application`）——必须从 Desktop 自己的终端进。
+
+### 方式二：命令行 dsh（开发者）
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader
@@ -45,7 +59,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **已装过的用户升级必须带显式版本号**——不带版本的 `add` 对已存在的依赖是 no-op（pnpm 按首次安装时记录的版本范围解析，不会追新）：
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.0.0
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.1.0
 # 重启 dsh web 生效；浏览器 Cmd+Shift+R 强刷，避免旧阅读器页面缓存
 ```
 
@@ -84,7 +98,7 @@ dsh --profile web                                  # 侧栏变为文献库树
 >
 > 翻译引擎**零预装**：找不到 babeldoc 时自动走 uv 链路安装——uv 独立二进制（GitHub Releases API 下载 + sha256 校验）→
 > uv 托管 Python 3.12 → `uv pip install babeldoc`，落在 `~/.dsh/.dsh-paper-reader/bin/` 与文献库同级 `.venv-pdf2zh/`，
-> 不碰系统 Python。已装有 uv / babeldoc（含 pdfqa 的 `.venv-pdf2zh`）则直接复用。Windows 暂不支持自动安装，需手动装 uv 后重试。
+> 不碰系统 Python。已装有 uv / babeldoc（含 pdfqa 的 `.venv-pdf2zh`）则直接复用。macOS / Linux / Windows 均支持自动安装（Windows 走 uv 的 zip 包 + 系统自带 tar 解包）。
 
 > 伴读模式是**按需开启**的：默认不注册 `sidebar.workspaces`（官方工作区/会话列表原样），侧栏底部「📚 论文伴读」开关点击才接管，再点还原；模式选择记在 localStorage。退出模式时已打开的 PDF 页签和伴读会话不受影响。
 
@@ -103,6 +117,8 @@ src/
   translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）
   babeldoc-install.ts 纯函数：无 Python 环境时自动安装 babeldoc（uv → 托管 Python → venv）
   translate-config.ts 纯函数：翻译端点配置读写（$DSH_HOME 下 0600）+ 保存前连接预检
+  rerank.ts     纯函数：search_paper 语义重排（TypeSafe/Jev，无凭据时退回关键词排序）
+  typesafe-config.ts 纯函数：TypeSafe 端点配置读写（与翻译配置同一套约定）
   preset.ts     纯函数：自带 agent preset 安装到 $DSH_HOME/.agent-presets/
 presets/paper-reader/  「论文伴读」agent preset（persona 完整提示词 + compaction）
 reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）

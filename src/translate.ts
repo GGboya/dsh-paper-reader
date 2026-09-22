@@ -5,9 +5,8 @@
 
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, rename, rm } from 'node:fs/promises'
-import { glob } from 'node:fs/promises'
-import { join, dirname, basename, extname } from 'node:path'
+import { mkdir, rename, rm, readdir } from 'node:fs/promises'
+import { join, dirname, basename, extname, isAbsolute } from 'node:path'
 import type { PaperRef } from './library.ts'
 import { dshHome } from './library.ts'
 import { ensureBabeldoc } from './babeldoc-install.ts'
@@ -53,21 +52,25 @@ export function zhStatus(ref: PaperRef): ZhStatus {
   }
 }
 
-/** 找 babeldoc 可执行文件：pdfqa venv（文献库同级 .venv-pdf2zh）→ PATH → miniconda。 */
+/** 找 babeldoc 可执行文件：pdfqa venv（文献库同级 .venv-pdf2zh）→ PATH → miniconda（仅 macOS）。 */
 async function findBabeldoc(dataDir: string): Promise<string | null> {
+  const isWin = process.platform === 'win32'
   const candidates = [
-    join(dirname(dataDir), '.venv-pdf2zh', 'bin', 'babeldoc'),
+    // 与 babeldoc-install.ts installBabeldoc 的安装位严格一致（win32 venv 用 Scripts/）
+    isWin
+      ? join(dirname(dataDir), '.venv-pdf2zh', 'Scripts', 'babeldoc.exe')
+      : join(dirname(dataDir), '.venv-pdf2zh', 'bin', 'babeldoc'),
     'babeldoc',
-    '/opt/homebrew/Caskroom/miniconda/base/bin/babeldoc',
+    ...(process.platform === 'darwin' ? ['/opt/homebrew/Caskroom/miniconda/base/bin/babeldoc'] : []),
   ]
   for (const c of candidates) {
-    if (c.includes('/')) {
+    if (isAbsolute(c)) {
       if (existsSync(c)) return c
       continue
     }
-    // PATH 查找
+    // PATH 查找（win32 用 where）
     const found = await new Promise<boolean>((res) => {
-      execFile('which', [c], (err, stdout) => res(!err && stdout.trim() !== ''))
+      execFile(isWin ? 'where' : 'which', [c], (err, stdout) => res(!err && stdout.trim() !== ''))
     })
     if (found) return c
   }
@@ -221,11 +224,11 @@ async function launch(
       }
       // 产出从 scratch 挪回文献目录：<名>.zh-CN.mono.pdf → -zh.pdf，.dual.pdf → -dual.pdf
       try {
-        for await (const f of glob(join(tmpDir, `${stem}*.zh-CN.mono.pdf`))) {
-          await rename(f, dstStem + '-zh.pdf')
-        }
-        for await (const f of glob(join(tmpDir, `${stem}*.zh-CN.dual.pdf`))) {
-          await rename(f, dstStem + '-dual.pdf')
+        // 不用 glob：其 pattern 里反斜杠是转义符，win32 的 join 路径会踩雷；readdir + 前后缀匹配全平台稳
+        const files = await readdir(tmpDir)
+        for (const f of files) {
+          if (f.startsWith(stem) && f.endsWith('.zh-CN.mono.pdf')) await rename(join(tmpDir, f), dstStem + '-zh.pdf')
+          if (f.startsWith(stem) && f.endsWith('.zh-CN.dual.pdf')) await rename(join(tmpDir, f), dstStem + '-dual.pdf')
         }
         if (!existsSync(zhPdfPath(ref)) && !existsSync(dualPdfPath(ref))) {
           busy.set(ref.pdfPath, { error: 'babeldoc 未产出译文 PDF' })
