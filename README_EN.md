@@ -9,6 +9,8 @@
 
 A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin that turns your agent workspace into a **paper reading workbench**: PDF transcription & search, native chat-based companion reading, and a built-in PDF reader — with answers that cite page numbers and **jump back to the exact highlighted passage in the PDF**.
 
+> **👉 Just want a working app?** Skip this page and grab [**PaperReader**](https://github.com/GGboya/PaperReader) — a desktop app with this plugin preinstalled. Download the DMG, drag it into Applications, done. No environment setup. This repository is for people who want to install the plugin themselves or hack on the code.
+
 The agent loop, model layer, and session persistence are all handled by the dsh framework; this plugin is a thin shell composing transcription + retrieval + reader UI.
 
 **Does not modify the official UI on install** — a single "📚 Paper Reading" toggle appears at the bottom of the sidebar. Click it to enter reading mode (sidebar becomes a paper library tree), click again to restore the official workspace list:
@@ -28,10 +30,31 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 - 📖 **Centered PDF reader**: the paper sits in the middle (PDF.js zoom / Retina rendering / text-layer selection / fit-width mode), its native chat on the right — implemented via visual swapping, so column dragging/collapsing stays native dsh behavior; closing the PDF tab restores the official layout
 - 💬 **Select-to-ask**: select text in the reader → a question box pops up → injects into the current session, answered live in the native chat
 - 📍 **Citation jumping**: "Page N" in an answer is clickable — smooth-scrolls back to that PDF page and flashes the cited passage
-- 🀄 **Chinese/English toggle**: the "中" button in the top bar switches original ↔ full Chinese; if no translation exists, one click generates it in the background (babeldoc) — **no Python preinstall required**: first use auto-downloads uv + managed Python + babeldoc (macOS/Linux, a few minutes), everything stays in the user directory
+- 🀄 **Chinese/English toggle**: the "中" button in the top bar switches original ↔ full Chinese; if no translation exists, one click generates it in the background (babeldoc) — **no Python preinstall required**: first use auto-downloads uv + managed Python + babeldoc (macOS / Linux / Windows, a few minutes), everything stays in the user directory
 - 🔍 **PDF transcription + search**: local extraction (pdf.js, pure Node, no Python), header/footer stripping / ligature / hyphenation repair / paragraph reflow, with a page-offset table; compatible with pdfqa's `data/` cache layout
 
 ## Install
+
+### Option 1: PaperReader desktop app (one-click, recommended)
+
+[PaperReader](https://github.com/GGboya/PaperReader) is a desktop app with this plugin **preinstalled** (packaged on top of the community desktop client [DSH Desktop](https://github.com/anywhere-labs/dsh-desktop)):
+
+1. Download the DMG from [Releases](https://github.com/GGboya/PaperReader/releases/latest) (macOS Universal — Intel and Apple Silicon; Windows build coming)
+2. Open the DMG, drag PaperReader into Applications
+3. On first launch use right-click → Open (unsigned release — it only asks once); the first launch also runs a one-time initialization of a few minutes
+
+You get the library + reader + companion chat out of the box — no commands needed.
+
+### Option 2: Install the plugin into an existing DSH Desktop
+
+If you already use [DSH Desktop](https://github.com/anywhere-labs/dsh-desktop) (the community DeepSeek Harness desktop client for macOS / Windows, no Node.js required):
+
+1. Launch DSH Desktop
+2. Tray menu → **Open DSH Terminal** (that terminal comes with `dsh`/`pnpm`)
+3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.1.0`
+4. Quit and reopen DSH Desktop (plugin changes need a restart to enter the Loader composition)
+
+### Option 3: CLI dsh (developers)
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader

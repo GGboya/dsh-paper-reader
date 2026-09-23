@@ -9,6 +9,8 @@
 
 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件：论文伴读工作台 —— PDF 转录 / 检索 + 原生对话伴读 + 内置阅读器。
 
+> **👉 普通用户不用看这一页。** 如果你只是想装一个能用的 App，请直接去 [**PaperReader 论文伴读桌面版**](https://github.com/GGboya/PaperReader) —— 那是把本插件预装好的桌面应用，下载 DMG 拖进「应用程序」就能用，不需要任何环境。本仓库面向的是想自己装插件、或想改代码的用户。
+
 功能迁移自本地独立产品 pdfqa（Go 实现的论文伴读工具）。原则：agent 循环 / 模型层 / 会话持久化全部交给 dsh 框架，插件只做「转录 + 检索 + 阅读器 UI」的薄壳组合。
 
 **安装后不改动官方界面** —— 侧栏底部多一行「📚 论文伴读」开关，点击才进入伴读模式（左侧变为文献库树），再点即还原官方工作区列表：
@@ -33,9 +35,19 @@
 
 ## 安装
 
-### 方式一：DSH Desktop（零环境，推荐普通用户）
+### 方式一：PaperReader 桌面版（一键安装，推荐普通用户）
 
-[DSH Desktop](https://github.com/anywhere-labs/dsh-desktop) 是社区的 DeepSeek Harness 桌面客户端（macOS / Windows，开箱即用，不需要装 Node.js）：
+[PaperReader](https://github.com/GGboya/PaperReader) 是把本插件**预装好**的桌面应用（基于社区桌面客户端 [DSH Desktop](https://github.com/anywhere-labs/dsh-desktop) 打包）：
+
+1. 从 [Releases](https://github.com/GGboya/PaperReader/releases/latest) 下载 DMG（macOS Universal,Intel / M 系列芯片都行；Windows 版打包中）
+2. 打开 DMG，把 PaperReader 拖进「应用程序」
+3. 首次打开用 右键 → 打开（免签名发布，只弹这一次）；首次启动有几分钟一次性初始化
+
+打开就是文献库 + 阅读器 + 伴读对话，不用再执行任何命令。
+
+### 方式二：已有 DSH Desktop，自己装插件
+
+如果你已经在用 [DSH Desktop](https://github.com/anywhere-labs/dsh-desktop)（社区的 DeepSeek Harness 桌面客户端，macOS / Windows，开箱即用，不需要装 Node.js），可以把本插件装进去：
 
 1. 下载安装 DSH Desktop 并启动
 2. 托盘菜单 → **Open DSH Terminal**（终端里自带 `dsh`/`pnpm`，只对那个终端生效）
@@ -45,7 +57,7 @@
 > 已在 DSH Desktop 2.0.13（内置 dsh 0.1.5-rc.2）上实测通过：侧栏文献库、PDF 阅读器、选中即问、页码跳转、原生对话伴读、翻译引擎自动安装（uv + Python + babeldoc 全程落在用户目录）全部可用。
 > 注意：Desktop 的 `desktop` profile 被 Electron 独占管理，外部 CLI 直接 `dsh plugin --profile desktop add` 会被拒（`managed exclusively by the Electron application`）——必须从 Desktop 自己的终端进。
 
-### 方式二：命令行 dsh（开发者）
+### 方式三：命令行 dsh（开发者）
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader
