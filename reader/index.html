@@ -4,12 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>论文伴读 · dsh-paper-reader</title>
-<!-- pdf.js 6.x 本地 vendor（不再走 CDN）：3.11 的字体解析对 babeldoc 嵌入的 CID 字体会回退成黑体 -->
-<script type="module">
-  import * as pdfjsLib from '/paper-reader/vendor/pdf.min.mjs';
-  window.pdfjsLib = pdfjsLib;
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '/paper-reader/vendor/pdf.worker.min.mjs';
-</script>
+<!-- pdf.js 6.x 本地 vendor（不再走 CDN）：3.11 的字体解析对 babeldoc 嵌入的 CID 字体会回退成黑体。
+     不用 <script type="module">：module 是 defer 语义（整页解析完 + 458KB 拉取编译完才执行），
+     而底部经典脚本在解析期就开跑 bootstrap()，库里有论文时先到 loadPdf，此刻 window.pdfjsLib
+     还没就绪 → "pdfjsLib is not defined"。改为经典脚本里动态 import()（见 ensurePdfjs），顺序有保证。 -->
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #e2e5ea; --text: #24292f;
@@ -398,7 +396,27 @@ $('cfg-save').onclick = async () => {
 };
 
 /* ================= PDF 渲染(pdf.js:缩放 + devicePixelRatio 高清,移植自 pdfqa) ================= */
-/* pdfjsLib 与 workerSrc 由头部 module 脚本设置（本地 vendor，pdf.js 6.x） */
+/* pdf.js 6.x 本地 vendor：动态 import（缓存的 Promise），loadPdf 先 await 再用——
+   底部经典脚本解析期就开跑 bootstrap()，必须由这里保证「pdf.js 就绪后才渲染」；
+   失败（vendor 404 / MIME 拒绝）抛带 URL 的可读错误，而不是莫名其妙的 ReferenceError。 */
+let pdfjsReadyP = null;
+function ensurePdfjs() {
+  if (!pdfjsReadyP) {
+    pdfjsReadyP = import('/paper-reader/vendor/pdf.min.mjs').then(
+      (m) => {
+        window.pdfjsLib = m;
+        m.GlobalWorkerOptions.workerSrc = '/paper-reader/vendor/pdf.worker.min.mjs';
+        return m;
+      },
+      (e) => {
+        pdfjsReadyP = null; // 失败后清缓存：瞬时故障不至于让本页签永久坏掉，下次 loadPdf 重试
+        throw new Error('pdf.js 加载失败（/paper-reader/vendor/pdf.min.mjs）：' + (e && e.message ? e.message : e));
+      },
+    );
+  }
+  return pdfjsReadyP;
+}
+ensurePdfjs().catch(() => {}); // 预热：与 bootstrap 的 API 请求并行拉取，不把首屏串行化
 
 let pdfDoc = null;
 let zoomScale = 1.5;
@@ -416,6 +434,7 @@ let renderToken = 0;
 })();
 
 async function loadPdf(url) {
+  await ensurePdfjs(); // 就绪前禁止触 pdfjsLib（defer 竞态，见文件头注释）
   pdfDoc = await pdfjsLib.getDocument({ url }).promise; // v6 起不接受字符串参数，必须传对象
   $('empty').style.display = 'none';
   if (fitMode) { fitToWidth(); return; } // fitToWidth 内部 setZoom → renderAllPages
