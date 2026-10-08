@@ -50,8 +50,9 @@ You get the library + reader + companion chat out of the box — no commands nee
 **DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
 
 1. Install, launch, and sign in
-2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader`
-3. Restart the desktop app
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.2.0`
+3. Newly installed plugins start **disabled**: open the plugin's detail and flip the **Enable** switch
+4. **Restart the desktop app** (with the plugin enabled live, opening papers silently fails until a restart brings it into the boot composition — tested)
 
 > Verified on official desktop V0.2.0-rc.2 (bundled dsh 0.2.0-rc.2, macOS arm64): library tree, new topic, PDF upload, PDF reader, native companion chat, history/new-chat buttons all work.
 > Requires >= 1.2.0 — older versions are denied by the 0.2.x runtime's peer-compatibility check (shown as an error in the plugin list).
