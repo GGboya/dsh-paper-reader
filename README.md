@@ -54,6 +54,10 @@
 3. 装完默认**停用**：点进插件详情，打开「启用」开关
 4. **重启桌面端**（热启用状态下打开论文的链路会静默失效，重启进开机组合才正常，实测）
 
+完整流程演示（添加插件 → 启用 → 重启 → 打开论文直接提问）：
+
+![官方桌面端安装并使用论文伴读插件](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/desktop-official-use.gif)
+
 > 已在官方桌面端 V0.2.0-rc.2（内置 dsh 0.2.0-rc.2，macOS arm64）实测通过：侧栏文献库、新建专题、上传 PDF、PDF 阅读器、原生对话伴读、历史/新建对话按钮全部可用。
 > 需要 ≥1.2.0：更早版本会被 0.2.x 运行时的 peer 兼容校验拒载（插件列表里显示异常）。
 
@@ -93,7 +97,11 @@ grep '"version"' ~/.dsh/profiles/web/node_modules/@ggboy123/dsh-paper-reader/pac
 
 > pnpm 若开了供应链策略 `minimumReleaseAge`（发布 N 小时内的新包拒装）：要么等过窗口期，要么在 `~/.dsh/profiles/web/.npmrc` 加一行 `minimum-release-age-exclude[]=@ggboy123/dsh-paper-reader`（只豁免本插件，不动全局策略）。
 
-本地开发：
+### 参与开发（本地调试）
+
+欢迎改代码。流程：clone → 构建 → 以本地目录装进 profile，之后改完 `pnpm run build` 重启对应 profile 即可验证：
+
+![参与开发：clone → pnpm install → build → 本地安装](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/dev-workflow.gif)
 
 ```bash
 git clone https://github.com/GGboya/dsh-paper-reader
