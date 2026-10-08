@@ -45,13 +45,22 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 
 You get the library + reader + companion chat out of the box — no commands needed.
 
-### Option 2: Install the plugin into an existing DSH Desktop
+### Option 2: Install the plugin into an existing desktop client
 
-If you already use [DSH Desktop](https://github.com/anywhere-labs/dsh-desktop) (the community DeepSeek Harness desktop client for macOS / Windows, no Node.js required):
+**DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
+
+1. Install, launch, and sign in
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader`
+3. Restart the desktop app
+
+> Verified on official desktop V0.2.0-rc.2 (bundled dsh 0.2.0-rc.2, macOS arm64): library tree, new topic, PDF upload, PDF reader, native companion chat, history/new-chat buttons all work.
+> Requires >= 1.2.0 — older versions are denied by the 0.2.x runtime's peer-compatibility check (shown as an error in the plugin list).
+
+**Community DSH Desktop** ([anywhere-labs/dsh-desktop](https://github.com/anywhere-labs/dsh-desktop), the community DeepSeek Harness desktop client for macOS / Windows, no Node.js required):
 
 1. Launch DSH Desktop
 2. Tray menu → **Open DSH Terminal** (that terminal comes with `dsh`/`pnpm`)
-3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.1.0`
+3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.2.0`
 4. Quit and reopen DSH Desktop (plugin changes need a restart to enter the Loader composition)
 
 ### Option 3: CLI dsh (developers)
@@ -68,7 +77,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **Existing users must pass an explicit version** — a bare `add` is a no-op for an already-installed dependency (pnpm resolves from the range recorded at first install and won't chase newer releases):
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.1.0
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.2.0
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 

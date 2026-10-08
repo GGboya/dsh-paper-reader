@@ -45,13 +45,22 @@
 
 打开就是文献库 + 阅读器 + 伴读对话，不用再执行任何命令。
 
-### 方式二：已有 DSH Desktop，自己装插件
+### 方式二：已有桌面客户端，自己装插件
 
-如果你已经在用 [DSH Desktop](https://github.com/anywhere-labs/dsh-desktop)（社区的 DeepSeek Harness 桌面客户端，macOS / Windows，开箱即用，不需要装 Node.js），可以把本插件装进去：
+**DeepSeek 官方桌面端**（[deepseek.com/download](https://www.deepseek.com/download/) 下载，即 DeepSeek Harness 桌面版）：
+
+1. 安装并启动，登录 DeepSeek 账号
+2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader` 安装
+3. 重启桌面端生效
+
+> 已在官方桌面端 V0.2.0-rc.2（内置 dsh 0.2.0-rc.2，macOS arm64）实测通过：侧栏文献库、新建专题、上传 PDF、PDF 阅读器、原生对话伴读、历史/新建对话按钮全部可用。
+> 需要 ≥1.2.0：更早版本会被 0.2.x 运行时的 peer 兼容校验拒载（插件列表里显示异常）。
+
+**社区 DSH Desktop**（[anywhere-labs/dsh-desktop](https://github.com/anywhere-labs/dsh-desktop)，社区的 DeepSeek Harness 桌面客户端，macOS / Windows，开箱即用，不需要装 Node.js）：
 
 1. 下载安装 DSH Desktop 并启动
 2. 托盘菜单 → **Open DSH Terminal**（终端里自带 `dsh`/`pnpm`，只对那个终端生效）
-3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.1.0`
+3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.2.0`
 4. 退出并重开 DSH Desktop（插件变更要重启才进 Loader 组合）
 
 > 已在 DSH Desktop 2.0.13（内置 dsh 0.1.5-rc.2）上实测通过：侧栏文献库、PDF 阅读器、选中即问、页码跳转、原生对话伴读、翻译引擎自动安装（uv + Python + babeldoc 全程落在用户目录）全部可用。
@@ -71,7 +80,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **已装过的用户升级必须带显式版本号**——不带版本的 `add` 对已存在的依赖是 no-op（pnpm 按首次安装时记录的版本范围解析，不会追新）：
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.1.0
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.2.0
 # 重启 dsh web 生效；浏览器 Cmd+Shift+R 强刷，避免旧阅读器页面缓存
 ```
 
