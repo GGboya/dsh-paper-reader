@@ -95,6 +95,27 @@ treated as pdfjs, and **upgrading never triggers a re-parse**; to switch origins
 `auto|pdfjs|mineru-local|mineru-cloud`). When MinerU fails, the existing cache is left **untouched** and the error carries
 the HTTP status plus a sanitized server message.
 
+**Searchable formulas (since v1.3.4)**: MinerU emits LaTeX with a space between *every* token (`x _ { t - 1 }`), so
+previously `search_paper` only matched when that spaced form was copied verbatim. Projecting into `.txt` now strips the
+whitespace inside math regions (`$...$` / `$$...$$`) and then normalizes the braces of *single-token* sub/superscripts
+(`Q_{t}` → `Q_t`, `^{2}` → `^2`). Normal-looking queries such as `x_{t-1}`, `\mathbb{R}`, `Q_t` and `q(x_t|x_{t-1})`
+therefore match directly (measured on a real paper: 0 hits before → hits on the matching page after). Commands whose
+spaces are semantic (`\text{...}`) are kept verbatim as a whole group; multi-token arguments (`x_{t-1}`, `x_{ij}`,
+`^{K \times K}`) keep their braces; `.mineru.md` / `.mineru.json` remain exactly as MinerU produced them.
+
+> **Upgrade note**: existing `.txt` caches on disk are **not rewritten** (they stay in the old format, so formula
+> queries still miss). To make a given paper's formulas searchable, re-transcribe that paper explicitly: pass
+> `source: mineru-local` (or `force: true`) to `transcribe_pdf`, or the same `source` to `POST /api/transcribe`.
+>
+> **Notation convention (important)**: the `.txt` stores the **compact form**, so `Q_t` matches while `Q_{t}` does
+> **not**; multi-token forms such as `x_{t-1}` keep their braces and match as written. Query-side normalization is
+> **scheduled for the next round** (retrieval-layer work) — until then, query with the compact form.
+>
+> **Two low-severity items (scheduled for the next round, registered in [docs/embed-plan.md](docs/embed-plan.md) "追加项二")**:
+> F-R1 `keepsInnerSpaces` prefix-matches the two-argument `\textcolor` into the "spaces are semantic" guard (the second
+> group of `$\textcolor{red}{hello world}$` gets its spaces compressed); F-R2 the region scanner does not look inside
+> `\text{}` groups (`$\text{costs $5}$` is split at the inner `$` — a sub-case of the documented boundary).
+
 **API** (used by the settings panel, behind the usual `/paper-reader` prefix and auth): `GET|POST|DELETE /api/mineru/config`
 (GET returns masked values only; POST persists only after a successful pre-check; DELETE falls back to profile/env),
 plus `POST /api/mineru/test` and `GET /api/mineru/health` for connectivity checks (they never persist anything).
@@ -134,7 +155,7 @@ You get the library + reader + companion chat out of the box — no commands nee
 **DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
 
 1. Install, launch, and sign in
-2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.3.3`
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.3.4`
 3. Newly installed plugins start **disabled**: open the plugin's detail and flip the **Enable** switch
 4. **Restart the desktop app** (with the plugin enabled live, opening papers silently fails until a restart brings it into the boot composition — tested)
 
@@ -145,7 +166,7 @@ You get the library + reader + companion chat out of the box — no commands nee
 
 1. Launch DSH Desktop
 2. Tray menu → **Open DSH Terminal** (that terminal comes with `dsh`/`pnpm`)
-3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.3.3`
+3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.3.4`
 4. Quit and reopen DSH Desktop (plugin changes need a restart to enter the Loader composition)
 
 ### Option 3: CLI dsh (developers)
@@ -162,7 +183,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **Existing users must pass an explicit version** — a bare `add` is a no-op for an already-installed dependency (pnpm resolves from the range recorded at first install and won't chase newer releases):
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.3
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.4
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 

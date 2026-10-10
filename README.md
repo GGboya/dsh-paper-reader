@@ -91,6 +91,26 @@ token 只落盘到 `~/.dsh/.dsh-paper-reader/mineru.json`（0600）；读取接�
 HTTP 侧 `POST /api/transcribe` 的 `source`，取值 `auto|pdfjs|mineru-local|mineru-cloud`）。
 MinerU 解析失败时**不动**已有缓存，错误信息带 HTTP 状态与脱敏后的服务端 message。
 
+**公式可检索（v1.3.4 起）**：MinerU 产出的 LaTeX 在**每个 token 之间**都带空格（`x _ { t - 1 }`），
+此前 `search_paper` 只有逐字照抄带空格写法才命中。投影成 `.txt` 时会先把数学区间（`$...$` / `$$...$$`）
+内的空白压掉、再把**单 token** 下标/上标的花括号归一化（`Q_{t}` → `Q_t`、`^{2}` → `^2`），
+因此 `x_{t-1}`、`\mathbb{R}`、`Q_t`、`q(x_t|x_{t-1})` 这类**正常写法**的公式查询可直接命中
+（真实论文实测：改造前 0 命中 → 改造后命中原页）。`\text{...}` 等空格有语义的命令整组原样保留；
+多 token 参数（`x_{t-1}`、`x_{ij}`、`^{K \times K}`）保留花括号；`.mineru.md` / `.mineru.json`
+仍是 MinerU 原样产出，不受影响。
+
+> **升级须知**：盘上已有的 `.txt` 缓存**不会被自动改写**（仍是旧格式，公式查询依旧搜不到）。
+> 要让某篇论文的公式可搜，需对该论文**显式重新转录**：agent 侧 `transcribe_pdf` 传
+> `source: mineru-local`（或 `force: true`），HTTP 侧 `POST /api/transcribe` 传同样的 `source`。
+>
+> **写法约定（重要）**：`.txt` 里存的是**紧凑写法**，所以 `Q_t` 能搜、`Q_{t}` **搜不到**；多 token 的
+> `x_{t-1}` 保留花括号，按原样书写即可命中。**查询侧归一化已排入下一轮**（检索层改造），在此之前请用紧凑写法。
+>
+> **两处 low 级待修项（已排入下一轮，见 [docs/embed-plan.md](docs/embed-plan.md) 的「追加项二」）**：
+> F-R1 `keepsInnerSpaces` 用前缀匹配把双参数 `\textcolor` 误纳入「空格有语义」保护
+> （`$\textcolor{red}{hello world}$` 的第二组空格被压缩）；F-R2 区间界定扫 `$` 时不感知 `\text{}` 组
+> （`$\text{costs $5}$` 会被内层 `$` 切断，属已声明边界的子形态）。
+
 **API**（设置面板用的读写口，走 `/paper-reader` 前缀与既有鉴权）：`GET|POST|DELETE /api/mineru/config`
 （GET 只回掩码；POST 预检通过才落盘；DELETE 回落 profile/环境变量）、`POST /api/mineru/test`
 与 `GET /api/mineru/health`（连通性预检，不落盘）。
@@ -128,7 +148,7 @@ MinerU 解析失败时**不动**已有缓存，错误信息带 HTTP 状态与脱
 **DeepSeek 官方桌面端**（[deepseek.com/download](https://www.deepseek.com/download/) 下载，即 DeepSeek Harness 桌面版）：
 
 1. 安装并启动，登录 DeepSeek 账号
-2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.3.3` 安装
+2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.3.4` 安装
 3. 装完默认**停用**：点进插件详情，打开「启用」开关
 4. **重启桌面端**（热启用状态下打开论文的链路会静默失效，重启进开机组合才正常，实测）
 
@@ -143,7 +163,7 @@ MinerU 解析失败时**不动**已有缓存，错误信息带 HTTP 状态与脱
 
 1. 下载安装 DSH Desktop 并启动
 2. 托盘菜单 → **Open DSH Terminal**（终端里自带 `dsh`/`pnpm`，只对那个终端生效）
-3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.3.3`
+3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.3.4`
 4. 退出并重开 DSH Desktop（插件变更要重启才进 Loader 组合）
 
 > 已在 DSH Desktop 2.0.13（内置 dsh 0.1.5-rc.2）上实测通过：侧栏文献库、PDF 阅读器、选中即问、页码跳转、原生对话伴读、翻译引擎自动安装（uv + Python + babeldoc 全程落在用户目录）全部可用。
@@ -163,7 +183,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **已装过的用户升级必须带显式版本号**——不带版本的 `add` 对已存在的依赖是 no-op（pnpm 按首次安装时记录的版本范围解析，不会追新）：
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.3
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.4
 # 重启 dsh web 生效；浏览器 Cmd+Shift+R 强刷，避免旧阅读器页面缓存
 ```
 
