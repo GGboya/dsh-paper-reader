@@ -37,14 +37,14 @@
 
 ## 安装
 
-### 方式一：官方桌面端装插件（推荐）
+### 普通用户：桌面端装好即用（推荐）
 
-**DeepSeek 官方桌面端**（[deepseek.com/download](https://www.deepseek.com/download/) 下载，即 DeepSeek Harness 桌面版）：
+**两步**：装 DeepSeek 官方桌面端 → 里面直接装插件。
 
-1. 安装并启动，登录 DeepSeek 账号
-2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.3.4` 安装
-3. 装完默认**停用**：点进插件详情，打开「启用」开关
-4. **重启桌面端**（热启用状态下打开论文的链路会静默失效，重启进开机组合才正常，实测）
+1. 下载安装 [DeepSeek 官方桌面端](https://www.deepseek.com/download/)（即 DeepSeek Harness 桌面版），登录 DeepSeek 账号
+2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@latest`，装完点进插件详情打开「启用」开关，**重启桌面端**
+
+完成。侧栏底部点「📚 论文伴读」进入文献库，上传 PDF 开始用。
 
 完整流程演示（添加插件 → 启用 → 重启 → 打开论文直接提问）：
 
@@ -53,20 +53,24 @@
 > 已在官方桌面端 V0.2.0-rc.2（内置 dsh 0.2.0-rc.2，macOS arm64）实测通过：侧栏文献库、新建专题、上传 PDF、PDF 阅读器、原生对话伴读、历史/新建对话按钮全部可用。
 > 需要 ≥1.2.0：更早版本会被 0.2.x 运行时的 peer 兼容校验拒载（插件列表里显示异常）。
 
-> 曾经的 PaperReader 桌面版（基于社区 DSH Desktop 的预装打包）**已不再维护**——统一收敛到官方桌面端 + 插件的形式，老用户请迁移到本方式。
+> 想直接在客户端里逛插件市场（4000+ 插件、分类、评论、一键安装），可另装社区插件 [`dshmarket`](https://github.com/dsh-market/dsh-market)，本插件已在其目录中。
 
-### 方式二：命令行 dsh（开发者）
+**排坑（都是实测踩过的）**：
+
+- **升级后插件开关会回到停用**：侧栏 → 插件 → 打开「启用」→ 重启。症状有迷惑性——文献树还在但点论文没反应（浏览器侧缓存活着、宿主侧已下线），其实是没启用
+- **添加时务必带 `@latest`**：不带版本号对已装过的插件是 no-op（dsh 的插件管理器按首次记录的版本处理，不会追新）
+- 旧版 PaperReader 桌面版（社区 DSH Desktop 预装打包）**已停止维护**，请迁移到本方式
+
+### 开发者：命令行 dsh
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest
 ```
 
 > npm 包名走 `@ggboy123` 作用域：裸名 `dsh-paper-reader` 已被另一个插件占用（那是「输入文献、吐精读报告」的一次性分析工具，与本插件的「阅读器 + 会话伴读」定位不同）。
 > 不要用 `github:GGboya/dsh-paper-reader` 安装 —— dist 不入库，git 安装会导致 profile 起不来（构建产物只随 npm 包分发）。
 
-### 升级
-
-**升级用 `@latest`（或显式版本号）**——不带任何版本/tag 的 `add` 对已装过的依赖是 no-op（dsh 的插件管理器按首次记录的版本处理，不追新，实测），所以要么写死版本、要么用 tag：
+**升级**：用 `@latest`（或显式版本号）——不带任何版本/tag 的 `add` 对已装过的依赖是 no-op（实测）：
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # 永远装最新
@@ -74,17 +78,13 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # 永远装最�
 # 重启 dsh web 生效；浏览器 Cmd+Shift+R 强刷，避免旧阅读器页面缓存
 ```
 
-桌面端「添加插件」输入框同样填 `@ggboy123/dsh-paper-reader@latest` 即可。
-
-> **桌面端升级后插件开关会回到停用**（实测）：侧栏 → 插件 → 打开 `@ggboy123/dsh-paper-reader` 的「启用」开关 → 重启桌面端。不打开时的症状很有迷惑性：文献树还在（浏览器侧缓存活着）但点论文没反应（宿主侧已下线），看起来像坏了，其实只是没启用。
-
 确认当前装的是哪个版本：
 
 ```bash
 grep '"version"' ~/.dsh/profiles/web/node_modules/@ggboy123/dsh-paper-reader/package.json
 ```
 
-> pnpm 若开了供应链策略 `minimumReleaseAge`（发布 N 小时内的新包拒装）：要么等过窗口期，要么在 `~/.dsh/profiles/web/.npmrc` 加一行 `minimum-release-age-exclude[]=@ggboy123/dsh-paper-reader`（只豁免本插件，不动全局策略）。
+> pnpm 若开了供应链策略 `minimumReleaseAge`（发布 N 小时内的新包拒装，桌面端默认开）：要么等过窗口期，要么在 `~/.dsh/profiles/web/.npmrc` 加一行 `minimum-release-age-exclude[]=@ggboy123/dsh-paper-reader`（只豁免本插件，不动全局策略）。桌面端的豁免清单在 `~/.dsh/profiles/desktop/pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude`。
 
 ### 参与开发（本地调试）
 
