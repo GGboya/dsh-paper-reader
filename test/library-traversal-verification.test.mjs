@@ -1,7 +1,7 @@
 // test/library-traversal-verification.test.mjs — **验证者独立对抗测试**（t11）。
 //
 // 目的：证明「修复前确实能逃逸」→「修复后被挡住」，并逐条核对 t10 的验收标准。
-//   · 先用上游 HEAD 的 src/library.ts（git show HEAD:src/library.ts 编译）在 /tmp 复现三条逃逸；
+//   · 先用上游基线 a574288 的 src/library.ts（pin commit 编译，不取 HEAD）在 /tmp 复现三条逃逸；
 //   · 再对构建产物 dist/library.js 复跑同一组攻击（+ ≥8 组扩展攻击），断言 /tmp 库外**逐字节不变**；
 //   · 符号链接那几组是检验「realpath 第二层」是否真的存在（词法黑名单一定放行它们）；
 //   · 路由层 4 条 CRUD 端到端复核 4xx/文案/不泄露绝对路径；
@@ -26,6 +26,11 @@ import { fileURLToPath } from 'node:url'
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO = join(ROOT, '..')
 const dist = (m) => join(REPO, 'dist', m)
+
+// 上游基线（修复前）：V1 用它编译「有漏洞」的产物、V12 用它对比「无 realpath」。
+// 固定 pin 而不取 HEAD——否则修复一旦提交，HEAD 就是修复版，V1/V12 会把修复版当修复前，
+// 全新检出下套件必红。若该 commit 不在仓库（浅克隆），相关用例显式 skip 并诊断。
+const PRE_FIX_REF = 'a574288'
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t11-home-'))
 const L = await import(dist('library.js'))
@@ -94,23 +99,40 @@ test.after(() => {
   assert.equal(after, REAL_LIB_BEFORE, '真实文献库在本次验证期间不得被改动（指纹比对）')
 })
 
-// ── 修复前的构建产物（上游 HEAD 的 src/library.ts）───────────────────────────
+// ── 修复前的构建产物（pin 上游基线 PRE_FIX_REF 的 src/library.ts）────────────────
 const PREFIX_DIR = join(REPO, '.probe', 'prefix-verify')
 const PREFIX_JS = join(PREFIX_DIR, 'dist', 'library.js')
+const PREFIX_SIDECAR = join(PREFIX_DIR, 'source.sha256')
 let prefixErr = null
+let prefixSrcHash = null
+/** 构建/复用「修复前」产物。缓存按来源（ref + 源内容哈希）key 住，且校验产物不含修复特征
+ *  realpathSync；来源变了或缓存是错误构建时重建，绝不拿修复版当修复前。 */
 function ensurePrefixLib() {
-  if (existsSync(PREFIX_JS)) return true
+  if (prefixErr) return false
   try {
+    const src = execFileSync('git', ['show', `${PRE_FIX_REF}:src/library.ts`], { cwd: REPO, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+    if (/realpathSync/.test(src)) throw new Error(`基线 ${PRE_FIX_REF}:src/library.ts 竟含 realpathSync（不是修复前代码）`)
+    const hash = createHash('sha256').update(src).digest('hex')
+    prefixSrcHash = hash
+    const key = `${PRE_FIX_REF}\n${hash}`
+    let cached = null
+    try { cached = readFileSync(PREFIX_SIDECAR, 'utf8') } catch { /* 无 sidecar */ }
+    // 复用条件：sidecar 与来源一致，且产物确为修复前（无 realpathSync）。否则重建。
+    if (cached === key && existsSync(PREFIX_JS) && !readFileSync(PREFIX_JS, 'utf8').includes('realpathSync')) {
+      return true
+    }
     mkdirSync(PREFIX_DIR, { recursive: true })
-    const src = execFileSync('git', ['show', 'HEAD:src/library.ts'], { cwd: REPO, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
     writeFileSync(join(PREFIX_DIR, 'library.ts'), src)
     writeFileSync(join(PREFIX_DIR, 'tsconfig.json'), JSON.stringify({
       extends: '../../tsconfig.json',
       compilerOptions: { outDir: 'dist', rootDir: '.', declaration: false },
       include: ['library.ts'],
     }))
+    rmSync(join(PREFIX_DIR, 'dist'), { recursive: true, force: true }) // 清旧产物，避免残留掩盖错误构建
     const r = spawnSync(process.execPath, [join(REPO, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(PREFIX_DIR, 'tsconfig.json')], { cwd: PREFIX_DIR, encoding: 'utf8' })
     if (r.status !== 0 || !existsSync(PREFIX_JS)) throw new Error(`tsc 失败(status=${r.status}): ${r.stdout}${r.stderr}`)
+    if (readFileSync(PREFIX_JS, 'utf8').includes('realpathSync')) throw new Error('编译产物含 realpathSync，不是修复前代码')
+    writeFileSync(PREFIX_SIDECAR, key)
     return true
   } catch (e) {
     prefixErr = e instanceof Error ? e.message : String(e)
@@ -118,18 +140,69 @@ function ensurePrefixLib() {
   }
 }
 
+// ── 修复前的完整构建产物（host.js + 全部依赖，pin 上游基线 PRE_FIX_REF）────────────
+// V2 需要「修复前的 host 路由」端到端复现。这里自包含地把 a574288 的整个 src/ 抽出来编译，
+// 不依赖任何本地手工产物——全新检出里必然缺失的东西，一律在用例内自建。
+const PREFIX_HOST_DIR = join(REPO, '.probe', 'prefix-host')
+const PREFIX_HOST_JS = join(PREFIX_HOST_DIR, 'dist', 'host.js')
+const PREFIX_HOST_SIDECAR = join(PREFIX_HOST_DIR, 'source.sha256')
+let prefixHostErr = null
+/** 构建/复用「修复前」完整产物。缓存按来源（ref + src 子树 tree hash）key 住；来源不可用返回 null。 */
+function ensurePrefixHost() {
+  if (prefixHostErr) return null
+  try {
+    const treeHash = execFileSync('git', ['rev-parse', `${PRE_FIX_REF}:src`], { cwd: REPO, encoding: 'utf8' }).trim()
+    const key = `${PRE_FIX_REF}:src\n${treeHash}`
+    let cached = null
+    try { cached = readFileSync(PREFIX_HOST_SIDECAR, 'utf8') } catch { /* 无 sidecar */ }
+    if (cached === key && existsSync(PREFIX_HOST_JS)) return PREFIX_HOST_JS
+    // 重建：抽出 a574288 的整个 src/（跨平台用 git ls-tree + git show，不依赖 tar/符号链接）
+    rmSync(PREFIX_HOST_DIR, { recursive: true, force: true })
+    mkdirSync(join(PREFIX_HOST_DIR, 'src'), { recursive: true })
+    const files = execFileSync('git', ['ls-tree', '-r', '--name-only', `${PRE_FIX_REF}`, 'src/'], { cwd: REPO, encoding: 'utf8' })
+      .split('\n').map((s) => s.trim()).filter(Boolean)
+    for (const f of files) {
+      const content = execFileSync('git', ['show', `${PRE_FIX_REF}:${f}`], { cwd: REPO, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+      const dest = join(PREFIX_HOST_DIR, f)
+      mkdirSync(dirname(dest), { recursive: true })
+      writeFileSync(dest, content)
+    }
+    // host.js 启动即读「包根 package.json」的版本号；写最小版本即可（避免符号链接，跨平台）
+    writeFileSync(join(PREFIX_HOST_DIR, 'package.json'), JSON.stringify({ version: '0.0.0' }))
+    writeFileSync(join(PREFIX_HOST_DIR, 'tsconfig.json'), JSON.stringify({
+      compilerOptions: {
+        target: 'es2022', module: 'esnext', moduleResolution: 'bundler',
+        allowImportingTsExtensions: true, rewriteRelativeImportExtensions: true,
+        lib: ['es2022'], types: ['node'], strict: true,
+        noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: true, skipLibCheck: true,
+        outDir: 'dist', rootDir: 'src', declaration: false, sourceMap: false,
+      },
+      include: ['src/**/*.ts'],
+    }))
+    const r = spawnSync(process.execPath, [join(REPO, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(PREFIX_HOST_DIR, 'tsconfig.json')], { cwd: PREFIX_HOST_DIR, encoding: 'utf8' })
+    if (r.status !== 0 || !existsSync(PREFIX_HOST_JS)) throw new Error(`tsc 失败(status=${r.status}): ${r.stdout}${r.stderr}`)
+    writeFileSync(PREFIX_HOST_SIDECAR, key)
+    return PREFIX_HOST_JS
+  } catch (e) {
+    prefixHostErr = e instanceof Error ? e.message : String(e)
+    return null
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// 1. 先证明漏洞真实存在（上游 HEAD 的代码）
+// 1. 先证明漏洞真实存在（pin 上游基线 PRE_FIX_REF 的代码）
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('V1(漏洞真实) 用上游 HEAD 的 library.ts 复现三条逃逸：删库外目录 / 删库外文献 / 移走库外目录', async (t) => {
+test(`V1(漏洞真实) 用上游基线 ${PRE_FIX_REF} 的 library.ts 复现三条逃逸：删库外目录 / 删库外文献 / 移走库外目录`, async (t) => {
   if (!ensurePrefixLib()) {
     t.diagnostic(`无法构建修复前代码，跳过：${prefixErr}`)
-    t.skip('无法用 git show HEAD:src/library.ts 构建修复前产物')
+    t.skip(`缺少「修复前」源码：本用例需要 pin 的上游基线 ${PRE_FIX_REF}（git show ${PRE_FIX_REF}:src/library.ts），`
+      + `把它编译到 .probe/prefix-verify 后复现三条逃逸。浅克隆/无 .git 时取不到该 commit，请补齐历史（git fetch --unshallow）后重跑。`)
     return
   }
   const PRE = await import(PREFIX_JS)
   const log = []
+  t.diagnostic(`修复前产物来源=${PRE_FIX_REF}（源内容 sha256=${prefixSrcHash}，无 realpathSync 的漏洞版）`)
 
   // ① deleteTopic(dataDir, '../sentinel') → 库外整目录被递归删除
   {
@@ -170,11 +243,14 @@ test('V1(漏洞真实) 用上游 HEAD 的 library.ts 复现三条逃逸：删库
 })
 
 test('V2(漏洞真实·路由层) 修复前的 host 端到端：4 条 CRUD 路由都能越界操作库外文件', async (t) => {
-  if (!ensurePrefixLib()) { t.skip('无法构建修复前代码'); return }
-  // 路由层需要完整 dist（host+依赖），用 .probe/prefix 下已构建的上游 dist
-  const PREFIX_FULL = join(REPO, '.probe', 'prefix', 'dist', 'host.js')
-  if (!existsSync(PREFIX_FULL)) { t.skip(`缺少修复前完整构建产物：${PREFIX_FULL}（构建命令见 docs/security-verify.md §1）`); return }
-  const { registerRoutes: preRegister } = await import(PREFIX_FULL)
+  const preHost = ensurePrefixHost()
+  if (!preHost) {
+    t.diagnostic(`无法构建修复前完整产物，跳过：${prefixHostErr}`)
+    t.skip(`缺少「修复前」路由产物：本用例需要 pin 的上游基线 ${PRE_FIX_REF} 的整个 src/（git ls-tree/git show 取出后 tsc 编译到 .probe/prefix-host），`
+      + `这样才能起一个「修复前」的 host 复现 4 条 CRUD 逃逸。浅克隆/无 .git 时取不到该 commit，请补齐历史（git fetch --unshallow）后重跑。`)
+    return
+  }
+  const { registerRoutes: preRegister } = await import(preHost)
   const log = []
   const cases = [
     ['delete-topic', { topic: '../sentinel' }, (w) => ({ sentinelGone: !existsSync(w.sentinel) })],
@@ -582,9 +658,15 @@ test('V11 正常功能：多变体产物删除 / 精确 stem / 中文专题 / �
 // 6. 结构性判定 + 真实库未被触碰
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('V12 防护是结构性的：realpath 规范化 + 严格子路径包含（不是正则黑名单）', () => {
+test('V12 防护是结构性的：realpath 规范化 + 严格子路径包含（不是正则黑名单）', (t) => {
   const src = readFileSync(join(REPO, 'src', 'library.ts'), 'utf8')
-  const pre = execFileSync('git', ['show', 'HEAD:src/library.ts'], { cwd: REPO, encoding: 'utf8' })
+  let pre = null
+  let preUnavailable = null
+  try {
+    pre = execFileSync('git', ['show', `${PRE_FIX_REF}:src/library.ts`], { cwd: REPO, encoding: 'utf8' })
+  } catch (e) {
+    preUnavailable = e instanceof Error ? e.message : String(e)
+  }
   // 第一层：词法（相对弱）
   assert.match(src, /export function validateEntryName/, '必须有名字校验')
   assert.match(src, /名字不能包含 \/ \\\\ 或 \.\./, '词法层应拒绝分隔符与 ..')
@@ -596,8 +678,12 @@ test('V12 防护是结构性的：realpath 规范化 + 严格子路径包含（�
   // 判定：不是「只靠正则过滤 ..」
   const body = src.slice(src.indexOf('function resolveSafeTopic'), src.indexOf('export function paperRefFor'))
   assert.ok(!/\.\./.test(body.replace(/\/\/[^\n]*/g, '')) || /realpathSync/.test(body), '必须有 realpath 兜底而不是只匹配 .. ')
-  // 上游 HEAD 里没有任何 realpathSync（证明这是本次新增的层）
-  assert.ok(!/realpathSync/.test(pre), '修复前的 library.ts 不应有 realpathSync')
+  // 修复前（pin 上游基线 PRE_FIX_REF）里没有任何 realpathSync（证明这是本次新增的层）
+  if (pre === null) {
+    t.diagnostic(`基线 ${PRE_FIX_REF}:src/library.ts 不可用，跳过「修复前无 realpathSync」断言：${preUnavailable}`)
+  } else {
+    assert.ok(!/realpathSync/.test(pre), `修复前（${PRE_FIX_REF}）的 library.ts 不应有 realpathSync`)
+  }
   // 4 个原语都接上了这两层
   for (const fn of ['renameTopic', 'renamePaper', 'deletePaper', 'deleteTopic']) {
     const seg = src.slice(src.indexOf(`export function ${fn}`), src.indexOf(`export function ${fn}`) + 1200)
@@ -624,7 +710,7 @@ test('V13 真实文献库在本次验证期间零改动（指纹）', () => {
 
 test('V14(已知偏离固定) F1 NUL→路径泄露 / F2 类型混淆 500 / F3 -en 残留：三条非阻断发现的可复现固定', async (t) => {
   // 本用例固定「当前行为」，用于让三条发现可回归追踪：一旦上游修掉，本用例会变红，
-  // 提醒维护者更新 docs/security-verify.md 的 F1/F2/F3 并放宽这里的断言。
+  // 提醒维护者更新这三条断言（F1/F2/F3 是本次修复作者手上的内部验证编号，不涉及仓库内任何文档）。
   const w = tmpParent()
   const { srv, post } = await boot(w)
   try {
