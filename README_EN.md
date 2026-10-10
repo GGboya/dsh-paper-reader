@@ -107,9 +107,10 @@ spaces are semantic (`\text{...}`) are kept verbatim as a whole group; multi-tok
 > queries still miss). To make a given paper's formulas searchable, re-transcribe that paper explicitly: pass
 > `source: mineru-local` (or `force: true`) to `transcribe_pdf`, or the same `source` to `POST /api/transcribe`.
 >
-> **Notation convention (important)**: the `.txt` stores the **compact form**, so `Q_t` matches while `Q_{t}` does
-> **not**; multi-token forms such as `x_{t-1}` keep their braces and match as written. Query-side normalization is
-> **scheduled for the next round** (retrieval-layer work) — until then, query with the compact form.
+> **Notation convention**: the `.txt` stores the **compact form** (`Q_t`). On the query side the *same rule* is
+> applied first and matched **alongside your original query**, so both `Q_t` and `Q_{t}` hit the same page (the
+> original query is always kept, so no existing hit is ever lost); multi-token forms such as `x_{t-1}` / `x_{ij}`
+> are not normalized and match as written.
 >
 > **Two low-severity items (scheduled for the next round, registered in [docs/embed-plan.md](docs/embed-plan.md) "追加项二")**:
 > F-R1 `keepsInnerSpaces` prefix-matches the two-argument `\textcolor` into the "spaces are semantic" guard (the second
@@ -138,6 +139,50 @@ plus `POST /api/mineru/test` and `GET /api/mineru/health` for connectivity check
 > `mode` defaults to `off`, and behaviour is identical to before when MinerU is not configured.
 
 
+## Embedding search (optional, off by default)
+
+Besides keyword substring matching, `search_paper` can use an **OpenAI-compatible `/embeddings` endpoint** for
+semantic recall: passages that are semantically close but share **no keyword** with the query still enter the
+candidate set (fused with keyword hits, never replacing them). This helps a lot with paraphrased questions,
+cross-language phrasings, or "the passage with the diffusion formula" style queries.
+
+**How to configure** (same precedence as the translate/rerank endpoints: settings panel > profile YAML > env var):
+
+| Way | How |
+| --- | --- |
+| Settings panel (recommended) | Settings → Paper Reader → **"Embedding search (optional)"** card; fill endpoint URL / model / API key. A real `/embeddings` call is made as a pre-check before saving |
+| profile YAML | `config.embed: { baseUrl, apiKey, model }` |
+| Env var | `DSH_EMBED_API_KEY` (key only; baseUrl/model still need to be configured) |
+
+Stored at `$DSH_HOME/.dsh-paper-reader/embed.json` (**0600**, same convention as `translate.json`/`typesafe.json`);
+the read API returns only `hasApiKey` plus a masked `apiKeyHint` — never the plaintext key.
+
+> ⚠️ **Privacy notice**: once enabled, **two kinds of text are sent to the endpoint you configure** — ① the paper's
+> **chunk texts** (to compute chunk vectors; a mock capture confirms the bodies themselves are what gets sent), and
+> ② **the query text of every search** (it is embedded first to get a query vector). Only point it at a service you
+> trust; **with nothing configured, not a single request is made**. Neither the cache file nor any error message
+> contains the API key (query vectors live only in an in-process memo and are never written to disk).
+
+**Behaviour and degradation**: unconfigured (or partially configured) = **off by default** — `search_paper` behaves
+**exactly as before** (pure keyword ranking, zero extra requests). When configured: keyword candidates ∪ embedding
+candidates → RRF fusion → existing Jev/TypeSafe rerank if configured → top-k.
+**Fusion behaviour, stated plainly**: keyword and semantic candidates are fused by **rank** (RRF, k=60) — ranks only, **score magnitude is ignored** — so the two lists **alternate occupying the final top-k slots** (a top-ranked semantic hit can land ahead of a second-ranked keyword hit); "keyword wins" applies only to **exact ties**. Embedding is a **recall** step, not a replacement (keyword search always runs and keeps contributing candidates), but semantic candidates really can take some of the top-k slots — that is intentional (no real embedding endpoint is available to tune against, so score-interpolation or reserved-slot strategies are deliberately not introduced). **With no endpoint configured nothing changes at all**: no requests are made and ranking is byte-identical to before. If the endpoint
+is unreachable / times out / errors / returns invalid dimensions or non-numeric values, the keyword results are still
+returned and the degradation reason is stated verbatim at the end of the result
+(`（嵌入检索不可用，已降级为纯关键词：…）`) — never a silent failure, never a broken search.
+
+**Cache and invalidation**: `<topic>/<paper>.embeddings.json`, keyed by `{baseUrl, model, dimensions, content hash}`.
+**Changed endpoint (baseUrl) / changed model / changed `.txt` (re-transcribed) / changed chunk size / returned
+dimensions that disagree with the cache** → the cache is invalidated and recomputed; **on a cache hit no chunk-embedding request is made** (query vectors
+have an in-process memo, so repeating the same query makes zero requests). Chunks are submitted in batches
+(`batchSize`, default 32); **if any batch fails the whole recall degrades and nothing is written** — no half-written cache.
+
+Lazy by design: embeddings are computed **on the first search of that paper**; transcription (`transcribe_pdf`) never
+touches embeddings, so transcription speed and failure surface are unaffected.
+
+> **Non-goals (future work)**: local ONNX / transformers.js embedding models, precomputing the whole library,
+> vector databases — this round is API endpoints only.
+
 ## Install
 
 ### Option 1: PaperReader desktop app (one-click, recommended)
@@ -155,7 +200,7 @@ You get the library + reader + companion chat out of the box — no commands nee
 **DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
 
 1. Install, launch, and sign in
-2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.3.4`
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.4.0`
 3. Newly installed plugins start **disabled**: open the plugin's detail and flip the **Enable** switch
 4. **Restart the desktop app** (with the plugin enabled live, opening papers silently fails until a restart brings it into the boot composition — tested)
 
@@ -166,7 +211,7 @@ You get the library + reader + companion chat out of the box — no commands nee
 
 1. Launch DSH Desktop
 2. Tray menu → **Open DSH Terminal** (that terminal comes with `dsh`/`pnpm`)
-3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.3.4`
+3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.4.0`
 4. Quit and reopen DSH Desktop (plugin changes need a restart to enter the Loader composition)
 
 ### Option 3: CLI dsh (developers)
@@ -183,7 +228,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **Existing users must pass an explicit version** — a bare `add` is a no-op for an already-installed dependency (pnpm resolves from the range recorded at first install and won't chase newer releases):
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.4
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.4.0
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 

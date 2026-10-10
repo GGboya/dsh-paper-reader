@@ -4,7 +4,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { listPapers, listTopics, resolveDataDir, resolvePaper, type PaperRef } from './library.ts'
 import { transcribePaper, readTranscript, type SourceArg } from './transcribe.ts'
-import { chunkText, searchChunks, formatHits } from './search.ts'
+import { chunkText, queryVariantsFor, searchChunksMulti, formatHits } from './search.ts'
+import { readTranscriptMeta } from './transcribe.ts'
+import { EMBED_DEFAULTS, embeddingsPathFor, embeddingRecallFor, fuseHybridCandidates, type EmbedConfig } from './embed.ts'
+import { resolveEmbedConfig } from './embed-config.ts'
 import { resolveRerankClient, resolveShortlistSize, rerankHits, type RerankConfig } from './rerank.ts'
 import { completeStep, formatStudy, readStudy, recordQuiz, setPlan } from './study.ts'
 import { readerOrigin } from './origin.ts'
@@ -23,6 +26,9 @@ export interface PluginConfig {
   typesafe?: RerankConfig
   /** MinerU 解析后端（本地 legacy API + mineru.net v4 云端）。mode 默认 off，未配置时行为与改造前一致 */
   mineru?: MineruConfig
+  /** 嵌入模型检索（OpenAI 兼容 /embeddings）。凭据优先级：设置面板 > 此 YAML > 环境变量 DSH_EMBED_API_KEY；
+      三者缺任一项时嵌入检索整体关闭（默认关闭），search_paper 退回纯关键词排序 */
+  embed?: EmbedConfig
 }
 
 const MINERU_SOURCES = ['auto', 'pdfjs', 'mineru-local', 'mineru-cloud'] as const
@@ -235,7 +241,8 @@ export function registerTools(ctx: Context, config: PluginConfig) {
       '在论文全文中按关键词检索相关片段，返回带页码的原文片段。' +
       '当需要论文的具体内容（定义、算法步骤、章节细节、数据）时使用，基于检索到的原文回答并注明页码。' +
       '关键词建议：用论文中的英文术语、章节号（如 "Section 3.1"）或概念名，不要用完整长句；找不到时换同义词或更短的词重试。' +
-      '论文未转录时会自动先转录。',
+      '论文未转录时会自动先转录。' +
+      '（配置了嵌入端点时额外做语义召回；未配置则纯关键词，与改造前一致）',
     parameters: {
       query: { type: 'string', required: true, description: '检索关键词，如 "backup task" 或 "locality"。' },
       k: { type: 'integer', description: '返回片段数量，默认 5，最多 8。' },
@@ -252,6 +259,24 @@ export function registerTools(ctx: Context, config: PluginConfig) {
             type: 'boolean',
             required: true,
             description: '返回片段是否经过语义重排（配置了 Jev/TypeSafe 凭据且候选充足时为 true）。',
+          },
+          compactQuery: {
+            oneOf: [{ type: 'string' }, { type: 'null' }],
+            required: true,
+            description:
+              '查询侧 LaTeX 紧凑写法（MinerU 来源论文才会一并匹配，如 Q_{t} → Q_t）；无需归一化时为 null。',
+          },
+          embedding: {
+            type: 'object',
+            required: true,
+            description: '嵌入语义召回的状态：未配置时 configured=false 且不影响结果；降级时 degraded 给出原因。',
+            properties: {
+              configured: { type: 'boolean', required: true },
+              used: { type: 'boolean', required: true },
+              fromCache: { type: 'boolean', required: true },
+              degraded: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+            },
+            additionalProperties: false,
           },
           hits: {
             type: 'array',
@@ -274,20 +299,34 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         },
         additionalProperties: false,
       },
-      render: (_args, value) => [
-        {
-          type: 'text',
-          text: formatHits(
-            value.hits.map((h) => ({
-              chunk: { index: h.chunk, start: 0, end: 0, text: h.text },
-              score: 0,
-              page: h.page,
-            })),
-            value.totalChunks,
-            value.query,
-          ) + readerUrlLine(value.readerUrl),
-        },
-      ],
+      render: (_args, value) => {
+        const notes: string[] = []
+        if (value.compactQuery) {
+          notes.push(`（查询已按紧凑写法 \`${value.compactQuery}\` 一并匹配；原查询保留）`)
+        }
+        if (value.embedding.degraded) {
+          notes.push(`（嵌入检索不可用，已降级为纯关键词：${value.embedding.degraded}）`)
+        } else if (value.embedding.configured && value.embedding.used) {
+          notes.push(value.embedding.fromCache ? '（含嵌入语义召回；分块向量命中缓存）' : '（含嵌入语义召回）')
+        }
+        return [
+          {
+            type: 'text',
+            text:
+              formatHits(
+                value.hits.map((h) => ({
+                  chunk: { index: h.chunk, start: 0, end: 0, text: h.text },
+                  score: 0,
+                  page: h.page,
+                })),
+                value.totalChunks,
+                value.query,
+              ) +
+              (notes.length ? '\n' + notes.join('\n') : '') +
+              readerUrlLine(value.readerUrl),
+          },
+        ]
+      },
     },
     execute: async (args, exec) => {
       const ref = locate(dataDir, args, exec)
@@ -300,27 +339,70 @@ export function registerTools(ctx: Context, config: PluginConfig) {
       if (!cached) throw new Error('转录失败，无法检索')
       const chunks = chunkText(cached.text, 1500)
       const k = Math.max(1, Math.min(args.k ?? 5, 8))
-      // 两段式检索:关键词快搜捞 shortlist(宽召回),Jev 按语义重排取 top-k。
-      // 凭据每次现查(设置面板保存即生效);无凭据或候选不超过 k 时跳过重排。
+      // 折叠项 1（查询侧 LaTeX 归一化）：投影侧只对 MinerU 产物做紧凑写法归一化，
+      // 因此查询侧的同名变体也**只对 MinerU 来源的论文**追加；原查询永远保留 →
+      // pdfjs/旧缓存论文既不丢命中也不引入新行为（与改造前逐字节一致）。
+      const producer = (await readTranscriptMeta(ref))?.producer ?? null
+      const variants = queryVariantsFor(producer, args.query)
+      const compact = variants.length > 1 ? variants[1]! : null
+      // 关键词快搜捞 shortlist（宽召回）→ 可选语义召回 → 既有重排 → top-k。
+      // 凭据每次现查（设置面板保存即生效）；未配置时三段都退回纯关键词，行为与改造前一致。
       const rerankClient = await resolveRerankClient(config.typesafe)
-      let hits = searchChunks(chunks, cached.pages, args.query, rerankClient ? shortlistSize : k)
+      const embedCfg = await resolveEmbedConfig(config.embed)
+      const wideRecall = Boolean(rerankClient) || embedCfg.enabled
+      const recallSize = wideRecall ? Math.max(k, shortlistSize) : k
+      let hits = searchChunksMulti(chunks, cached.pages, variants, recallSize)
+      // 嵌入召回：惰性（首次检索该论文才算）+ 缓存（<论文>.embeddings.json）；失败只影响本次召回。
+      const embedding = await embeddingRecallFor({
+        configured: embedCfg.enabled,
+        cachePath: embeddingsPathFor(ref.txtPath),
+        chunks,
+        pages: cached.pages,
+        query: args.query,
+        chunkSize: 1500,
+        limit: embedCfg.cfg.candidateSize ?? EMBED_DEFAULTS.candidateSize,
+        ...(embedCfg.enabled
+          ? {
+              req: {
+                baseUrl: embedCfg.cfg.baseUrl!,
+                apiKey: embedCfg.cfg.apiKey!,
+                model: embedCfg.cfg.model!,
+                ...(embedCfg.cfg.timeoutMs !== undefined ? { timeoutMs: embedCfg.cfg.timeoutMs } : {}),
+              },
+              ...(embedCfg.cfg.batchSize !== undefined ? { batchSize: embedCfg.cfg.batchSize } : {}),
+            }
+          : {}),
+      })
+      if (embedding.hits.length > 0) hits = fuseHybridCandidates(hits, embedding.hits, recallSize)
+      if (!wideRecall) hits = hits.slice(0, k)
+      if (embedding.degraded) {
+        console.warn('[dsh-paper-reader] 嵌入检索降级为纯关键词:', embedding.degraded)
+      }
       let reranked = false
       if (rerankClient && hits.length > k) {
         try {
           hits = await rerankHits(rerankClient, args.query, hits, k, config.typesafe?.deadlineMs ?? 1500)
           reranked = true
         } catch (e) {
-          // 超预算/网络/鉴权任何失败都退回关键词 top-k(结果已算好,零成本降级)
+          // 超预算/网络/鉴权任何失败都退回关键词 top-k（结果已算好，零成本降级）
           console.warn('[dsh-paper-reader] 检索重排失败，退回关键词排序:', e)
           hits = hits.slice(0, k)
         }
       }
+      if (!reranked) hits = hits.slice(0, k)
       return {
         paper: `${ref.topic}/${ref.name}`,
         query: args.query,
         totalChunks: chunks.length,
         hits: hits.map((h) => ({ chunk: h.chunk.index, page: h.page, text: h.chunk.text })),
         reranked,
+        compactQuery: compact,
+        embedding: {
+          configured: embedding.configured,
+          used: embedding.used,
+          fromCache: embedding.fromCache,
+          degraded: embedding.degraded,
+        },
         readerUrl: readerUrl(ref),
       }
     },

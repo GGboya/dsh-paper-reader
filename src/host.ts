@@ -26,6 +26,14 @@ import {
   writeTypesafeConfig,
 } from './typesafe-config.ts'
 import {
+  clearEmbedConfig,
+  maskApiKey as maskEmbedApiKey,
+  readEmbedConfig,
+  resolveEmbedConfig,
+  testEmbedEndpoint,
+  writeEmbedConfig,
+} from './embed-config.ts'
+import {
   clearMineruConfig,
   mergeMineruBody,
   precheckMineruConfig,
@@ -490,6 +498,58 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // DELETE：清掉文件，回落到 profile 的 typesafe / 环境变量
     if (sub === '/api/typesafe/config' && req.method === 'DELETE') {
       await clearTypesafeConfig()
+      json(res, 200, { ok: true })
+      return
+    }
+
+    // ── 嵌入模型端点配置（设置面板第三张端点卡片）─────────────────────────
+    // 与 translate/typesafe 完全同一套约定：GET 只回掩码 key；POST 预检通过才落盘；DELETE 回落。
+    if (sub === '/api/embed/config' && req.method === 'GET') {
+      const { cfg, source, enabled } = await resolveEmbedConfig(config.embed)
+      json(res, 200, {
+        baseUrl: cfg.baseUrl ?? '',
+        model: cfg.model ?? '',
+        hasApiKey: Boolean(cfg.apiKey),
+        apiKeyHint: cfg.apiKey ? maskEmbedApiKey(cfg.apiKey) : '',
+        enabled,
+        source,
+      })
+      return
+    }
+
+    // POST：baseUrl/model/key 三项齐全是启用条件；key 留空 = 沿用已存的那把。
+    // 校验 → 预检（真打一发 /embeddings）→ 通了才落盘：嵌入失败是静默降级，填错很难察觉。
+    if (sub === '/api/embed/config' && req.method === 'POST') {
+      const body = (await readBody(req)) as { baseUrl?: string; apiKey?: string; model?: string }
+      const baseUrl = body.baseUrl?.trim() ?? ''
+      const model = body.model?.trim() ?? ''
+      const prev = await readEmbedConfig()
+      const apiKey = body.apiKey?.trim() || prev?.apiKey || ''
+      if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
+        json(res, 400, { error: '端点 URL 需要以 http:// 或 https:// 开头' })
+        return
+      }
+      if (!model) {
+        json(res, 400, { error: '嵌入模型名不能为空' })
+        return
+      }
+      if (!apiKey) {
+        json(res, 400, { error: 'API Key 不能为空' })
+        return
+      }
+      const test = await testEmbedEndpoint({ baseUrl, apiKey, model })
+      if (!test.ok) {
+        json(res, 400, { error: `连接测试失败：${test.detail ?? '未知原因'}` })
+        return
+      }
+      await writeEmbedConfig({ baseUrl, apiKey, model })
+      json(res, 200, { ok: true })
+      return
+    }
+
+    // DELETE：清掉文件，回落到 profile 的 embed / 环境变量
+    if (sub === '/api/embed/config' && req.method === 'DELETE') {
+      await clearEmbedConfig()
       json(res, 200, { ok: true })
       return
     }
