@@ -32,12 +32,22 @@
   /* min-width:0 —— flex 项默认 min-width:auto 会拒绝收缩，空间不够时转而去挤按钮；
      让标题自己截断（已有 ellipsis），按钮才能保持原样 */
   #status { min-width: 0; color: var(--text-2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* PDF 文件路径：可点的只读文本（点击复制），窄列自动截断 */
+  #pdf-path { flex: none; max-width: 34%; padding: 0; border: none; background: none; color: var(--text-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  #pdf-path:hover { color: var(--accent); }
 
   /* ---------- PDF 区 ---------- */
   #main { display: flex; flex: 1; min-height: 0; }
   #pdf-pane { flex: 1; overflow: auto; padding: 16px; }
   /* safe center：页宽超过视口时退回左对齐——普通 center 会让左右同时溢出且左侧滚不到 */
   #pdf-pages { display: flex; flex-direction: column; align-items: safe center; gap: 14px; }
+  /* 翻页模式：单页垂直居中（safe center 同理，放大后顶部仍可滚到） */
+  #pdf-pages.paged { min-height: 100%; justify-content: safe center; gap: 0; }
+
+  /* ---------- 翻页控件 ---------- */
+  #pager { display: flex; align-items: center; gap: 4px; flex: none; }
+  #page-input { width: 3.5em; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px; text-align: right; }
+  #page-total { flex: none; color: var(--text-2); font-size: 12px; white-space: nowrap; }
   .page { position: relative; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
   .page.flash { outline: 3px solid var(--hl); outline-offset: 2px; transition: outline .15s; }
   /* textLayer CSS 必须是 pdf.js 6.x 官方规则的子集：TextLayer 只往 span 写 --font-height/--scale-x/--rotate
@@ -99,9 +109,18 @@
 
 <div id="bar">
   <span id="status">论文伴读</span>
+  <button id="pdf-path" style="display:none" title="点击复制文件路径"></button>
   <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none">中</button>
   <button id="zh-regen" class="tbtn" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none">↻</button>
+  <button id="dl-btn" class="tbtn" title="下载 PDF" style="display:none">⤓</button>
   <span class="spacer"></span>
+  <button id="mode-toggle" class="tbtn" title="切换 滚动/翻页模式" style="display:none">▣</button>
+  <span id="pager" style="display:none">
+    <button id="page-prev" class="tbtn" title="上一页">‹</button>
+    <input id="page-input" type="text" inputmode="numeric" title="页码，回车跳转">
+    <span id="page-total">/ ?</span>
+    <button id="page-next" class="tbtn" title="下一页">›</button>
+  </span>
   <button id="cfg-open" class="tbtn" title="翻译端点设置">⚙</button>
   <button id="zoom-out" class="tbtn">−</button>
   <span id="zoom-label">100%</span>
@@ -168,6 +187,18 @@ function toast(msg, ms = 3200) {
 }
 function esc(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+// 路径复制：clipboard API 失败（iframe 权限等）退回 textarea + execCommand
+$('pdf-path').onclick = async () => {
+  const p = $('pdf-path').textContent;
+  if (!p) return;
+  try { await navigator.clipboard.writeText(p); toast('路径已复制'); return; } catch { /* 走兜底 */ }
+  const ta = document.createElement('textarea');
+  ta.value = p; document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); toast('路径已复制'); }
+  catch { toast('复制失败，路径见按钮悬停提示'); }
+  ta.remove();
+};
+
 let current = null;        // { topic, name }
 let zhState = { zh: false, dual: false, busy: false };
 let statusMeta = ''; // openPaper 的「name · N 页」基线，翻译阶段标签褪去后恢复它
@@ -175,6 +206,11 @@ let zhVariant = null;      // null=原文 'dual'=中英对照 'zh'=纯中文
 // 每篇论文记住上次用的语言版本：伴读会话的跳转链接原地跳页不重载，
 // 加上这里的恢复，「中文界面跳中文」在同篇跳转/重开/跨论文三条路径上都成立
 const variantKey = (topic, name) => `dpr.variant.${topic}/${name}`;
+
+// 阅读模式：scroll=连续滚动（默认，原行为）paged=单页翻页；每读者记忆
+let pageMode = localStorage.getItem('dpr.pageMode') === 'paged' ? 'paged' : 'scroll';
+// 当前页：paged 是唯一渲染依据；scroll 由 IntersectionObserver 跟随回写（模式切换/跳页共享）
+let curPage = 1;
 
 /* ================= 打开文献 ================= */
 function pdfUrl(variant) {
@@ -186,6 +222,7 @@ async function openPaper(topic, name, opts = {}) {
   if (!name) return;
   current = { topic, name };
   localStorage.setItem('dpr.last', JSON.stringify(current));
+  curPage = opts.page || 1; // 换论文从第一页（或跳转目标页）开始；变体切换/重译不走这里，页码保持
   $('status').textContent = '加载 PDF…';
   const q = `topic=${encodeURIComponent(topic)}&name=${encodeURIComponent(name)}`;
   const meta = await api('/paper?' + q);
@@ -193,15 +230,42 @@ async function openPaper(topic, name, opts = {}) {
     ? `${name} · ${meta.pageCount ?? '?'} 页`
     : `${name} · 未转录（提问时会自动转录）`;
   $('status').textContent = statusMeta;
+  // 文件路径展示（点击复制）：独立于 #status，翻译阶段的 phase 覆写不影响它
+  const pathBtn = $('pdf-path');
+  pathBtn.textContent = meta.pdfPath || '';
+  pathBtn.title = (meta.pdfPath || '') + '（点击复制）';
+  pathBtn.style.display = meta.pdfPath ? '' : 'none';
   await refreshZhState();
   // 恢复该论文上次的语言版本（译文已不存在时回落原文）
   const saved = localStorage.getItem(variantKey(topic, name));
   zhVariant = (saved === 'zh' && zhState.zh) || (saved === 'dual' && zhState.dual) ? saved : null;
   $('zh-toggle').classList.toggle('active', zhVariant !== null);
   if (zhVariant) { fitMode = true; fitBtn.classList.add('active'); } // 译文版页宽不同，强制适宽
+  updateDlBtn();
   await loadPdf(pdfUrl(zhVariant));
   if (opts.page) jumpTo(opts.page, opts.q); // 不 await：跳转内部自带「等页面渲出来」轮询
 }
+
+/* ================= 下载/导出 ================= */
+// 下载当前正在看的那个版本（原文/纯中文/中英对照）——导出译文的主要入口
+function updateDlBtn() {
+  const btn = $('dl-btn');
+  if (!current) { btn.style.display = 'none'; return; }
+  btn.style.display = '';
+  btn.title = zhVariant === 'zh' ? '下载：纯中文版 PDF'
+    : zhVariant === 'dual' ? '下载：中英对照版 PDF' : '下载：原文 PDF';
+}
+function downloadCurrent() {
+  if (!current) return;
+  // 同源请求自动带 cookie（鉴权围栏）；download 属性空值 → 文件名取 content-disposition
+  const a = document.createElement('a');
+  a.href = pdfUrl(zhVariant) + '&download=1';
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+$('dl-btn').onclick = downloadCurrent;
 
 /* ================= 中英切换 ================= */
 async function refreshZhState() {
@@ -236,6 +300,7 @@ $('zh-toggle').onclick = async () => {
     zhVariant = zhVariant === null ? (zhState.zh ? 'zh' : 'dual') : null;
     localStorage.setItem(variantKey(current.topic, current.name), zhVariant ?? '');
     $('zh-toggle').classList.toggle('active', zhVariant !== null);
+    updateDlBtn();
     // 切换变体后强制适宽：译文版页宽与原文不同（对照双栏≈2×），不重算会溢出裁切
     fitMode = true; fitBtn.classList.add('active');
     await loadPdf(pdfUrl(zhVariant));
@@ -428,7 +493,7 @@ let renderToken = 0;
   mq.addEventListener('change', function onChange() {
     mq.removeEventListener('change', onChange);
     dpr = window.devicePixelRatio || 1;
-    if (pdfDoc) renderAllPages();
+    if (pdfDoc) rerender();
     watchDpr();
   });
 })();
@@ -437,62 +502,129 @@ async function loadPdf(url) {
   await ensurePdfjs(); // 就绪前禁止触 pdfjsLib（defer 竞态，见文件头注释）
   pdfDoc = await pdfjsLib.getDocument({ url }).promise; // v6 起不接受字符串参数，必须传对象
   $('empty').style.display = 'none';
-  if (fitMode) { fitToWidth(); return; } // fitToWidth 内部 setZoom → renderAllPages
-  await renderAllPages();
+  // 翻页控件与模式切换按钮：文档就绪后才出现
+  $('pager').style.display = '';
+  $('mode-toggle').style.display = '';
+  if (fitMode) { fitToWidth(); return; } // fitToWidth 内部 setZoom → rerender
+  await rerender();
 }
 
+/** 构建单页 DOM 骨架（.page + canvas + textLayer），位图与文本由 paintPage 异步填充。 */
+function makePageNode(i, viewport) {
+  const div = document.createElement('div');
+  div.className = 'page';
+  div.dataset.page = i;
+  div.style.width = viewport.width + 'px';
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(viewport.width * dpr);
+  canvas.height = Math.ceil(viewport.height * dpr);
+  canvas.style.width = viewport.width + 'px';
+  canvas.style.height = viewport.height + 'px';
+  div.appendChild(canvas);
+
+  const tl = document.createElement('div');
+  tl.className = 'textLayer';
+  tl.style.width = viewport.width + 'px';
+  tl.style.height = viewport.height + 'px';
+  tl.style.setProperty('--scale-factor', String(viewport.scale));
+  div.appendChild(tl);
+  return div;
+}
+
+/** 渲染单页内容（canvas 位图 + pdf.js 6.x TextLayer 文本层）。token 失效（被更新的渲染
+    抢占）时中途放弃——旧 renderAllPages 循环体里的守卫原样搬进来。 */
+async function paintPage(page, div, viewport, token) {
+  const canvas = div.firstChild;
+  const tl = div.lastChild;
+  await page.render({
+    canvasContext: canvas.getContext('2d'),
+    viewport,
+    transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+  }).promise;
+  if (token !== renderToken) return;
+  const tc = await page.getTextContent();
+  if (token !== renderToken) return;
+  // pdf.js 6.x: renderTextLayer() 移除，改 TextLayer 类
+  await new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport }).render();
+}
+
+/** 当前模式的全量重渲入口：缩放/DPR/换文档/换变体统一走这里。 */
+function rerender() {
+  return pageMode === 'paged' ? renderPaged() : renderAllPages();
+}
+
+// 隐藏期间被跳过的重渲请求：尺寸恢复（resize）后补跑。
+// ⚠️ 曾经的坑（用户实测「点放大后全空白」）：守卫在 ++renderToken 之后——隐藏期间的
+// 渲染请求先作废在途渲染、自己又因高度 0 提前返回，容器已被清空却无人再画；且退出
+// 适宽模式后 resize 只重算适宽（if (fitMode)），不补渲 → 永久空白。改为：隐藏期间
+// 的请求直接跳过（不动 token、在途渲染照常画完），标记 pending 等恢复后补画。
+let pendingRerender = false;
+
 async function renderAllPages() {
+  const pane = $('pdf-pane');
+  if (pane.clientHeight === 0) { pendingRerender = true; return; } // 悬浮层隐藏期间不重渲（否则锚点恢复会把滚动清零）
   const token = ++renderToken;
   const container = $('pdf-pages');
-  const pane = $('pdf-pane');
-  if (pane.clientHeight === 0) return; // 悬浮层隐藏期间不重渲（否则锚点恢复会把滚动清零）
+  const scale = zoomScale; // 单次渲染内快照：隐藏期间的 setZoom 改全局值也不至于画出混合缩放
   // 滚动比例锚点：不用 DOM rect（并发重渲时旧页可能已被清空，rect 全灭 → 锚点归零）
   const range = pane.scrollHeight - pane.clientHeight;
   const anchorRatio = range > 0 ? pane.scrollTop / range : 0;
   container.innerHTML = '';
-  $('zoom-label').textContent = Math.round(zoomScale / 1.5 * 100) + '%';
+  container.classList.remove('paged');
+  $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
 
   for (let i = 1; i <= pdfDoc.numPages; i++) {
     if (token !== renderToken) return;
     const page = await pdfDoc.getPage(i);
     if (token !== renderToken) return;
-    const viewport = page.getViewport({ scale: zoomScale });
-    const div = document.createElement('div');
-    div.className = 'page';
-    div.dataset.page = i;
-    div.style.width = viewport.width + 'px';
-
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.ceil(viewport.width * dpr);
-    canvas.height = Math.ceil(viewport.height * dpr);
-    canvas.style.width = viewport.width + 'px';
-    canvas.style.height = viewport.height + 'px';
-    div.appendChild(canvas);
-
-    const tl = document.createElement('div');
-    tl.className = 'textLayer';
-    tl.style.width = viewport.width + 'px';
-    tl.style.height = viewport.height + 'px';
-    tl.style.setProperty('--scale-factor', String(zoomScale));
-    div.appendChild(tl);
+    const viewport = page.getViewport({ scale });
+    const div = makePageNode(i, viewport);
     container.appendChild(div);
-
-    await page.render({
-      canvasContext: canvas.getContext('2d'),
-      viewport,
-      transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
-    }).promise;
+    await paintPage(page, div, viewport, token);
     if (token !== renderToken) return;
-    const tc = await page.getTextContent();
-    if (token !== renderToken) return;
-    // pdf.js 6.x: renderTextLayer() 移除，改 TextLayer 类
-    await new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport }).render();
   }
   const newRange = pane.scrollHeight - pane.clientHeight;
   pane.scrollTop = anchorRatio * Math.max(0, newRange);
+  observePages();
 }
 
-function setZoom(newScale) { if (!pdfDoc) return; zoomScale = Math.min(4.5, Math.max(0.6, newScale)); renderAllPages(); }
+/** 翻页模式：只渲染 curPage 一页（按需渲染，天然无长文档性能问题）。 */
+async function renderPaged() {
+  if ($('pdf-pane').clientHeight === 0) { pendingRerender = true; return; } // 同 renderAllPages：跳过并标记，恢复后补画
+  const token = ++renderToken;
+  const container = $('pdf-pages');
+  const scale = zoomScale; // 同 renderAllPages：快照，防混合缩放
+  curPage = Math.min(Math.max(1, curPage), pdfDoc.numPages);
+  container.innerHTML = '';
+  container.classList.add('paged');
+  $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
+  updatePager();
+  const page = await pdfDoc.getPage(curPage);
+  if (token !== renderToken) return;
+  const viewport = page.getViewport({ scale });
+  const div = makePageNode(curPage, viewport);
+  container.appendChild(div);
+  await paintPage(page, div, viewport, token);
+}
+
+/** 滚动模式当前页探测：视口竖直中线带（±45%）压到哪页，哪页就是当前页。
+    每次全量重渲后重建（页节点全换）。翻页控件与模式切换共享 curPage。 */
+let pageObserver = null;
+function observePages() {
+  pageObserver?.disconnect();
+  pageObserver = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      if (en.isIntersecting) {
+        curPage = +en.target.dataset.page || curPage;
+        updatePager();
+      }
+    }
+  }, { root: $('pdf-pane'), rootMargin: '-45% 0px -45% 0px', threshold: 0 });
+  document.querySelectorAll('#pdf-pages .page').forEach((d) => pageObserver.observe(d));
+}
+
+function setZoom(newScale) { if (!pdfDoc) return; zoomScale = Math.min(4.5, Math.max(0.6, newScale)); rerender(); }
 // 默认适宽：rightbar 窄列里 1.5 倍缩放会把页面撑出视口（中英对照双栏页宽≈2×，更明显）
 let fitMode = true;
 const fitBtn = $('zoom-fit');
@@ -507,9 +639,99 @@ function fitToWidth() {
 $('zoom-in').onclick = () => { exitFitMode(); setZoom(zoomScale + 0.25); };
 $('zoom-out').onclick = () => { exitFitMode(); setZoom(zoomScale - 0.25); };
 fitBtn.onclick = () => { if (!pdfDoc) return; fitMode = true; fitBtn.classList.add('active'); fitBtn.blur(); fitToWidth(); };
-window.addEventListener('resize', () => { if (fitMode) fitToWidth(); });
+window.addEventListener('resize', () => {
+  if (fitMode) fitToWidth(); // setZoom → rerender，顺带消化 pendingRerender
+  else if (pendingRerender && pdfDoc) { pendingRerender = false; rerender(); } // 隐藏期间欠下的重渲，恢复尺寸后补画
+});
+
+/* ================= 翻页模式：页码控件 + 模式切换 + 键盘 ================= */
+function flashPage() {
+  const div = document.querySelector(`.page[data-page="${curPage}"]`);
+  if (!div) return;
+  div.classList.add('flash');
+  setTimeout(() => div.classList.remove('flash'), 1600);
+}
+
+/** 页码控件刷新：输入框（未聚焦时才回写，别打断正在敲页码的人）/总页数/首末页禁用。 */
+function updatePager() {
+  const total = pdfDoc ? pdfDoc.numPages : 0;
+  $('page-total').textContent = '/ ' + (total || '?');
+  const input = $('page-input');
+  if (document.activeElement !== input) input.value = total ? curPage : '';
+  $('page-prev').disabled = pageMode === 'paged' && curPage <= 1;
+  $('page-next').disabled = pageMode === 'paged' && curPage >= total;
+}
+
+/** 跳到第 n 页（夹取）：paged 重渲单页+闪烁；scroll 平滑滚到该页。 */
+async function goPage(n) {
+  if (!pdfDoc) return;
+  const p = Math.min(Math.max(1, (n | 0) || 1), pdfDoc.numPages);
+  if (pageMode === 'paged') {
+    if (p === curPage) { flashPage(); return; }
+    curPage = p;
+    await renderPaged();
+    flashPage();
+  } else {
+    curPage = p;
+    jumpToPage(p);
+  }
+}
+
+$('page-prev').onclick = () => goPage(curPage - 1);
+$('page-next').onclick = () => goPage(curPage + 1);
+function commitPageInput() {
+  const v = parseInt($('page-input').value, 10);
+  if (Number.isFinite(v) && v >= 1) goPage(v);
+  else updatePager(); // 非法输入：恢复当前页显示
+}
+// Enter 走 blur 统一提交；Escape 只恢复显示不跳页（标志位让 blur 知道这是放弃编辑）
+let pageInputEscaped = false;
+$('page-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+  else if (e.key === 'Escape') { pageInputEscaped = true; e.target.blur(); }
+});
+$('page-input').addEventListener('blur', () => {
+  if (pageInputEscaped) { pageInputEscaped = false; updatePager(); return; }
+  commitPageInput();
+});
+
+/** 模式切换：paged→scroll 先全量渲染再跳回当前页；scroll→paged 用观察器最近回写的 curPage。
+    图标显示「当前模式」：▣ 单页翻页（active）/ ≣ 连续滚动。 */
+function updateModeToggle() {
+  const btn = $('mode-toggle');
+  btn.textContent = pageMode === 'paged' ? '▣' : '≣';
+  btn.classList.toggle('active', pageMode === 'paged');
+  btn.title = pageMode === 'paged' ? '当前：单页翻页，点击切回连续滚动' : '当前：连续滚动，点击切到单页翻页';
+  updatePager();
+}
+$('mode-toggle').onclick = async () => {
+  if (!pdfDoc) return;
+  pageMode = pageMode === 'paged' ? 'scroll' : 'paged';
+  localStorage.setItem('dpr.pageMode', pageMode);
+  updateModeToggle();
+  if (pageMode === 'paged') {
+    await renderPaged();
+    flashPage();
+  } else {
+    await renderAllPages();
+    jumpToPage(curPage);
+  }
+};
+updateModeToggle();
+
+// 键盘翻页（仅 paged）：输入框聚焦/带修饰键时不抢；Space 在单页模式下无滚动量，拿来做下一页
+document.addEventListener('keydown', (e) => {
+  if (pageMode !== 'paged' || !pdfDoc) return;
+  const tag = (e.target.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); goPage(curPage + 1); }
+  else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); goPage(curPage - 1); }
+  else if (e.key === 'Home') { e.preventDefault(); goPage(1); }
+  else if (e.key === 'End') { e.preventDefault(); goPage(pdfDoc.numPages); }
+});
 
 function jumpToPage(n) {
+  if (pageMode === 'paged') { goPage(n); return; }
   const div = document.querySelector(`.page[data-page="${n}"]`);
   if (!div) return;
   div.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -553,9 +775,17 @@ function highlightSnippet(page, q) {
 }
 
 /* 统一跳转入口：先等目标页渲染出来（fit 模式下 loadPdf 返回时页面可能还在渲），
-   有 q 就尝试片段高亮，否则整页跳转 + 边框闪烁 */
+   有 q 就尝试片段高亮，否则整页跳转 + 边框闪烁。
+   paged 模式目标页不在 DOM 里（只渲当前页），轮询永远等不到 → 直接设页渲染。 */
 async function jumpTo(page, q) {
   const p0 = Math.max(1, (page | 0) || 1);
+  if (pageMode === 'paged') {
+    if (!pdfDoc) return;
+    const p = Math.min(p0, pdfDoc.numPages);
+    if (p !== curPage) { curPage = p; await renderPaged(); }
+    if (!(q && highlightSnippet(p, q))) flashPage();
+    return;
+  }
   for (let i = 0; i < 100; i++) {
     if (pdfDoc && document.querySelector(`.page[data-page="${Math.min(p0, pdfDoc.numPages)}"]`)) {
       const p = Math.min(p0, pdfDoc.numPages);

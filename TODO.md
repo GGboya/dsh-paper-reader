@@ -87,6 +87,16 @@
 - ✅ README 截图（CDP headless Chrome 实拍）：docs/screenshot-default.png（默认安装=官方侧栏+开关行）、docs/screenshot-reading.png（伴读模式三栏全景）；README 用 GitHub raw 绝对 URL 引用（npm 页面也能显示）。演示 GIF 待做
 - Phase 3 待续：（可选）演示 GIF、（可选）投稿 awesome-deepseek-harness 类索引仓库
 
+## v1.3.0 — 用户反馈四项（2026-10-10，做三项，preset 修复搁置备档）
+
+- [x] **修复「放大后全空白」（存量 bug，非本轮引入；用户实测反馈）**：renderAllPages/renderPaged 的「悬浮层隐藏（pane 高度 0）跳过重渲」守卫排在 `++renderToken` 之后——隐藏期间的渲染请求（放大/切模式恰好撞上 ReaderOverlay 几何空窗，布局变化会触发 iframe resize 风暴）先作废在途渲染、自己又提前返回，容器已被 `innerHTML=''` 清空却无人再画；退出适宽后 resize 只走 `if (fitMode) fitToWidth()`，永不补渲 → 永久空白（工具栏/页码活着、页面区全白）。修复：守卫提前（隐藏期间直接跳过、不动 token、在途渲染照常画完）+ `pendingRerender` 标记，resize 恢复尺寸后补画；顺带单次渲染快照 scale（隐藏期间 setZoom 改全局 zoomScale 不再画出混合缩放），makePageNode 的 `--scale-factor` 改用 viewport.scale。验证：确定性复现脚本（在途渲染+隐藏期 setZoom）修复前 0 页/修复后 13 页；应用内 8 轮 resize 风暴+交错缩放/切模式压力测试 13 页全在；全量 UI 套件 42/42
+
+- [x] **翻译结果导出**：/api/pdf 加 `download=1` → content-disposition attachment（filename* 保中文原名）；阅读器顶栏 ⤓ 按钮下载当前版本（原文/纯中文/对照，title 跟随变体），`<a download>` 同源直下
+- [x] **PDF 翻页模式**（reader/index.html 自包含）：渲染层抽出 makePageNode/paintPage 复用；paged 模式单页按需渲染（renderPaged + rerender 统一入口）；‹› + 页码输入 N/M + ←→/PageUp/PageDown/Space/Home/End；scroll 模式 IntersectionObserver（-45% 中线带）回写当前页；模式切换保持当前页（localStorage dpr.pageMode 记忆）；jumpTo paged 分支直接设页渲染不走 100 次轮询；jumpToPage/goPage 双模式分支。⚠️ 已知边界：paged 首次翻页有单页渲染延迟（不做预渲染）；纯大小写改名在大小写不敏感文件系统被目标冲突误拦（已知局限）
+- [x] **专题+论文增删改查 + 路径显示**：library.ts 纯函数（validateEntryName / derivedFilesFor / rename|deleteTopic / rename|deletePaper——派生文件 .txt/.pages.json/-zh/-dual/.study.json 连带）；host.ts 四条 POST 路由（翻译 busy → 409，EBUSY/EPERM → 可读文案，专题改名顺带 workspaceCache.delete 旧键）；client.js 树行悬停 ✎🗑（注入 CSS hover 显隐 + 待确认态常亮 data-dpr-armed）、AskText 加 initial 预填、两段式删除 3s 复位、改名后 localStorage 键搬家（variant/sessionN/treeClosed/dpr.last）+ dpr:paper 迁移当前论文、删除当前论文自动切下一篇/空库收阅读器；/api/library+/api/paper 响应加 pdfPath；树行 tooltip + 阅读器状态栏 #pdf-path（点击复制，clipboard 失败回退 execCommand）
+- ✅ 验证（隔离环境：/tmp/dsh-test-home + 0.1.5 运行时起 3999 端口，不动用户 profile）：API 层 curl 全过（改名连带派生/校验 400/重名 400/删除/下载头）；UI 层 Playwright 全过 40+ 断言（悬停显隐、预填、两段式、磁盘对账、翻页全键位、模式记忆、路径复制 toast、下载事件+文件名）——仅长编排脚本里下载事件偶发不触发（diag 等价流程 4 次复验全过，判定测试时序问题非功能缺陷）
+- [ ] 🔜 **预设 agent 修复（已定位，用户决定本轮不做）**：dsh 0.2.x（官方桌面端 0.2.0-rc.2 实测解剖 app.asar）废弃 `$DSH_HOME/.agent-presets/<id>/` 旧机制（官方原话 "Nothing reads that directory any more"），preset 改为 bundle patch 里的声明行：`- id: preset-paper-reader / name: '@deepseek-ai/dsh-agent-preset' / config: {id: paper-reader, name, description, order, plugins: [persona+compaction 原样搬 agent.cordis.yml]}`。**现状**：installPaperPreset 仍写 legacy 目录（0.2.x 无人读）→ createPaperSession 静默回退默认 preset → 人设丢失无告警（这正是用户报「预设 agent 没了」的根因）。**兼容决策（用户拍板）**：只支持 dsh ≥ 0.2.0-rc.2（npm CLI 最新即此版本；0.1.5 无 @deepseek-ai/dsh-agent-preset 包，写死声明行会让整个 profile 起不来——dsh-app-boot 对 import 失败零容忍，disabled: !!js 门控不可行：eval 作用域只有 process/dshHomePath）。**修复时**：cordis.patch.yml 加声明行 + 删 preset.ts/presets 目录 + peer 抬 `>=0.2.0-rc.2 <0.3.0-0` + 回退改显式一次性告警 + README 明示 0.1.5 用户留 1.2.1。官方参照：app.asar 内 dsh-web-app/presets/standard.patch.yml（我们的 compaction 组与其逐字同构）
+
 ## Phase 3 — 发布
 
 - [x] `dsh.bundle` / `cordis.patch.yml` 打包配置（`package.json` 的 `dsh.bundle.patch` → 仓库根 `cordis.patch.yml` 的 insert 条目）

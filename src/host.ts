@@ -5,9 +5,19 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createReadStream } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { PluginConfig } from './tools.ts'
-import { listPapers, listTopics, resolveDataDir, resolvePaper } from './library.ts'
+import {
+  deletePaper,
+  deleteTopic,
+  listPapers,
+  listTopics,
+  paperRefFor,
+  renamePaper,
+  renameTopic,
+  resolveDataDir,
+  resolvePaper,
+} from './library.ts'
 import { readTranscript, transcribePaper } from './transcribe.ts'
 import { pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
 import {
@@ -242,7 +252,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     if (sub === '/api/library' && req.method === 'GET') {
-      json(res, 200, { dataDir, topics: listTopics(dataDir), papers: listPapers(dataDir) })
+      const papers = listPapers(dataDir).map((p) => ({ ...p, pdfPath: join(dataDir, p.topic, p.name + '.pdf') }))
+      json(res, 200, { dataDir, topics: listTopics(dataDir), papers })
       return
     }
 
@@ -285,6 +296,80 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const target = join(dir, safeName)
       await writeFile(target, buf)
       json(res, 200, { ok: true, topic: topic.trim(), name: safeName.slice(0, -4), bytes: buf.length })
+      return
+    }
+
+    /* ---- 库管理：专题/文献 改名与删除。----
+     * 翻译进行中（busy）一律 409 拒绝——babeldoc 异步跑着会往旧路径写 -zh/-dual 产物，
+     * 改名/删除会让它写丢；busy 键控在旧路径上，动了就失联。
+     * Windows 下删除被阅读器 iframe 占用的文件可能 EBUSY/EPERM，转成可读文案。 */
+    const busyPapersInTopic = (topic: string): string[] =>
+      listPapers(dataDir, topic)
+        .filter((p) => zhStatus(paperRefFor(dataDir, p.topic, p.name)).busy)
+        .map((p) => p.name)
+    const fsError = (res2: Res, err: unknown) => {
+      const e = err as NodeJS.ErrnoException
+      if (e?.code === 'EBUSY' || e?.code === 'EPERM') {
+        json(res2, 409, { error: '文件被占用（可能正在阅读器或其他程序中打开），关闭后重试' })
+      } else {
+        json(res2, 400, { error: e instanceof Error ? e.message : String(err) })
+      }
+    }
+
+    if (sub === '/api/library/rename-topic' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; to?: string }
+      if (!body.topic?.trim()) { json(res, 400, { error: '缺少 topic' }); return }
+      const busy = busyPapersInTopic(body.topic.trim())
+      if (busy.length) { json(res, 409, { error: `以下文献正在翻译，稍后再试：${busy.join('、')}` }); return }
+      try {
+        renameTopic(dataDir, body.topic.trim(), body.to ?? '')
+      } catch (err) { fsError(res, err); return }
+      workspaceCache.delete(join(dataDir, body.topic.trim())) // 旧目录的工作区记录失效（残留无害）
+      json(res, 200, { ok: true, topic: body.to?.trim() })
+      return
+    }
+
+    if (sub === '/api/library/delete-topic' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string }
+      if (!body.topic?.trim()) { json(res, 400, { error: '缺少 topic' }); return }
+      const busy = busyPapersInTopic(body.topic.trim())
+      if (busy.length) { json(res, 409, { error: `以下文献正在翻译，稍后再试：${busy.join('、')}` }); return }
+      try {
+        deleteTopic(dataDir, body.topic.trim())
+      } catch (err) { fsError(res, err); return }
+      json(res, 200, { ok: true })
+      return
+    }
+
+    if (sub === '/api/library/rename-paper' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; to?: string }
+      if (!body.topic?.trim() || !body.name?.trim()) { json(res, 400, { error: '缺少 topic / name' }); return }
+      let ref
+      try {
+        ref = resolvePaper(dataDir, { topic: body.topic.trim(), name: body.name.trim() })
+      } catch (err) { fsError(res, err); return }
+      if (zhStatus(ref).busy) { json(res, 409, { error: '该文献正在翻译，稍后再试' }); return }
+      let renamed: string[]
+      try {
+        renamed = renamePaper(dataDir, ref.topic, ref.name, body.to ?? '')
+      } catch (err) { fsError(res, err); return }
+      json(res, 200, { ok: true, topic: ref.topic, name: body.to?.trim(), renamed })
+      return
+    }
+
+    if (sub === '/api/library/delete-paper' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string }
+      if (!body.topic?.trim() || !body.name?.trim()) { json(res, 400, { error: '缺少 topic / name' }); return }
+      let ref
+      try {
+        ref = resolvePaper(dataDir, { topic: body.topic.trim(), name: body.name.trim() })
+      } catch (err) { fsError(res, err); return }
+      if (zhStatus(ref).busy) { json(res, 409, { error: '该文献正在翻译，稍后再试' }); return }
+      let deleted: string[]
+      try {
+        deleted = deletePaper(dataDir, ref.topic, ref.name)
+      } catch (err) { fsError(res, err); return }
+      json(res, 200, { ok: true, deleted })
       return
     }
 
@@ -339,6 +424,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       json(res, 200, {
         topic: ref.topic,
         name: ref.name,
+        pdfPath: ref.pdfPath,
         pdfBytes: st.size,
         hasTranscript: t !== null,
         chars: t?.text.length ?? 0,
@@ -352,11 +438,18 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const ref = locate(url)
       const pdfPath = pdfVariantPath(ref, url.searchParams.get('variant'))
       const st = await stat(pdfPath) // 变体不存在时 404/500 由外层兜底
-      res.writeHead(200, {
+      // download=1 → 附件下载（导出译文/原文）；文件名即磁盘名 <名>.pdf / -zh.pdf / -dual.pdf
+      const headers: Record<string, string | number> = {
         'content-type': 'application/pdf',
         'content-length': st.size,
         'cache-control': 'no-cache', // 切换文献/重新生成后必须拿到新的
-      })
+      }
+      if (url.searchParams.get('download') === '1') {
+        const name = basename(pdfPath)
+        headers['content-disposition'] =
+          `attachment; filename="paper.pdf"; filename*=UTF-8''${encodeURIComponent(name)}`
+      }
+      res.writeHead(200, headers)
       createReadStream(pdfPath).pipe(res)
       return
     }
