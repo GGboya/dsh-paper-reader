@@ -220,12 +220,14 @@ test('回归：mode=off 命中已有缓存 → 原样返回，不做任何数学
   } finally { s.cleanup() }
 })
 
-// ── 4. 真实论文单页端到端（本地 MinerU + 真实 Gu et al. 2022 第 4 页 PDF）──────
-// 文件缺失或服务不可达时 skip（exit 0），避免 CI 噪声。
+// ── 4. 真实论文单页端到端（本地 MinerU + 一篇含公式的真实论文 PDF）────────────
+// 样本通过环境变量 DPR_SAMPLE_PDF 提供（指向任意含公式的 PDF）；未设置、文件不存在
+// 或本地 MinerU 不可达时 skip（exit 0），避免 CI 噪声。
+//   DPR_SAMPLE_PDF=/path/to/paper.pdf node --test "test/*.test.mjs"
 
-const GU_PDF = '/home/vr/zotero-pdf2zh/server/translated/Gu et al. - 2022 - Vector Quantized Diffusion Model for Text-to-Image Synthesis.pdf'
-const guAvailable = existsSync(GU_PDF)
-const realSkip = guAvailable ? false : '真实样本 PDF 不在本机'
+const GU_PDF = process.env.DPR_SAMPLE_PDF ?? ''
+const guAvailable = GU_PDF !== '' && existsSync(GU_PDF)
+const realSkip = guAvailable ? false : '未设置 DPR_SAMPLE_PDF（或该文件不存在）'
 
 test('端到端（真实 PDF）：单页 MinerU /file_parse → 投影 → chunkText/searchChunks 命中公式', { skip: realSkip }, async () => {
   try {
