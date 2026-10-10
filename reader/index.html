@@ -34,7 +34,7 @@
   #status { min-width: 0; color: var(--text-2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* ---------- PDF 区 ---------- */
-  #main { display: flex; flex: 1; min-height: 0; }
+  #main { display: flex; flex: 1; min-height: 0; position: relative; } /* relative：公式面板绝对定位的锚 */
   #pdf-pane { flex: 1; overflow: auto; padding: 16px; }
   /* safe center：页宽超过视口时退回左对齐——普通 center 会让左右同时溢出且左侧滚不到 */
   #pdf-pages { display: flex; flex-direction: column; align-items: safe center; gap: 14px; }
@@ -68,6 +68,31 @@
      （同代码编辑器的选中高亮语义：消失由用户触发，不由计时器触发） */
   .textLayer span.dpr-hl { background: rgba(255,196,0,.45); border-radius: 2px; }
   #empty { margin: 60px auto; color: var(--text-2); text-align: center; max-width: 420px; }
+
+  /* ---------- 公式引用（MinerU bbox 热区 + 列表面板）----------
+     契约 §1.3/§1.4：热区**不用** pointer-events:auto 的覆盖层——那会夺走 textLayer 的
+     mousedown/拖拽，破坏既有划词提问。这里 .eqLayer 只负责画描边（pointer-events:none），
+     命中判定在 JS 里按坐标算。 */
+  .eqLayer { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+  .eq-box { position: absolute; border-radius: 3px; }
+  .eq-box.hover { outline: 1.5px dashed rgba(9,105,218,.85); background: rgba(9,105,218,.07); }
+  .eq-box.hit { outline: 2px solid rgba(255,140,0,.9); background: rgba(255,196,0,.16); }
+  #eq-panel { position: absolute; top: 0; right: 0; bottom: 0; width: min(320px, 88%); display: none;
+    background: var(--panel); border-left: 1px solid var(--border); box-shadow: -4px 0 16px rgba(0,0,0,.08);
+    overflow: auto; z-index: 3; padding: 10px 12px; }
+  #eq-panel h3 { margin: 0 0 4px; font-size: 13px; }
+  #eq-meta { font-size: 11.5px; color: var(--text-2); margin-bottom: 6px; line-height: 1.5; }
+  .eq-page { margin: 10px 0 2px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+  .eq-item { display: block; width: 100%; text-align: left; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); padding: 6px 8px; margin: 4px 0; cursor: pointer; font: inherit; }
+  .eq-item:hover { border-color: var(--accent); }
+  .eq-item code { display: block; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px;
+    white-space: pre-wrap; word-break: break-word; margin-top: 2px; }
+  .eq-item .eq-tag { font-size: 11px; color: var(--text-2); }
+  #eq-note { font-size: 12px; color: var(--text-2); line-height: 1.6; }
+  #eq-transcribe { margin-top: 8px; }
+  #eq-toggle.muted { opacity: .55; }
+  #ask-copy { background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--text-2); cursor: pointer; margin-right: auto; }
 
   /* ---------- 选中即问浮层 ---------- */
   #ask-pop { position: fixed; z-index: 50; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: 320px; }
@@ -107,6 +132,7 @@
   <span id="zoom-label">100%</span>
   <button id="zoom-in" class="tbtn">＋</button>
   <button id="zoom-fit" class="tbtn">适宽</button>
+  <button id="eq-toggle" class="tbtn" title="公式引用（MinerU LaTeX）">∑ 公式</button>
 </div>
 
 <div id="main">
@@ -114,12 +140,18 @@
     <div id="pdf-pages"></div>
     <div id="empty" style="display:none"></div>
   </div>
+  <div id="eq-panel">
+    <h3>公式</h3>
+    <div id="eq-meta"></div>
+    <div id="eq-list"></div>
+  </div>
 </div>
 
 <div id="ask-pop">
   <div id="ask-quote"></div>
   <textarea id="ask-input" rows="2" placeholder="围绕选中内容提问…"></textarea>
   <div id="ask-actions">
+    <button id="ask-copy" style="display:none">复制 LaTeX</button>
     <button id="ask-cancel">取消</button>
     <button id="ask-send">提问</button>
   </div>
@@ -194,6 +226,9 @@ async function openPaper(topic, name, opts = {}) {
     : `${name} · 未转录（提问时会自动转录）`;
   $('status').textContent = statusMeta;
   await refreshZhState();
+  // 公式索引（MinerU content_list）：**先等它回来再渲染**——热区是在 renderAllPages 里
+  // 按 eqIndex 铺的，先渲染会漏画/残留上一篇的矩形。失败也不影响打开文献，降级成「无公式」。
+  await loadFormulas();
   // 恢复该论文上次的语言版本（译文已不存在时回落原文）
   const saved = localStorage.getItem(variantKey(topic, name));
   zhVariant = (saved === 'zh' && zhState.zh) || (saved === 'dual' && zhState.dual) ? saved : null;
@@ -238,6 +273,7 @@ $('zh-toggle').onclick = async () => {
     $('zh-toggle').classList.toggle('active', zhVariant !== null);
     // 切换变体后强制适宽：译文版页宽与原文不同（对照双栏≈2×），不重算会溢出裁切
     fitMode = true; fitBtn.classList.add('active');
+    renderEqPanel(); // 译文视图要给出「没有位置信息」的说明（热区同时被 eqHotEnabled 关掉）
     await loadPdf(pdfUrl(zhVariant));
     return;
   }
@@ -450,6 +486,7 @@ async function renderAllPages() {
   const range = pane.scrollHeight - pane.clientHeight;
   const anchorRatio = range > 0 ? pane.scrollTop / range : 0;
   container.innerHTML = '';
+  EQ_BY_PAGE.clear(); // 旧页的公式几何随 DOM 一起作废，避免命中测试打到已卸载的页
   $('zoom-label').textContent = Math.round(zoomScale / 1.5 * 100) + '%';
 
   for (let i = 1; i <= pdfDoc.numPages; i++) {
@@ -487,6 +524,8 @@ async function renderAllPages() {
     if (token !== renderToken) return;
     // pdf.js 6.x: renderTextLayer() 移除，改 TextLayer 类
     await new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport }).render();
+    // 公式热区层（pointer-events:none，只画描边；命中在 JS 里按坐标算）
+    paintEqLayer(div, viewport, i);
   }
   const newRange = pane.scrollHeight - pane.clientHeight;
   pane.scrollTop = anchorRatio * Math.max(0, newRange);
@@ -522,6 +561,7 @@ function jumpToPage(n) {
    找不到（如用户在中文界面而 q 是英文原文）返回 false，调用方退回仅跳页。 */
 function clearHighlights() {
   document.querySelectorAll('.textLayer span.dpr-hl').forEach((sp) => sp.classList.remove('dpr-hl'));
+  clearEqHit(); // 公式命中描边与引文高亮同生共死（用户在别处点一下即清）
 }
 // 高亮的消失交给用户：阅读器里任意点一下即清（mousedown 比 click 早，划选文字的那一下也算）
 document.addEventListener('mousedown', clearHighlights);
@@ -566,34 +606,335 @@ async function jumpTo(page, q) {
   }
 }
 
-/* ================= 选中即问 ================= */
+/* ================= 公式引用（MinerU LaTeX，契约 §1） =================
+   PDF 文本层里的公式是乱码（`𝑧𝑧1 𝑧𝑧2`），鼠标选中拿不到可用内容；真相源是 MinerU
+   content_list 的 equation 块（LaTeX + bbox）。bbox 坐标系实测为「页面归一化坐标 ×1000」
+   （x÷页宽、y÷页高，各自归一），映射直接用渲染时的同一个 viewport，因此与缩放无关：
+       x = bbox[0]/1000*viewport.width ，y = bbox[1]/1000*viewport.height
+   热区外扩 6pt（实测最坏欠覆盖 4.60pt；6pt 覆盖全部 17/17 公式块）。 */
+const EQ_PAD = 6;                 // pt（= scale 1 时的 CSS px），随 zoomScale 放大
+let eqIndex = { source: 'none', equations: [], reason: 'no-mineru-artifact', bboxSpace: 'normalized-1000' };
+const EQ_BY_PAGE = new Map();     // pageNo → [{eq,x0,y0,x1,y1,w,h,pad}]
+let eqHoverId = null;
+
+/** 去掉 MinerU 文本外层 `$$`：`$$\n\\pi…\n$$` → `\pi…` */
+function eqLatex(raw) {
+  return String(raw == null ? '' : raw).replace(/^\s*\$\$?/, '').replace(/\$\$?\s*$/, '').trim();
+}
+/** 进会话的引用串：保留 `$$` 定界（模型对数学最友好） */
+function eqCite(eq) { return '$$ ' + eqLatex(eq.latex) + ' $$'; }
+
+function loadFormulas() {
+  return (async () => {
+    eqIndex = { source: 'none', equations: [], reason: 'no-mineru-artifact', bboxSpace: 'normalized-1000' };
+    if (!current) { renderEqPanel(); return; }
+    const q = `topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`;
+    try {
+      const idx = await api('/formulas?' + q);
+      if (idx && Array.isArray(idx.equations)) eqIndex = idx;
+    } catch (e) {
+      // 接口异常绝不打崩阅读器：降级成「无公式」，划词提问照常
+      eqIndex = { source: 'none', equations: [], reason: 'bad-artifact', warning: e.message, bboxSpace: 'normalized-1000' };
+    }
+    const btn = $('eq-toggle');
+    btn.classList.toggle('muted', eqIndex.equations.length === 0);
+    btn.title = eqIndex.equations.length
+      ? `公式引用：${eqIndex.equations.length} 个（点击 PDF 上的公式即可引用其 LaTeX）`
+      : '公式引用：本论文还没有 MinerU 解析产物';
+    renderEqPanel();
+  })();
+}
+
+/** 热区只在「原文视图 + 有 bbox」时开启：译文版（-zh/-dual）页面几何与原文不同。 */
+function eqHotEnabled() {
+  return zhVariant === null && eqIndex.equations.some((e) => e.bbox);
+}
+
+function eqGeom(eq, viewport) {
+  if (!eq.bbox) return null;
+  const space = eqIndex.bboxSpace === 'page-units'; // 兜底分支（云端版本差异，见需求 R3）
+  const kx = space ? zoomScale : viewport.width / 1000;
+  const ky = space ? zoomScale : viewport.height / 1000;
+  const x = eq.bbox[0] * kx;
+  const y = eq.bbox[1] * ky;
+  const w = (eq.bbox[2] - eq.bbox[0]) * kx;
+  const h = (eq.bbox[3] - eq.bbox[1]) * ky;
+  if (!(w > 0) || !(h > 0)) return null;
+  return {
+    eq, x, y, w, h, pad: EQ_PAD * zoomScale,
+    x0: Math.max(0, x), y0: Math.max(0, y),
+    x1: Math.min(viewport.width, x + w), y1: Math.min(viewport.height, y + h),
+  };
+}
+
+/** 为已渲染的一页铺热区层（只画描边，不接事件）。 */
+function paintEqLayer(pageDiv, viewport, pageNo) {
+  const old = pageDiv.querySelector('.eqLayer');
+  if (old) old.remove();
+  const items = [];
+  if (eqHotEnabled()) {
+    const lay = document.createElement('div');
+    lay.className = 'eqLayer';
+    lay.style.width = viewport.width + 'px';
+    lay.style.height = viewport.height + 'px';
+    for (const eq of eqIndex.equations) {
+      if (eq.page !== pageNo) continue;
+      const g = eqGeom(eq, viewport);
+      if (!g) continue;
+      items.push(g);
+      const b = document.createElement('div');
+      b.className = 'eq-box';
+      b.dataset.eqId = eq.id;
+      b.style.left = g.x0 + 'px';
+      b.style.top = g.y0 + 'px';
+      b.style.width = Math.max(1, g.x1 - g.x0) + 'px';
+      b.style.height = Math.max(1, g.y1 - g.y0) + 'px';
+      lay.appendChild(b);
+    }
+    pageDiv.appendChild(lay);
+  }
+  EQ_BY_PAGE.set(pageNo, items);
+}
+
+/**
+ * 命中判定（契约 §1.4）：
+ *   1) 未外扩矩形包含点击点 → 取面积最小者（并列取阅读序靠前）；
+ *   2) 否则取外扩后包含该点、且到未外扩矩形距离最小者（并列同上）；
+ *   3) 都没有 → 不是公式点击。
+ * 为什么必须严格：实测同一页相邻公式块竖直间隙最小只有 0.8pt，6pt 外扩后必然重叠。
+ */
+function hitTestFormula(e) {
+  if (!eqHotEnabled()) return null;
+  const el = e.target;
+  const pageDiv = el && el.closest ? el.closest('.page[data-page]') : null;
+  if (!pageDiv) return null;
+  const items = EQ_BY_PAGE.get(+pageDiv.dataset.page);
+  if (!items || !items.length) return null;
+  const box = pageDiv.getBoundingClientRect();
+  const px = e.clientX - box.left;
+  const py = e.clientY - box.top;
+  let best = null;
+  for (const it of items) {
+    if (px >= it.x0 && px <= it.x1 && py >= it.y0 && py <= it.y1) {
+      if (!best || it.w * it.h < best.w * best.h) best = it;
+    }
+  }
+  if (best) return best;
+  let bestD = Infinity;
+  for (const it of items) {
+    if (px < it.x0 - it.pad || px > it.x1 + it.pad || py < it.y0 - it.pad || py > it.y1 + it.pad) continue;
+    const dx = px < it.x0 ? it.x0 - px : (px > it.x1 ? px - it.x1 : 0);
+    const dy = py < it.y0 ? it.y0 - py : (py > it.y1 ? py - it.y1 : 0);
+    const d = dx * dx + dy * dy;
+    if (d < bestD - 1e-6) { bestD = d; best = it; }
+    else if (Math.abs(d - bestD) <= 1e-6 && best && it.w * it.h < best.w * best.h) best = it;
+  }
+  return best;
+}
+
+function setEqHover(id) {
+  if (id === eqHoverId) return;
+  eqHoverId = id;
+  document.querySelectorAll('.eq-box.hover').forEach((el) => el.classList.remove('hover'));
+  if (id) {
+    const el = document.querySelector(`.eq-box[data-eq-id="${id}"]`);
+    if (el) el.classList.add('hover');
+  }
+}
+
+function clearEqHit() { document.querySelectorAll('.eq-box.hit').forEach((el) => el.classList.remove('hit')); }
+
+function markEqHit(eq) {
+  clearEqHit();
+  const el = document.querySelector(`.eq-box[data-eq-id="${eq.id}"]`);
+  if (el) el.classList.add('hit');
+}
+
+/** 引用一个公式：热区点击与面板条目共用这一条链路（契约 §1.5）。 */
+function citeFormula(eq, x, y) {
+  askSelection = {
+    text: eqCite(eq),
+    page: eq.page,
+    kind: 'equation',
+    latex: eqLatex(eq.latex),
+    equationIndex: eq.index,
+  };
+  markEqHit(eq);
+  const tag = `第 ${eq.page} 页 · 公式 ${eq.index}`;
+  const body = eqLatex(eq.latex).replace(/\s+/g, ' ');
+  showAskPop({ quote: body ? `${tag}：${body}` : tag, x, y });
+}
+
+function renderEqPanel() {
+  const meta = $('eq-meta');
+  const list = $('eq-list');
+  const eqs = eqIndex.equations;
+  list.innerHTML = '';
+  if (eqs.length) {
+    const src = [eqIndex.producer || 'MinerU', eqIndex.backend].filter(Boolean).join(' · ');
+    meta.textContent = `${eqs.length} 个公式 · ${src}${eqIndex.warning ? '（' + eqIndex.warning + '）' : ''}`;
+  } else {
+    meta.textContent = '';
+  }
+  if (zhVariant !== null) {
+    const n = document.createElement('div');
+    n.id = 'eq-note';
+    n.textContent = '当前是译文视图：没有公式位置信息（bbox 只对原文页面成立），切回原文即可点击公式。';
+    list.appendChild(n);
+  }
+  if (!eqs.length) {
+    const n = document.createElement('div');
+    n.id = 'eq-note';
+    n.textContent = eqIndex.reason === 'bad-artifact'
+      ? 'MinerU 产物损坏或不可读，已忽略（不影响阅读与划词提问）。'
+      : eqIndex.reason === 'no-equations'
+        ? '这篇论文没有解析出公式块（MinerU 产物存在，但 content_list 里没有 equation）。'
+        : '未找到 MinerU 解析产物。在 dsh 设置 → 论文伴读 → MinerU 解析后端 启用后点下面按钮重新转录。';
+    list.appendChild(n);
+    if (eqIndex.reason === 'no-mineru-artifact' || eqIndex.reason === 'no-equations') {
+      const b = document.createElement('button');
+      b.id = 'eq-transcribe';
+      b.className = 'tbtn';
+      b.textContent = '用 MinerU 重新转录';
+      b.onclick = () => transcribeWithMineru(b);
+      list.appendChild(b);
+    }
+    return;
+  }
+  const byPage = new Map();
+  for (const eq of eqs) {
+    if (!byPage.has(eq.page)) byPage.set(eq.page, []);
+    byPage.get(eq.page).push(eq);
+  }
+  for (const [page, arr] of byPage) {
+    const h = document.createElement('div');
+    h.className = 'eq-page';
+    h.textContent = `第 ${page} 页`;
+    list.appendChild(h);
+    for (const eq of arr) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'eq-item';
+      item.dataset.eqId = eq.id;
+      const tag = document.createElement('span');
+      tag.className = 'eq-tag';
+      tag.textContent = `公式 ${eq.index}${eq.bbox ? '' : ' · 无位置信息'}`;
+      const code = document.createElement('code');
+      code.textContent = eqLatex(eq.latex) || '(空)';
+      item.appendChild(tag);
+      item.appendChild(code);
+      item.onclick = () => {
+        const r = item.getBoundingClientRect();
+        citeFormula(eq, r.left, r.bottom + 6);
+      };
+      list.appendChild(item);
+    }
+  }
+}
+
+async function transcribeWithMineru(btn) {
+  if (!current) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '转录中（可能需要几十秒）…';
+  try {
+    await api('/transcribe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // 显式 source 不受 MinerU mode=off 阻挡（顶层：mode 只影响 auto）
+      body: JSON.stringify({ ...current, force: true, source: 'mineru-local' }),
+    });
+    toast('MinerU 转录完成');
+    await loadFormulas();
+    // 新索引到手：整页重渲一次把热区铺上去（页宽/滚动位置由 renderAllPages 自己保住）
+    if (pdfDoc) await renderAllPages();
+  } catch (e) {
+    toast('MinerU 转录失败：' + e.message, 6000);
+  } finally {
+    if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+$('eq-toggle').onclick = () => {
+  const open = $('eq-panel').style.display !== 'block';
+  $('eq-panel').style.display = open ? 'block' : 'none';
+  $('eq-toggle').classList.toggle('active', open);
+};
+
+let lastMove = { x: -1, y: -1 };
+document.addEventListener('mousemove', (e) => {
+  if (!eqHotEnabled()) { setEqHover(null); return; }
+  if (Math.abs(e.clientX - lastMove.x) < 2 && Math.abs(e.clientY - lastMove.y) < 2) return;
+  lastMove = { x: e.clientX, y: e.clientY };
+  const hit = hitTestFormula(e);
+  setEqHover(hit ? hit.eq.id : null);
+});
+
+/* ================= 选中即问（文字 + 公式共用一条链路） ================= */
 const askPop = $('ask-pop');
 let askSelection = null;
+// 拖拽起点：公式「点击」判定要求 mousedown→mouseup 位移很小（拖选文字不算点击）
+let downPt = null;
+
+/** 弹层共用的展示动作（文字引用与公式引用都走这里）。 */
+function showAskPop(o) {
+  $('ask-quote').textContent = o.quote.length > 140 ? o.quote.slice(0, 140) + '…' : o.quote;
+  $('ask-input').value = '';
+  $('ask-copy').style.display = askSelection && askSelection.kind === 'equation' ? 'inline-block' : 'none';
+  askPop.style.display = 'block';
+  // 夹在 iframe 视口内（rightbar 窄列里也要能用）
+  const popW = 336, popH = 200;
+  askPop.style.left = Math.max(8, Math.min(o.x, window.innerWidth - popW - 8)) + 'px';
+  askPop.style.top = Math.max(8, Math.min(o.y, window.innerHeight - popH - 8)) + 'px';
+  $('ask-input').focus();
+}
+
+document.addEventListener('mousedown', (e) => { downPt = { x: e.clientX, y: e.clientY }; }, true);
 
 document.addEventListener('mouseup', (e) => {
   if (askPop.contains(e.target)) return;
   setTimeout(() => {
+    const moved = downPt ? Math.abs(e.clientX - downPt.x) + Math.abs(e.clientY - downPt.y) > 4 : false;
+    downPt = null;
     const sel = window.getSelection();
     const text = sel ? sel.toString().trim() : '';
-    if (!text || !current) { askPop.style.display = 'none'; return; }
+    if (!text || !current) {
+      // 无选区（或没有当前文献）时才尝试公式点击 —— 有选区时「划词提问」优先，绝不抢。
+      if (!text && !moved && current) {
+        const hit = hitTestFormula(e);
+        if (hit) { citeFormula(hit.eq, e.clientX, e.clientY + 6); return; }
+      }
+      askPop.style.display = 'none';
+      return;
+    }
     const node = sel.anchorNode && sel.anchorNode.parentElement;
     if (!node || !node.closest('.textLayer')) { askPop.style.display = 'none'; return; }
     const range = sel.getRangeAt(0).getBoundingClientRect();
-    askSelection = { text, page: +((node.closest('.page') || {}).dataset?.page || 0) || null };
-    $('ask-quote').textContent = text.length > 140 ? text.slice(0, 140) + '…' : text;
-    $('ask-input').value = '';
-    askPop.style.display = 'block';
-    // 夹在 iframe 视口内（rightbar 窄列里也要能用）
-    const popW = 336, popH = 190;
-    const x = Math.max(8, Math.min(e.clientX, window.innerWidth - popW - 8));
-    const y = Math.max(8, Math.min(range.bottom + 8, window.innerHeight - popH - 8));
-    askPop.style.left = x + 'px';
-    askPop.style.top = y + 'px';
-    $('ask-input').focus();
+    askSelection = { text, page: +((node.closest('.page') || {}).dataset?.page || 0) || null, kind: 'text' };
+    showAskPop({ quote: text, x: e.clientX, y: range.bottom + 8 });
   }, 10);
 });
 document.addEventListener('mousedown', (e) => { if (!askPop.contains(e.target)) askPop.style.display = 'none'; });
 $('ask-cancel').onclick = () => { askPop.style.display = 'none'; };
+
+// 复制 LaTeX（显式动作：不自动写剪贴板，静默覆盖用户剪贴板是意外副作用）
+$('ask-copy').onclick = async () => {
+  const latex = askSelection && askSelection.kind === 'equation' ? askSelection.text : '';
+  if (!latex) return;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(latex);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = latex;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    toast('已复制公式 LaTeX');
+  } catch (err) { toast('复制失败：' + err.message, 5000); }
+};
 
 $('ask-send').onclick = async () => {
   const question = $('ask-input').value.trim();
@@ -603,12 +944,16 @@ $('ask-send').onclick = async () => {
     // 会话序号由侧栏树激活时写入 localStorage（默认最新）
     const key = `dpr.sessionN.${current.topic}/${current.name}`;
     const n = +(localStorage.getItem(key) || 0) || undefined;
+    // 公式引用额外带 kind/equationIndex：host 侧据此换用「引用了公式（LaTeX 源）」文案
+    const eq = askSelection.kind === 'equation'
+      ? { kind: 'equation', equationIndex: askSelection.equationIndex }
+      : {};
     const r = await api('/ask', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...current, question, selectedText: askSelection.text, page: askSelection.page, ...(n ? { n } : {}) }),
+      body: JSON.stringify({ ...current, question, selectedText: askSelection.text, page: askSelection.page, ...eq, ...(n ? { n } : {}) }),
     });
     askPop.style.display = 'none';
-    toast(`已发送到 会话${r.n}，回答见对话区`);
+    toast(askSelection.kind === 'equation' ? `已引用公式并发送到 会话${r.n}` : `已发送到 会话${r.n}，回答见对话区`);
   } catch (e) { toast('提问失败：' + e.message, 6000); }
   $('ask-send').disabled = false;
 };

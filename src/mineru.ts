@@ -324,12 +324,25 @@ function verbatimGroups(src: string, k: number, cmd: string): { start: number; e
 function skipProtectedGroups(text: string, i: number): number {
   if (text[i] !== '\\' || isEscapedAt(text, i)) return i
   if (!isAsciiLetter(text[i + 1])) return i
-  let k = i + 1
-  while (k < text.length && isAsciiLetter(text[k])) k++
-  const cmd = text.slice(i + 1, k)
-  if (!keepsInnerSpaces(cmd)) return i
-  const grp = verbatimGroups(text, k, cmd)
+  const name = scanCommandName(text, i + 1)
+  if (!keepsInnerSpaces(name.cmd)) return i
+  const grp = verbatimGroups(text, name.end, name.cmd)
   return grp && grp.end !== -1 ? grp.end : i
+}
+
+/**
+ * 扫命令名（含 `\operatorname*` 这类「名字后紧跟 `*`」的变体）。
+ * 为什么必须吃 `*`：命令名扫描原先在 `*` 处停下，`\operatorname* { m a x }` 因此**没被识别成受保护组**
+ * ——带 `*` 的变体丢空格（`{ m a x }`→`{max}`、`{ arg max }`→`{argmax}`），不带 `*` 的变体保留逐字符空格，
+ * 两个变体行为不一致（t2 第 2 次修订点名的缺陷）。吃下 `*` 后两变体走同一条路径。
+ * 返回纯净命令名（白名单判定用）与「命令名+可选 *」之后的下标（组扫描起点）。
+ */
+function scanCommandName(text: string, from: number): { cmd: string; end: number; nameEnd: number } {
+  let k = from
+  while (k < text.length && isAsciiLetter(text[k])) k++
+  const nameEnd = k
+  if (text[k] === '*') k++
+  return { cmd: text.slice(from, nameEnd), end: k, nameEnd }
 }
 
 /**
@@ -354,24 +367,23 @@ function compressMathBody(src: string): string {
     if (ch === '\\') {
       const next = src[i + 1]
       if (isAsciiLetter(next)) {
-        let k = i + 1
-        while (k < src.length && isAsciiLetter(src[k])) k++
-        const cmd = src.slice(i + 1, k)
-        if (keepsInnerSpaces(cmd)) {
+        const nm = scanCommandName(src, i + 1)
+        const head = src.slice(i, nm.end) // `\cmd` 或 `\cmd*`：原样搬，绝不吞掉 `*`
+        if (keepsInnerSpaces(nm.cmd)) {
           // `\text` 一族：整组（多参数命令是连续多组）逐字节搬走
-          const grp = verbatimGroups(src, k, cmd)
+          const grp = verbatimGroups(src, nm.end, nm.cmd)
           if (grp) {
             if (grp.end !== -1) {
-              out += '\\' + cmd + src.slice(grp.start, grp.end)
+              out += head + src.slice(grp.start, grp.end)
               i = grp.end
               continue
             }
             // 花括号不配对（MinerU 偶发截断）：从这里往后原样保留，绝不冒险压掉 \text 的内容
-            return out + '\\' + cmd + src.slice(grp.start)
+            return out + head + src.slice(grp.start)
           }
         }
-        out += '\\' + cmd
-        i = k
+        out += head
+        i = nm.end
         continue
       }
       // 控制符号（`\\` `\$` `\,` `\ ` 等）：原样搬两个字符
@@ -433,23 +445,22 @@ function normalizeMathBody(src: string): string {
     if (ch === '\\') {
       const next = src[i + 1]
       if (isAsciiLetter(next)) {
-        let k = i + 1
-        while (k < src.length && isAsciiLetter(src[k])) k++
-        const cmd = src.slice(i + 1, k)
-        if (keepsInnerSpaces(cmd)) {
+        const nm = scanCommandName(src, i + 1)
+        const head = src.slice(i, nm.end) // `\cmd` 或 `\cmd*`
+        if (keepsInnerSpaces(nm.cmd)) {
           // `\text` 一族整组（多参数命令为连续多组）原样搬走（组内的 `_`/`^` 是正文，不归一化）
-          const grp = verbatimGroups(src, k, cmd)
+          const grp = verbatimGroups(src, nm.end, nm.cmd)
           if (grp) {
             if (grp.end !== -1) {
-              out += '\\' + cmd + src.slice(grp.start, grp.end)
+              out += head + src.slice(grp.start, grp.end)
               i = grp.end
               continue
             }
-            return out + '\\' + cmd + src.slice(grp.start)
+            return out + head + src.slice(grp.start)
           }
         }
-        out += '\\' + cmd
-        i = k
+        out += head
+        i = nm.end
         continue
       }
       // 控制符号（`\\` `\$` `\,` `\ ` 等）：原样搬两个字符

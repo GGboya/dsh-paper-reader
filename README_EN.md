@@ -33,6 +33,42 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 - 🀄 **Chinese/English toggle**: the "中" button in the top bar switches original ↔ full Chinese; if no translation exists, one click generates it in the background (babeldoc) — **no Python preinstall required**: first use auto-downloads uv + managed Python + babeldoc (macOS / Linux / Windows, a few minutes), everything stays in the user directory
 - 🔍 **PDF transcription + search**: local extraction (pdf.js, pure Node, no Python), header/footer stripping / ligature / hyphenation repair / paragraph reflow, with a page-offset table; compatible with pdfqa's `data/` cache layout
 - 🧲 **Optional MinerU parsing backend**: for scanned PDFs / complex layouts / tables and formulas you can switch to MinerU (local API or mineru.net v4 cloud); output is the same page-indexed cache. Off by default — with no configuration the behavior is identical to previous versions (see "MinerU parsing backend" below)
+- 🧮 **Click-to-cite formulas** (v1.5.0): formulas in the PDF text layer come out as garbage (`𝑧𝑧1 𝑥𝑥𝑡𝑡`-style duplicated glyphs), so selecting them is useless; now you **click a formula in the PDF** and cite the **LaTeX** MinerU recognized (e.g. `$$\pi(\mathbf{s}_t)$$`), which enters the session through the existing select-to-ask path. **Requires the paper to have been parsed by MinerU first** (see "Formula citing and library management" below)
+- 🗂️ **Library management: delete & rename** (v1.5.0): topic rows and paper rows in the sidebar tree gained a `⋯` menu — rename topic/paper, delete paper/topic. Deletion is **destructive**: artifacts are moved into a trash folder inside the library (`data/.trash/`, recoverable), behind a confirmation dialog and server-side preconditions (read "What deletion does" below)
+
+## Formula citing and library management (v1.5.0)
+
+### Click to cite a formula
+
+The reader toolbar has a new **"∑ 公式" (Formulas)** button. Two entry points:
+
+1. **Click a formula in the PDF** → the ask popup opens with that formula's LaTeX filled in (the bubble shows "p.N · formula k" plus a LaTeX preview); type your question and press Enter. A **"复制 LaTeX" (Copy LaTeX)** button is provided — the plugin **never** writes to your clipboard automatically.
+2. **The "∑ 公式" panel** lists every formula of the paper by page with its LaTeX; clicking an item cites it too (fallback when a hotspot is hard to hit, and handy for copying LaTeX).
+
+- **Requires the paper to have been parsed with MinerU** (Settings → Paper Reader → MinerU parser, or use the panel's "Re-parse with MinerU" button). Formula blocks (`equation` `bbox` + LaTeX) only exist in MinerU's `<paper>.mineru.json`; the pdf.js text layer cannot provide usable formulas.
+- **No artifact? Nothing breaks**: the entry is greyed out with an explanation and a "Re-parse with MinerU" button; select-to-ask and everything else keeps working.
+- Corrupt artifact / no formula blocks: you simply get "no formulas available" — reading and asking still work.
+- **No formula hotspots in the translated view** (Chinese / bilingual): the bbox only applies to the original page layout; switch back to the original to click.
+- Formula citing and text selection **never fight**: an existing text selection wins, and the hotspot layer does not intercept mouse events (drag-selection keeps working).
+
+### Delete and rename
+
+Both **topic rows** and **paper rows** in the sidebar library tree have a `⋯` menu:
+
+| Action | Behaviour |
+| --- | --- |
+| Rename topic / paper | Renames all same-stem artifacts and translation variants together. **Note**: companion session ids embed "topic/paper", so past conversations are kept but no longer listed under the renamed paper (the dialog says so) |
+| Delete paper | A confirmation dialog lists every file and its size → on confirm the files are **moved to the trash** |
+| Delete topic | **Only empty topics** (a topic that still has papers is rejected and asks you to delete them one by one); requires typing the topic name to confirm |
+
+**What deletion does (important)**:
+
+- Files handled = the paper's **same-stem artifacts** under `data/`: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, plus translation variants `<paper>-zh.pdf` / `-dual.pdf` / `-en.pdf` and leftover `.tmp-*` files.
+- **Recoverable**: files are `rename`d into `data/.trash/<timestamp>-<random>/` (same filesystem, never `unlink`) with a `manifest.json` listing them. Move what you need back into the topic folder to restore (this version does **not** auto-purge, and ships no one-click restore UI).
+- **Never deleted**: companion chat history (kept by dsh), the shared translation venv `data/.venv-pdf2zh/`, the scratch dir `data/.pdf2zh-tmp/`, other papers and topics, and the topic folder itself.
+- **Safety boundary**: every delete/rename operates **only inside the library directory** (`data/`, from `DSH_PAPER_READER_DATA`, default `~/.dsh-paper-reader/data`). Path traversal (`..`, absolute paths, symlink escapes) is rejected; write routes accept **only** "topic + paper name" and no arbitrary path parameter; a symlinked topic is refused outright, and a symlinked file has only the link moved (its target is untouched).
+- **Preconditions**: if a paper has a **running companion session** or a **translation in progress**, delete/rename is refused (so a running session's working directory is never pulled out, and a finished translation cannot write files back).
+- Two more refusals, both deliberate: if the **session state cannot be determined**, the operation is refused (retry later) instead of assuming "no sessions"; and if **another delete/rename for the same paper is already in flight**, the second request is refused (so two operations never interleave over the same files).
 
 ## MinerU parsing backend (optional)
 

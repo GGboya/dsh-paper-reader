@@ -51,7 +51,7 @@ export class ShortTextError extends Error {
 }
 
 /** 扫描件信号（pdfjs 提取内部使用）。 */
-class ScannedPdfError extends Error {}
+export class ScannedPdfError extends Error {}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)

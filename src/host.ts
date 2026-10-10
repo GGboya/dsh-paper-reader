@@ -2,13 +2,29 @@
 // 壳层代码：只做 HTTP ↔ 纯函数核心(library/transcribe)的转接。
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createReadStream } from 'node:fs'
+import { createReadStream, existsSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { PluginConfig } from './tools.ts'
-import { listPapers, listTopics, resolveDataDir, resolvePaper } from './library.ts'
-import { readTranscript, transcribePaper, type SourceArg } from './transcribe.ts'
+import { listPapers, listTopics, resolveDataDir, resolvePaper, type PaperRef } from './library.ts'
+import {
+  ManageError,
+  assertInside,
+  deletePaper,
+  deleteTopic,
+  isManageError,
+  planPaperDelete,
+  planTopicDelete,
+  realDataDir,
+  renamePaper,
+  renameTopic,
+  resolveTopicDir,
+  validateName,
+} from './library-manage.ts'
+import { readFormulaIndex } from './formulas.ts'
+import { MineruError, sanitizeDetail } from './mineru.ts'
+import { readTranscript, transcribePaper, ScannedPdfError, ShortTextError, type SourceArg } from './transcribe.ts'
 import { pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
 import {
   clearTranslateConfig,
@@ -144,7 +160,13 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     if (path) args.path = path
     if (topic) args.topic = topic
     if (name) args.name = name
-    return resolvePaper(dataDir, args)
+    try {
+      return resolvePaper(dataDir, args)
+    } catch {
+      // 原先普通 Error 会冒泡成 500 且把「PDF 不存在: /abs/path」这类绝对路径写进响应体；
+      // 这里统一成 404 + 只含名称的文案（读路径也一样，语义更准且不泄露服务端路径）。
+      throw notFound(args.path ? '文献不存在（path 指向的文件不可用）' : `文献不存在：${args.topic ? `${args.topic}/` : ''}${args.name ?? ''}`)
+    }
   }
 
   /** 每篇文献的伴读会话 id（确定性，重启/刷新后可续）；n 支持同文献多会话（会话1/2/…）。 */
@@ -230,6 +252,133 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     return sessionController.create({ sessionId, cwd: join(dataDir, topic) })
   }
 
+  /* ── 破坏性操作（删除/重命名）的共用出口 ──────────────────────────────────
+     契约：docs/reader-ux-requirements.md §2。错误文案一律不含服务端绝对路径；
+     结构性字段（trashDir/trashRel）只在必须给用户恢复线索时出现。 */
+  const manageFail = (res: Res, err: unknown): boolean => {
+    if (!isManageError(err)) return false
+    json(res, err.status, { error: err.message, code: err.code, ...err.extra })
+    return true
+  }
+
+  /**
+   * 某文献的伴读会话统计。**查不到就标 unknown**（不再吞成「0 个会话」）：
+   * R4-F3 指出 fail-open 会削弱 S7「有运行中会话就拒绝」——会话服务不可用时无法证明「没有运行中会话」，
+   * 破坏性操作据 unknown 走 fail-closed（见 requireSessionClear）。读路径不受影响（只有破坏性路由用它）。
+   */
+  /** 对外形状固定为 `{total, running}`（既有断言 deepEqual 它）；`unknown` 只在服务端内部用。 */
+  const toWire = (i: { total: number; running: number }): { total: number; running: number } => ({ total: i.total, running: i.running })
+
+  const sessionInfo = async (ref: { topic: string; name: string }): Promise<{ total: number; running: number; unknown: boolean }> => {
+    if (typeof sessionController?.list !== 'function') return { total: 0, running: 0, unknown: true }
+    try {
+      const s = await scanPaperSessions(ref)
+      return { total: s.length, running: s.filter((x) => x.running).length, unknown: false }
+    } catch {
+      return { total: 0, running: 0, unknown: true }
+    }
+  }
+
+  /**
+   * 破坏性操作的会话准入（**fail-closed**）：查不到会话状态就**拒绝**，不冒险动手。
+   * 取向理由：删除会把产物搬进回收站、重命名会改会话工作区下的文件名；若此时真有会话在跑，
+   * 破坏的是用户当前正在用的工作目录。代价是「会话服务抖动时可能白拒一次」，用户重试即可——
+   * 可恢复性远好于误删。unknown 用 503 + code=session-unknown，running 用 409 + code=session-running。
+   */
+  const requireSessionClear = async (ref: { topic: string; name: string }, res: Res): Promise<boolean> => {
+    const info = await sessionInfo(ref)
+    if (info.unknown) {
+      json(res, 503, { error: '暂时无法确认该文献的伴读会话状态，为避免误删已取消本次操作；请稍后重试', code: 'session-unknown' })
+      return false
+    }
+    if (info.running > 0) {
+      json(res, 409, { error: `该文献有 ${info.running} 个正在运行的伴读会话，请先结束后再操作`, code: 'session-running', sessions: toWire(info) })
+      return false
+    }
+    return true
+  }
+
+  /** 专题级会话准入：该专题内任一篇文献会话状态不明/在跑 → 拒绝。 */
+  const requireTopicSessionsClear = async (topic: string, res: Res): Promise<boolean> => {
+    for (const p of listPapers(dataDir, topic)) {
+      if (!(await requireSessionClear(p, res))) return false
+    }
+    return true
+  }
+
+  /**
+   * 契约 R5「并发互斥」的最小在途守卫（R4-F2）：
+   * 同一篇文献的删除/重命名在途时，第二个请求直接 409 `busy`（而不是让两个请求交错改同一批文件：
+   * 实测后果是第二个请求拿到 404/500 的中间态）。进程内 Set 足够——本插件是单进程 ws 路由。
+   * 机器码取 `busy` 而非契约 §5 R5 字面的 `in-progress`：两者语义完全一致（「有操作在途」），
+   * `busy` 更短且与既有 `translation-busy`/`session-running` 的短词风格一致；前端 errText 已按 `busy` 对齐。
+   */
+  const inflight = new Set<string>()
+  const withInflight = async (key: string, res: Res, fn: () => Promise<void>): Promise<void> => {
+    if (inflight.has(key)) {
+      json(res, 409, { error: '同一篇文献的另一个删除/重命名操作正在进行，请稍后重试', code: 'busy' })
+      return
+    }
+    inflight.add(key)
+    try {
+      await fn()
+    } finally {
+      inflight.delete(key)
+    }
+  }
+
+  /** 「文献不存在」的统一出口：404 + 不含服务端绝对路径的文案（原先普通 Error 会冒泡成 500 并带路径）。 */
+  const notFound = (what: string) => new ManageError('not-found', 404, what)
+
+  /**
+   * **写路径**的文献定位（t3-O2：/api/transcribe 曾接受任意 `path` 并据此写盘）。
+   * 规则与删除同级：只认 topic+name；给了 `path` 时其 **realpath 必须落在 dataDir 内**
+   * （符号链接指向库外同样拒绝）。校验逻辑全部复用 library-manage 的既有实现，不另写一套。
+   */
+  const locateForWrite = (body: { topic?: string; name?: string; path?: string }, isUrlSearch = false): PaperRef => {
+    void isUrlSearch
+    if (body.path) {
+      const abs = resolve(String(body.path))
+      let real: string
+      try {
+        real = realpathSync(abs)
+      } catch {
+        throw notFound('文献不存在（path 指向的文件不可读）')
+      }
+      assertInside(realDataDir(dataDir), real) // 越界/符号链接逃逸 → 400 escape-rejected
+      return resolvePaper(dataDir, { path: abs })
+    }
+    // exactOptionalPropertyTypes: true —— 不能把 undefined 直接挂到可选属性上
+    const args: { topic?: string; name?: string } = {}
+    if (body.topic !== undefined) args.topic = body.topic
+    if (body.name !== undefined) args.name = body.name
+    return resolvePaper(dataDir, args)
+  }
+
+  /** 破坏性路由用的文献定位：把 resolvePaper 的普通 Error 统一成 404（含符号链接 .pdf 的情况）。 */
+  const resolveLibraryPaper = (topic: string, name: string): PaperRef => {
+    try {
+      return resolvePaper(dataDir, { topic, name })
+    } catch {
+      throw notFound(`文献不存在：${name}`)
+    }
+  }
+
+  /**
+   * 外层兜底文案脱敏：把任何**绝对路径**替换成 `<path>`。
+   * 说明：这里没有采用「一律不回显 err.message」的极端做法——那会把 MinerU/转录等**可读的领域错误**
+   * 一起变成不可读（既有测试明确断言这些文案要含 `MinerU` 等关键词，不许放宽）。改为：领域错误保留可读文案、
+   * 但**先剥掉绝对路径**；未知内部错误则只给通用文案。两种情况都带机器可读 `code:'internal'`。
+   */
+  const stripAbsPaths = (msg: string): string => msg.replace(/(?:[A-Za-z]:)?(?:[\\/][^\s'"“”（）()]+)+/g, '<path>')
+
+  /** 破坏性路由的统一前置检查：拒绝 path 参数（写路径只认 topic+name）。 */
+  const rejectWritePath = (body: { path?: unknown }, res: Res): boolean => {
+    if (body.path === undefined || body.path === null || body.path === '') return false
+    json(res, 400, { error: '删除/重命名不接受 path 参数，请用 topic + name', code: 'escape-rejected' })
+    return true
+  }
+
   const dispatch = async (req: Req, res: Res, url: URL) => {
     const sub = url.pathname.slice('/paper-reader'.length) // '' | '/' | '/api/...'
 
@@ -289,7 +438,26 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: '只支持 PDF 文件' })
         return
       }
-      const safeName = filename.replaceAll('/', '_').replaceAll('\\', '_')
+      // 写路径边界校验（t4 范围外发现：upload 的 topic 原先直接 join，缺穿越校验）：
+      // 一律复用 library-manage 的既有实现，不另写一套。
+      let topicName: string
+      let paperName: string
+      try {
+        topicName = validateName(topic, 'topic')
+        paperName = validateName(filename.replace(/\.pdf$/i, ''), 'paper')
+      } catch (err) {
+        if (manageFail(res, err)) return
+        throw err
+      }
+      const root = realDataDir(dataDir)
+      const dir = join(root, topicName)
+      try {
+        if (existsSync(dir)) resolveTopicDir(dataDir, topicName) // 已存在：必须是真目录且非符号链接
+        else assertInside(root, dir)
+      } catch (err) {
+        if (manageFail(res, err)) return
+        throw err
+      }
       const chunks: Buffer[] = []
       for await (const c of req) chunks.push(c as Buffer)
       const buf = Buffer.concat(chunks)
@@ -297,11 +465,170 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: '文件内容为空' })
         return
       }
-      const dir = join(dataDir, topic.trim())
       await mkdir(dir, { recursive: true })
-      const target = join(dir, safeName)
+      const target = join(dir, paperName + '.pdf')
+      try {
+        assertInside(root, realpathSync(dir)) // 纵深：目录本身也不得越界（符号链接已在上一步拒绝）
+      } catch (err) {
+        if (manageFail(res, err)) return
+        throw err
+      }
       await writeFile(target, buf)
-      json(res, 200, { ok: true, topic: topic.trim(), name: safeName.slice(0, -4), bytes: buf.length })
+      json(res, 200, { ok: true, topic: topicName, name: paperName, bytes: buf.length })
+      return
+    }
+
+    /* ── 文献管理：删除 / 重命名（契约 §2）─────────────────────────────────
+       顺序固定：先校验全部前提（名称、越界、前置条件、目标冲突）→ 再动手；
+       所有路由都在本 dispatch 内 → 自动继承 connection.requestRejection 鉴权。 */
+
+    // 删除预览（dry-run）：确认弹窗的文件清单必须来自这里，不许前端自己拼
+    if (sub === '/api/library/paper/delete-plan' && req.method === 'GET') {
+      const topic = url.searchParams.get('topic') ?? ''
+      const name = url.searchParams.get('name') ?? ''
+      if (url.searchParams.get('path')) {
+        json(res, 400, { error: '不接受 path 参数，请用 topic + name', code: 'escape-rejected' })
+        return
+      }
+      try {
+        const plan = planPaperDelete(dataDir, topic, name)
+        const ref = resolveLibraryPaper(plan.topic, plan.name)
+        const sessions = await sessionInfo(ref)
+        const zh = zhStatus(ref)
+        json(res, 200, {
+          topic: plan.topic,
+          name: plan.name,
+          files: plan.files,
+          totalBytes: plan.totalBytes,
+          trashRoot: plan.trashRoot,
+          sessions: toWire(sessions),
+          translation: { busy: zh.busy, hasZh: zh.zh, hasDual: zh.dual },
+          notDeleted: plan.notDeleted,
+        })
+      } catch (err) {
+        if (!manageFail(res, err)) throw err
+      }
+      return
+    }
+
+    // 删除文献：产物移入 <dataDir>/.trash/（可恢复）
+    if (sub === '/api/library/paper/delete' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }
+      if (rejectWritePath(body, res)) return
+      await withInflight(`${String(body.topic ?? '')}\u0000${String(body.name ?? '')}`, res, async () => {
+        try {
+          const plan = planPaperDelete(dataDir, String(body.topic ?? ''), String(body.name ?? ''))
+          const ref = resolveLibraryPaper(plan.topic, plan.name)
+          const sessions = await sessionInfo(ref)          // 全部前提先校验，再动手
+          if (!(await requireSessionClear(ref, res))) return
+          if (zhStatus(ref).busy) {
+            throw new ManageError('translation-busy', 409, '该文献正在生成译文，请等待完成后再删除', {})
+          }
+          const r = deletePaper(dataDir, plan.topic, plan.name)
+          json(res, 200, { ...r, sessions: toWire(sessions) })
+        } catch (err) {
+          if (!manageFail(res, err)) throw err
+        }
+      })
+      return
+    }
+
+    // 重命名文献：全部同名产物一起改名（含译文变体），`.pdf` 最后移
+    if (sub === '/api/library/paper/rename' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; newName?: string; path?: string }
+      if (rejectWritePath(body, res)) return
+      await withInflight(`${String(body.topic ?? '')}\u0000${String(body.name ?? '')}`, res, async () => {
+        try {
+          const topic = String(body.topic ?? '')
+          const name = String(body.name ?? '')
+          // 先校验名称/越界/存在（planPaperDelete 内部做全套检查）——不能先 resolvePaper：
+          // 非法名（如 ../../etc/passwd）会在那里抛出非 ManageError 的普通错误，被外层记成 500。
+          const plan = planPaperDelete(dataDir, topic, name)
+          const ref = resolveLibraryPaper(plan.topic, plan.name)
+          const sessions = await sessionInfo(ref)
+          if (!(await requireSessionClear(ref, res))) return
+          if (zhStatus(ref).busy) {
+            throw new ManageError('translation-busy', 409, '该文献正在生成译文，请等待完成后再重命名', {})
+          }
+          const r = renamePaper(dataDir, ref.topic, ref.name, body.newName)
+          // 会话 id 内嵌 topic/name → 改名后旧会话不再出现在该文献的列表里（不删除，如实回显）
+          json(res, 200, { ...r, detachedSessions: sessions.total })
+        } catch (err) {
+          if (!manageFail(res, err)) throw err
+        }
+      })
+      return
+    }
+
+    // 删除专题：仅空专题（非隐藏条目为 0），非递归语义；隐藏条目进回收站而不是销毁
+    if (sub === '/api/library/topic/delete' && req.method === 'POST') {
+      const body = (await readBody(req)) as { name?: string; confirmName?: string; path?: string }
+      if (rejectWritePath(body, res)) return
+      await withInflight(`topic\u0000${String(body.name ?? '')}`, res, async () => {
+        try {
+          const name = typeof body.name === 'string' ? body.name : ''
+          if (!name || body.confirmName !== name) {
+            throw new ManageError('confirm-mismatch', 400, '需要 confirmName 与 name 完全一致才允许删除专题', {})
+          }
+          const plan = planTopicDelete(dataDir, name)     // 全部前提先校验，再动手
+          if (plan.entries.length > 0) {
+            throw new ManageError('topic-not-empty', 409, `专题内还有 ${plan.entries.length} 个条目（${plan.papers.length} 篇文献），请先逐篇删除`, {
+              entries: plan.entries,
+              papers: plan.papers,
+            })
+          }
+          if (!(await requireTopicSessionsClear(plan.name, res))) return
+          let busy = 0
+          for (const p of listPapers(dataDir, plan.name)) {
+            if (zhStatus(resolveLibraryPaper(p.topic, p.name)).busy) busy++
+          }
+          if (busy > 0) throw new ManageError('translation-busy', 409, '该专题有正在生成译文的文献，请等待完成后再删除', {})
+          const r = deleteTopic(dataDir, plan.name)
+          workspaceCache.delete(join(dataDir, plan.name))  // 清掉指向已删目录的工作区缓存
+          json(res, 200, { ...r, archivedSessionsNote: true })
+        } catch (err) {
+          if (!manageFail(res, err)) throw err
+        }
+      })
+      return
+    }
+
+    // 重命名专题：目录整体改名（历史会话不删除，但不再出现在该专题下）
+    if (sub === '/api/library/topic/rename' && req.method === 'POST') {
+      const body = (await readBody(req)) as { name?: string; newName?: string; path?: string }
+      if (rejectWritePath(body, res)) return
+      await withInflight(`topic\u0000${String(body.name ?? '')}`, res, async () => {
+        try {
+          const name = String(body.name ?? '')
+          const plan = planTopicDelete(dataDir, name)      // 复用同一个「存在且合法」校验
+          if (!(await requireTopicSessionsClear(plan.name, res))) return
+          let busy = 0
+          let detached = 0
+          for (const p of listPapers(dataDir, plan.name)) {
+            const ref = resolveLibraryPaper(p.topic, p.name)
+            const s = await sessionInfo(ref)
+            if (s.unknown) {
+              json(res, 503, { error: '暂时无法确认该专题的伴读会话状态，为避免误删已取消本次操作；请稍后重试', code: 'session-unknown' })
+              return
+            }
+            detached += s.total
+            if (zhStatus(ref).busy) busy++
+          }
+          if (busy > 0) throw new ManageError('translation-busy', 409, '该专题有正在生成译文的文献，请等待完成后再重命名', {})
+          const r = renameTopic(dataDir, plan.name, body.newName)
+          workspaceCache.delete(join(dataDir, plan.name))
+          json(res, 200, { ...r, detachedSessions: detached })
+        } catch (err) {
+          if (!manageFail(res, err)) throw err
+        }
+      })
+      return
+    }
+
+    // 公式索引：MinerU content_list 的 equation 块（LaTeX + bbox），供阅读器画热区/列表面板
+    if (sub === '/api/formulas' && req.method === 'GET') {
+      const ref = locate(url) // 只读路径，沿用 path/topic/name 三种定位
+      json(res, 200, await readFormulaIndex(ref))
       return
     }
 
@@ -394,7 +721,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // 启动后台翻译（幂等；force=true 为重翻：先删已有译文再启动）。端点：UI 里填的 > profile 的 translate
     if (sub === '/api/zh/generate' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; force?: boolean }
-      const ref = resolvePaper(dataDir, body)
+      let ref: PaperRef
+      try {
+        // 同样写盘（<文献>-zh.pdf 落在 PDF 旁边）→ 与 transcribe 同一套 path 边界约束
+        ref = locateForWrite(body)
+      } catch (err) {
+        if (manageFail(res, err)) return
+        throw err
+      }
       const { endpoint } = await resolveTranslateEndpoint(config.translate)
       const r = body.force
         ? await restartTranslation(ref, dataDir, endpoint)
@@ -655,7 +989,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
 
     if (sub === '/api/transcribe' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; force?: boolean; source?: string }
-      const ref = resolvePaper(dataDir, body)
+      let ref: PaperRef
+      try {
+        // t3-O2：这条路由会**写盘**（<文献>.txt 等落在 PDF 旁边），所以 path 必须受与删除同级的边界约束
+        ref = locateForWrite(body)
+      } catch (err) {
+        if (manageFail(res, err)) return
+        throw err
+      }
       const mineru = await resolveMineruConfig(config.mineru)
       const source: SourceArg = MINERU_SOURCES.has(body.source ?? 'auto') ? (body.source as SourceArg) : 'auto'
       const t = await transcribePaper(ref, { force: body.force === true, source, mineru })
@@ -713,6 +1054,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const body = (await readBody(req)) as {
         topic?: string; name?: string; path?: string
         question: string; selectedText?: string; page?: number | null
+        kind?: 'text' | 'equation' // 引用类型（equation = MinerU LaTeX 公式引用）
+        equationIndex?: number      // 页内公式序号（仅 equation 时有意义）
         n?: number // 会话序号（会话1/会话2/…）；缺省进最新
         fresh?: boolean // true=强制新建一个会话（新建对话）
       }
@@ -739,13 +1082,18 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         await createPaperSession(sessionId, ref.topic)
       } catch { /* 已存在则复用 */ }
       const hasQuote = typeof body.selectedText === 'string' && body.selectedText.trim() !== ''
+      // 公式引用（kind='equation'）：引用内容来自 MinerU 的 LaTeX，不是文本层乱码（契约 §1.3）；
+      // 非公式路径的文案必须与改造前逐字一致（回归项 A11）。
+      const isEquation = body.kind === 'equation'
       const where = hasQuote && body.page ? `（选中于第 ${body.page} 页）` : ''
       const lines = [
         `[论文伴读] 文献：${ref.topic}/${ref.name}（同目录下，search_paper 可直接检索；回答注明页码）`,
       ]
       if (hasQuote) {
         lines.push(
-          `用户在阅读器里选中了一段文字${where}：`,
+          isEquation
+            ? `用户在阅读器里引用了${body.page ? `第 ${body.page} 页的` : ''}一个公式（LaTeX 源，来自 MinerU 版面解析）：`
+            : `用户在阅读器里选中了一段文字${where}：`,
           `"""${body.selectedText!.trim()}"""`,
         )
       }
@@ -779,8 +1127,22 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         noteOrigin(req.headers.host)
         const url = new URL(req.url ?? '/', 'http://x')
         dispatch(req, res, url).catch((err) => {
-          if (!res.headersSent) json(res, 500, { error: String(err instanceof Error ? err.message : err) })
-          else res.end()
+          if (res.headersSent) { res.end(); return }
+          // ① 域内可识别错误（ManageError）：用它的状态码/机器码/结构化字段
+          if (isManageError(err)) {
+            json(res, err.status, { error: err.message, code: err.code, ...err.extra })
+            return
+          }
+          // ② MinerU / 转录的**领域错误**：保留可读文案（既有测试明确断言这些文案含 `MinerU` 等关键词，
+          //    不许为了让文案变得「绝对安全」而把它们一起打哑），但先剥掉任何绝对路径。
+          // ③ 其余未知内部错误：不回显 err.message（原生 fs 错误常带绝对路径），只给通用文案。
+          //    两种情况都带 machine-readable code:'internal'。
+          const known = err instanceof MineruError || err instanceof ShortTextError || err instanceof ScannedPdfError
+          const raw = err instanceof Error ? err.message : String(err)
+          // R7-F2：兜底文案承诺「详见服务端日志」，这里必须真的落一条日志。双重脱敏：
+          // stripAbsPaths 剥绝对路径、sanitizeDetail 剥凭据（Bearer / sk-* / ?token=），绝不把路径或密钥写进日志。
+          console.error('[dsh-paper-reader] route error:', sanitizeDetail(stripAbsPaths(raw)))
+          json(res, 500, { error: known ? stripAbsPaths(raw) : '内部错误（详见服务端日志）', code: 'internal' })
         })
       },
     })
