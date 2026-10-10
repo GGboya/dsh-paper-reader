@@ -50,7 +50,7 @@
 **DeepSeek 官方桌面端**（[deepseek.com/download](https://www.deepseek.com/download/) 下载，即 DeepSeek Harness 桌面版）：
 
 1. 安装并启动，登录 DeepSeek 账号
-2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.2.0` 安装
+2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.2.1` 安装
 3. 装完默认**停用**：点进插件详情，打开「启用」开关
 4. **重启桌面端**（热启用状态下打开论文的链路会静默失效，重启进开机组合才正常，实测）
 
@@ -65,7 +65,7 @@
 
 1. 下载安装 DSH Desktop 并启动
 2. 托盘菜单 → **Open DSH Terminal**（终端里自带 `dsh`/`pnpm`，只对那个终端生效）
-3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.2.0`
+3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.2.1`
 4. 退出并重开 DSH Desktop（插件变更要重启才进 Loader 组合）
 
 > 已在 DSH Desktop 2.0.13（内置 dsh 0.1.5-rc.2）上实测通过：侧栏文献库、PDF 阅读器、选中即问、页码跳转、原生对话伴读、翻译引擎自动安装（uv + Python + babeldoc 全程落在用户目录）全部可用。
@@ -85,7 +85,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **已装过的用户升级必须带显式版本号**——不带版本的 `add` 对已存在的依赖是 no-op（pnpm 按首次安装时记录的版本范围解析，不会追新）：
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.2.0
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.2.1
 # 重启 dsh web 生效；浏览器 Cmd+Shift+R 强刷，避免旧阅读器页面缓存
 ```
 
