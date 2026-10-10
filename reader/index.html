@@ -18,8 +18,10 @@
   html, body { margin: 0; height: 100%; }
   body { font: 14px/1.6 -apple-system, "SF Pro", "PingFang SC", "Helvetica Neue", sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
 
-  /* ---------- 顶栏 ---------- */
-  #bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex: none; }
+  /* ---------- 顶栏 ----------
+     flex-wrap —— 窄列（rightbar 可拖到 ~300px）下按钮放不下时换行到第二行，
+     而不是向右溢出被 iframe 裁掉（v1.3.2 前的坑：＋/适宽 被挤出可视区，用户实测） */
+  #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 6px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex: none; }
   #bar button { font: inherit; }
   /* flex:none —— 列被拖窄时按钮不许被压缩（否则文字竖排、按钮变窄条） */
   .tbtn { flex: none; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
@@ -31,10 +33,14 @@
   #bar .spacer { flex: 1; }
   /* min-width:0 —— flex 项默认 min-width:auto 会拒绝收缩，空间不够时转而去挤按钮；
      让标题自己截断（已有 ellipsis），按钮才能保持原样 */
-  #status { min-width: 0; color: var(--text-2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* PDF 文件路径：可点的只读文本（点击复制），窄列自动截断 */
-  #pdf-path { flex: none; max-width: 34%; padding: 0; border: none; background: none; color: var(--text-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  #status { flex: 0 1 auto; min-width: 0; color: var(--text-2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* PDF 文件路径：可点的只读文本（点击复制）。⚠️ 必须可收缩（flex:0 1 auto + min-width:0）——
+     它是最长的内容项，窄列时先让位给按钮、自己截断（title 悬停始终有完整路径），
+     曾经 max-width:34% + flex:none 在窄列把 ＋/适宽 挤出可视区（用户实测） */
+  #pdf-path { flex: 0 1 auto; min-width: 0; max-width: 34%; padding: 0; border: none; background: none; color: var(--text-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
   #pdf-path:hover { color: var(--accent); }
+  /* 窄列（<560px）：版本号让位——它只是排障辅助信息 */
+  @media (max-width: 560px) { #ver { display: none; } }
 
   /* ---------- PDF 区 ---------- */
   #main { display: flex; flex: 1; min-height: 0; }

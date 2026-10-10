@@ -40,7 +40,7 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 **DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
 
 1. Install, launch, and sign in
-2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.3.2`
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.3.3`
 3. Newly installed plugins start **disabled**: open the plugin's detail and flip the **Enable** switch
 4. **Restart the desktop app** (with the plugin enabled live, opening papers silently fails until a restart brings it into the boot composition — tested)
 
@@ -63,7 +63,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **Existing users must pass an explicit version** — a bare `add` is a no-op for an already-installed dependency (pnpm resolves from the range recorded at first install and won't chase newer releases):
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.2
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.3
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 
