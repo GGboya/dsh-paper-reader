@@ -174,6 +174,293 @@ export function stripHtmlTags(html: string): string {
     .trim()
 }
 
+// ── 数学区间空白压缩 + 单 token 花括号归一化（§7.4 增补）─────────────────
+//
+// MinerU 的 LaTeX 在**每个 token 之间**都插空格（`x _ { t - 1 }`），而 search_paper 的
+// 关键词检索是纯子串匹配（查询按空格切词 → indexOf 计数），于是任何「正常写法」的公式
+// 查询（`x_{t-1}`、`Q_t`）都是 0 命中。这里**只在投影阶段**（content_list → .txt）做两步
+// 归一化；`.mineru.md` / `.mineru.json`（markdown / blocks）保持 MinerU 原样。
+//
+//   第一步 compressMathSpaces：压掉数学区间内部的空白。
+//   第二步 normalizeMathBraces：`_`/`^` 的参数是**单 token**（一个字符或一个控制字）时去掉
+//     花括号（`Q_{t}` → `Q_t`、`^{2}` → `^2`、`_{\alpha}` → `_\alpha`）。
+//     语义边界（不可放宽）：`Q_t` ≡ `Q_{t}` 是等价的，所以可以归一化；但
+//     `x_ij` ≠ `x_{ij}`——后者把 `ij` 整体当下标，前者只把 `i` 当下标、`j` 落回正文字号。
+//     因此多 token 参数（`x_{t-1}`、`x_{ij}`、`^{K \times K}`）与空参数（`_{}`）必须保留花括号。
+//
+// 三条硬边界（宁可少压缩，绝不误伤）：
+//   1. 只在 `$...$` / `$$...$$` 区间内动手；区间外逐字节不变（无 `$` 直接快路径返回）。
+//   2. `\text{...}` 一族（`\textrm` / `\textnormal` / …）内部空格是排版语义，成组原样保留，
+//      组内的 `_`/`^` 也不归一化（那是正文，不是数学下标）。
+//   3. 转义 `\$`、未闭合的 `$`、以及「行内定界符两侧有空白的 `$`」（价格 `$5`、
+//      变量名 `$HOME`、正则、以及 MinerU 自己产出的 `\in$ $...$` 相邻区间）都不当定界符。
+//
+// 已知边界（与 pandoc / markdown-it 的 tex_math_dollars 规则一致）：行内区间只要求
+// 「开定界符后紧贴非空白、闭定界符前紧贴非空白」，所以同一段正文里同时出现 `$变量`
+// 与「行尾 `$` 的正则」（如 `uses $HOME ... ^[a-z]$`）时仍可能被判成数学区间而压掉
+// 其中的空格。要彻底消除歧义得上完整的 LaTeX 词法分析；真实 MinerU 语料 14 页实测
+// 未出现该形状（详见 test/mineru-math-spaces.test.mjs 的定义域用例）。
+//
+// 归一化的已知代价：花括号形式被改写后，书写带括号的查询（`Q_{t}`）在投影产物里不再命中
+// （改命中 `Q_t`）。这是本轮验收明确选择的形态（MinerU 一律产出 `Q_{t}`，而用户/模型
+// 习惯写 `Q_t`）。
+
+/** 内部空格有正文语义、必须成组原样保留的命令（`\text` 一族 + 盒子/文字命令）。 */
+function keepsInnerSpaces(cmd: string): boolean {
+  return cmd.startsWith('text') || cmd === 'mbox' || cmd === 'hbox' || cmd === 'operatorname' || cmd === 'intertext' || cmd === 'shortintertext'
+}
+
+function isAsciiLetter(ch: string | undefined): boolean {
+  return ch !== undefined && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))
+}
+
+function isSpaceChar(ch: string | undefined): boolean {
+  return ch !== undefined && /\s/.test(ch)
+}
+
+/** 第 i 个字符是否被反斜杠转义（前面连续的 `\` 个数为奇数）。 */
+function isEscapedAt(text: string, i: number): boolean {
+  let n = 0
+  for (let k = i - 1; k >= 0 && text[k] === '\\'; k--) n++
+  return n % 2 === 1
+}
+
+/** out 的末尾是否正好是一个控制字（`\` + 字母，如 `\times`）的结尾。 */
+function endsWithControlWord(out: string): boolean {
+  let k = out.length
+  while (k > 0 && isAsciiLetter(out[k - 1])) k--
+  return k < out.length && k > 0 && out[k - 1] === '\\'
+}
+
+/** 从 `{` 起配对花括号（跳过 `\{` `\}` 这类转义），返回闭合后的下标；不配对返回 -1。 */
+function matchBrace(src: string, open: number): number {
+  let depth = 0
+  for (let k = open; k < src.length; k++) {
+    const c = src[k]
+    if (c === '\\') { k++; continue }
+    if (c === '{') depth++
+    else if (c === '}') {
+      depth--
+      if (depth === 0) return k + 1
+    }
+  }
+  return -1
+}
+
+/** 区间内是否含空行（跨段落）：跨段落的「数学区间」一定是误配对，直接放弃压缩。 */
+function hasBlankLine(s: string): boolean {
+  return /\n[^\S\n]*\n/.test(s)
+}
+
+/**
+ * 跳过 k 之后的空白后若紧跟 `{`，返回该花括号组 `{ start: '{' 的下标, end: 闭合后的下标 }`；
+ * `end === -1` 表示花括号不配对；形状不符（后面不是 `{`）返回 null。
+ * 空白压缩与花括号归一化共用（`\text` 族与 `_`/`^` 的参数都按这个形状识别）。
+ */
+function bracedGroupAfter(src: string, k: number): { start: number; end: number } | null {
+  let g = k
+  while (g < src.length && isSpaceChar(src[g])) g++
+  if (src[g] !== '{') return null
+  return { start: g, end: matchBrace(src, g) }
+}
+
+/**
+ * 压缩**已经是数学正文**的字符串里的空白（调用方负责界定区间）。
+ * 唯一保留的空白：控制字与紧跟其后的字母之间留一个空格——`\times K` 若压成 `\timesK`
+ * 就成了未定义命令（`\mathbb { R } ^ { K \times K }` → `\mathbb{R}^{K\times K}`，与验收一致）。
+ */
+function compressMathBody(src: string): string {
+  let out = ''
+  let i = 0
+  while (i < src.length) {
+    const ch = src[i]!
+    if (isSpaceChar(ch)) {
+      let j = i
+      while (j < src.length && isSpaceChar(src[j])) j++
+      const prev = out[out.length - 1]
+      // 控制字/单个 `\` 之后紧跟字母时保留**一个**空格；其余空白（含连续空格、换行）全部压掉
+      if (isAsciiLetter(src[j]) && (prev === '\\' || endsWithControlWord(out))) out += ' '
+      i = j
+      continue
+    }
+    if (ch === '\\') {
+      const next = src[i + 1]
+      if (isAsciiLetter(next)) {
+        let k = i + 1
+        while (k < src.length && isAsciiLetter(src[k])) k++
+        const cmd = src.slice(i + 1, k)
+        if (keepsInnerSpaces(cmd)) {
+          // `\text` 一族：找到 `{` 就把整个花括号组逐字节搬走
+          const grp = bracedGroupAfter(src, k)
+          if (grp) {
+            if (grp.end !== -1) {
+              out += '\\' + cmd + src.slice(grp.start, grp.end)
+              i = grp.end
+              continue
+            }
+            // 花括号不配对（MinerU 偶发截断）：从这里往后原样保留，绝不冒险压掉 \text 的内容
+            return out + '\\' + cmd + src.slice(grp.start)
+          }
+        }
+        out += '\\' + cmd
+        i = k
+        continue
+      }
+      // 控制符号（`\\` `\$` `\,` `\ ` 等）：原样搬两个字符
+      if (next === undefined) { out += '\\'; i++ } else { out += '\\' + next; i += 2 }
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
+}
+
+/**
+ * `_`/`^` 的花括号参数是否「单 token」（可以安全去掉花括号）。
+ * 是：恰好一个字符（`{t}` `{2}`）或恰好一个控制字 `\` + 字母（`{\alpha}`）。
+ * 否：多 token（`{ij}` `{t-1}` `{K \times K}`）、空（`{}`）、以及控制符号（`{\%}` `{\{}`——
+ * 控制符号去壳会与花括号语义冲突，例如 `_{\{}` 会变成不合法的 `_\{}`）。
+ * 另外单字符也排除 `_ ^ \ { } $`：`x_{_}` 去壳得到的 `x__` 是双下标，语义不同。
+ */
+function isSingleTokenArg(inner: string): boolean {
+  if (inner.length === 1) return !isSpaceChar(inner) && !'_^{}\\$'.includes(inner)
+  return /^\\[A-Za-z]+$/.test(inner)
+}
+
+/**
+ * 参数是否可以安全去壳。除 isSingleTokenArg 之外还要看**组后紧跟的字符**：
+ * 控制字参数后面若紧跟字母，去壳会与它黏成另一个未定义命令（`x_{\alpha}y` → `x_\alphay`），
+ * 必须保留花括号（`x_{\alpha}\beta` → `x_\alpha\beta` 这种才是安全的）。
+ */
+function canDropArgBraces(inner: string, after: string | undefined): boolean {
+  if (!isSingleTokenArg(inner)) return false
+  return !(inner.startsWith('\\') && isAsciiLetter(after))
+}
+
+/**
+ * 归一化**已经是数学正文**的字符串里单 token 的下标/上标（调用方负责界定区间）。
+ * `Q_{t}` → `Q_t`、`^{2}` → `^2`、`_{\alpha}` → `_\alpha`（LaTeX 里两者语义等价）。
+ * 多 token 参数与空参数保留花括号（见 isSingleTokenArg 的语义边界说明）。
+ * 只动 `_`/`^` 的参数外壳，其余字符（含空白、控制符号、`\text{}` 组）原样保留。
+ */
+function normalizeMathBody(src: string): string {
+  let out = ''
+  let i = 0
+  while (i < src.length) {
+    const ch = src[i]!
+    if (ch === '_' || ch === '^') {
+      const grp = bracedGroupAfter(src, i + 1)
+      if (grp && grp.end !== -1) {
+        // 组内递归归一化（`x_{y_{t}}` → `x_{y_t}`），再按语义边界决定是否去壳
+        const inner = normalizeMathBody(src.slice(grp.start + 1, grp.end - 1))
+        out += canDropArgBraces(inner, src[grp.end]) ? ch + inner : ch + src.slice(i + 1, grp.start) + '{' + inner + '}'
+        i = grp.end
+        continue
+      }
+      out += ch
+      i++
+      continue
+    }
+    if (ch === '\\') {
+      const next = src[i + 1]
+      if (isAsciiLetter(next)) {
+        let k = i + 1
+        while (k < src.length && isAsciiLetter(src[k])) k++
+        const cmd = src.slice(i + 1, k)
+        if (keepsInnerSpaces(cmd)) {
+          // `\text` 一族整组原样搬走（组内的 `_`/`^` 是正文，不归一化）
+          const grp = bracedGroupAfter(src, k)
+          if (grp) {
+            if (grp.end !== -1) {
+              out += '\\' + cmd + src.slice(grp.start, grp.end)
+              i = grp.end
+              continue
+            }
+            return out + '\\' + cmd + src.slice(grp.start)
+          }
+        }
+        out += '\\' + cmd
+        i = k
+        continue
+      }
+      // 控制符号（`\\` `\$` `\,` `\ ` 等）：原样搬两个字符
+      if (next === undefined) { out += '\\'; i++ } else { out += '\\' + next; i += 2 }
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
+}
+
+/** 行内区间 `$...$`：返回闭定界符之后的下标；定界符判定失败返回 -1。 */
+function findInlineMathEnd(text: string, open: number): number {
+  // 开定界符之后必须紧贴非空白（`\in$ $\mathbb{...}$` 里第一个 `$` 因此被排除，价格 `$5` 同理）
+  if (isSpaceChar(text[open + 1])) return -1
+  for (let j = open + 1; j < text.length; j++) {
+    if (text[j] !== '$' || isEscapedAt(text, j)) continue
+    // 闭定界符之前必须紧贴非空白；否则这个 `$` 更像「钱/变量」的第二个符号，整段放弃
+    if (isSpaceChar(text[j - 1])) return -1
+    return hasBlankLine(text.slice(open + 1, j)) ? -1 : j + 1
+  }
+  return -1
+}
+
+/** 独立区间 `$$...$$`（MinerU 形如 `$$\n...\n$$`）：返回闭定界符之后的下标；失败返回 -1。 */
+function findDisplayMathEnd(text: string, open: number): number {
+  for (let j = open + 2; j < text.length - 1; j++) {
+    if (text[j] !== '$' || text[j + 1] !== '$' || isEscapedAt(text, j)) continue
+    return hasBlankLine(text.slice(open + 2, j)) ? -1 : j + 2
+  }
+  return -1
+}
+
+/**
+ * 把 `fn` 应用到每个数学区间（`$...$` / `$$...$$`）的**内容**上；定界符与区间外逐字节保留。
+ * 无 `$` 走快路径（连一次字符串拼装都不做），保证不含公式的论文投影产物与改造前完全一致。
+ * 孤立的 `$` / 未闭合的区间 / 跨空行的误配对一律原样输出，绝不把后面的正文当数学处理。
+ */
+function mapMathRegions(text: string, fn: (inner: string) => string): string {
+  if (!text.includes('$')) return text
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]!
+    if (ch !== '$' || isEscapedAt(text, i)) {
+      out += ch
+      i++
+      continue
+    }
+    const end = text[i + 1] === '$' ? findDisplayMathEnd(text, i) : findInlineMathEnd(text, i)
+    if (end === -1) {
+      out += ch
+      i++
+      continue
+    }
+    const delim = text[i + 1] === '$' ? '$$' : '$'
+    out += delim + fn(text.slice(i + delim.length, end - delim.length)) + delim
+    i = end
+  }
+  return out
+}
+
+/**
+ * 第一步：压掉数学区间内的空白，区间外**逐字节不变**。导出供测试直接驱动。
+ * 唯一保留的空白：控制字与紧跟其后的字母之间留一个空格（见 compressMathBody）。
+ */
+export function compressMathSpaces(text: string): string {
+  return mapMathRegions(text, compressMathBody)
+}
+
+/**
+ * 第二步：归一化数学区间内**单 token** 下标/上标的花括号（`Q_{t}` → `Q_t`），
+ * 区间外与 `\text{}` 组内逐字节不变。导出供测试直接驱动。
+ */
+export function normalizeMathBraces(text: string): string {
+  return mapMathRegions(text, normalizeMathBody)
+}
+
 function blockStr(b: MineruBlock, key: string): string | null {
   const v = b[key]
   return typeof v === 'string' ? v : null
@@ -190,8 +477,18 @@ function blockPageIdx(b: MineruBlock): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null
 }
 
-/** 单块投影为纯文本；无内容返回 null（未知 type 有 text 用 text，有 list_items 用条目，否则跳过）。 */
+/**
+ * 单块投影为纯文本；无内容返回 null（未知 type 有 text 用 text，有 list_items 用条目，否则跳过）。
+ * 数学归一化只在**投影产物**上做：先压空白（`_ { t }` → `_{t}`）再归一化花括号（`_{t}` → `_t`）；
+ * 原始 block 对象与 markdown 都不改写，所以 `.mineru.json` / `.mineru.md` 仍是 MinerU 原样产出。
+ */
 function blockToText(b: MineruBlock): string | null {
+  const raw = rawBlockToText(b)
+  return raw === null ? null : normalizeMathBraces(compressMathSpaces(raw))
+}
+
+/** 未经压缩的原始块文本（`$` 无定界符的裸公式与不含 `$` 的正文在这里一字不动，交给 compressMathSpaces 判定）。 */
+function rawBlockToText(b: MineruBlock): string | null {
   const text = blockStr(b, 'text')
   if (text && text.trim()) return text
   const listItems = blockStrArr(b, 'list_items')
