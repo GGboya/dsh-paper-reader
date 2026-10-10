@@ -155,7 +155,10 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
     // 不带 -z：bsdtar（macOS 自带 / Win10 1803+ 的 tar.exe）和 GNU tar 解包时都自动探测格式，
     // 同一条命令通吃 tar.gz 与 zip（win32 的 uv 只发 zip）
     await run('tar', ['-xf', pkgPath, '-C', tmp], { timeout: 60_000 })
-    const extracted = join(tmp, `uv-${triple}`, isWin ? 'uv.exe' : 'uv')
+    // tar.gz 有顶层目录 uv-<triple>/;win32 的 zip 是平铺的(uv.exe 直接在根)
+    const binName = isWin ? 'uv.exe' : 'uv'
+    const nested = join(tmp, `uv-${triple}`, binName)
+    const extracted = existsSync(nested) ? nested : join(tmp, binName)
     if (!existsSync(extracted)) throw new Error('uv 解包结果不符合预期')
     const dst = uvPath(home)
     await rename(extracted, dst)
