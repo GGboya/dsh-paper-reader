@@ -142,10 +142,10 @@ pnpm smoke:engine clean          # 全新安装全链路
 pnpm smoke:engine managed-uv     # 强制走插件托管 uv 下载（sha256 校验路径）
 pnpm smoke:engine pip-fallback   # 强制走 pip + 国内镜像备用通道
 pnpm smoke:engine repair         # 破坏 venv（删 pymupdf）后验证自检→自动修复
-pnpm smoke:engine translate      # 再用免费后端真翻一页小 PDF（依赖外网，波动大）
+pnpm smoke:engine translate      # 再起本地 mock OpenAI 端点,真跑一遍 babeldoc 翻译管线
 ```
 
-CI（`.github/workflows/engine-smoke.yml`）：`windows-latest` 跑全部四个场景，`macos-latest`/`ubuntu-latest` 跑 clean 防回归；改安装/翻译代码的 push 触发，外加每周一定时（uv/PyPI 在变，代码不动也可能突然坏）。`translate` 单独一个非阻塞 job——红了去看日志，但不算发版阻塞项。两个测试钩子环境变量：`DSH_PR_MANAGED_UV_ONLY=1`（跳过系统 uv 查找）、`DSH_PR_FORCE_PIP_CHANNEL=1`（跳过 uv 装包通道）。
+CI（`.github/workflows/engine-smoke.yml`）：`windows-latest` 跑全部四个场景 + translate-e2e，`macos-latest`/`ubuntu-latest` 跑 clean 防回归；改安装/翻译代码的 push 触发，外加每周一定时（uv/PyPI 在变，代码不动也可能突然坏）。两个测试钩子环境变量：`DSH_PR_MANAGED_UV_ONLY=1`（跳过系统 uv 查找）、`DSH_PR_FORCE_PIP_CHANNEL=1`（跳过 uv 装包通道）。
 
 ## 架构
 

@@ -87,6 +87,15 @@ async function findUv(home: string): Promise<string | null> {
 
 interface GhAsset { id: number; name: string; digest?: string }
 
+/** GitHub API 请求头：有 GITHUB_TOKEN/GH_TOKEN 就带上——匿名限流 60/h 按出口 IP 算，
+ * CI runner 和企业 NAT 都是共享 IP,极易撞 403;带 token 后按账号 5000/h。 */
+function ghHeaders(accept: string): Record<string, string> {
+  const h: Record<string, string> = { accept, 'user-agent': 'dsh-paper-reader' }
+  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  if (token) h.authorization = `Bearer ${token}`
+  return h
+}
+
 /**
  * fetch 带重试：用户网络抖一下（尤其国内到 GitHub）就直接失败太脆了。
  * 只对网络错误和 5xx 重试，4xx 是确定性错误直接抛。
@@ -125,7 +134,7 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
   try {
     onPhase('正在安装翻译引擎（1/3 下载 uv）…')
     const rel = await fetchWithRetry('https://api.github.com/repos/astral-sh/uv/releases/latest', {
-      headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-paper-reader' },
+      headers: ghHeaders('application/vnd.github+json'),
       signal: AbortSignal.timeout(30_000),
     })
     if (!rel.ok) throw new Error(`查询 uv 版本失败：HTTP ${rel.status}（可手动装 uv 后重试）`)
@@ -136,7 +145,7 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
 
     const download = async (a: GhAsset): Promise<Buffer> => {
       const r = await fetchWithRetry(`https://api.github.com/repos/astral-sh/uv/releases/assets/${a.id}`, {
-        headers: { accept: 'application/octet-stream', 'user-agent': 'dsh-paper-reader' },
+        headers: ghHeaders('application/octet-stream'),
         signal: AbortSignal.timeout(180_000),
       })
       if (!r.ok) throw new Error(`下载 ${a.name} 失败：HTTP ${r.status}`)

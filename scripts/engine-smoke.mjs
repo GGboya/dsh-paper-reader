@@ -6,15 +6,19 @@
 //   managed-uv   强制走插件托管 uv 下载路径（DSH_PR_MANAGED_UV_ONLY=1，绕开 runner 预装的 uv）
 //   pip-fallback 强制走 pip + 国内镜像备用通道（DSH_PR_FORCE_PIP_CHANNEL=1）
 //   repair       装完后破坏 venv（删 pymupdf），模拟「exe 在、依赖残缺」，验证自检→修复
-//   translate    clean + 用免费翻译后端（bing/google）真翻一页小 PDF（依赖外网，CI 中非阻塞）
+//   translate    clean + 本地 mock OpenAI 端点真跑一遍 babeldoc 翻译管线（确定性、无需 LLM key）
 // 内部子命令：once（repair 场景用子进程跑，避开 babeldoc-install 进程内 verified 缓存，
 // 顺便模拟真实 app 重启）。需先 pnpm build（import 的是 dist/ 产物）。
 import { execFile, execFileSync, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
+
+const execFileP = promisify(execFile)
 
 const isWin = process.platform === 'win32'
 const { ensureBabeldoc } = await import(
@@ -106,13 +110,60 @@ async function corruptVenv(venvDir) {
   console.log(`[corrupt] 已删除 ${victims.join(', ')}`)
 }
 
-/** 探测免费翻译后端参数（--bing / --google 随 babeldoc 版本而异）。 */
-function freeTranslatorFlag(bin) {
+/**
+ * 本地 mock OpenAI 端点。babeldoc 0.6+ 只有 LLM 翻译后端（没有 bing/google），
+ * mock 一个 127.0.0.1 的 /chat/completions：确定性、免费、无外网依赖。
+ * 翻译 prompt 回「Input:\n\n」之后的原文（恒等翻译，只验证管线不验证翻译质量）；
+ * JSON mode（术语抽取等）回空对象；usage 字段齐全（babeldoc 会统计 token）。
+ */
+function startMockOpenAI() {
+  const server = createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      let content = 'mock'
+      try {
+        const j = JSON.parse(body)
+        if (j.response_format?.type === 'json_object') content = '{}'
+        else {
+          const user = [...(j.messages ?? [])].reverse().find((m) => m.role === 'user')
+          const text = typeof user?.content === 'string' ? user.content : ''
+          const marker = 'Input:\n\n'
+          const i = text.indexOf(marker)
+          content = i >= 0 ? text.slice(i + marker.length) : text || 'mock'
+        }
+      } catch {}
+      res.setHeader('content-type', 'application/json')
+      res.end(
+        JSON.stringify({
+          id: 'mock',
+          object: 'chat.completion',
+          created: 0,
+          model: 'mock',
+          choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+        }),
+      )
+    })
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () =>
+      resolve({
+        url: `http://127.0.0.1:${server.address().port}/v1`,
+        close: () => new Promise((r) => server.close(r)),
+      }),
+    )
+  })
+}
+
+/** 探测 babeldoc 支持的可选参数（不认识的参数会让它启动即报错，与 translate.ts 同策略）。 */
+function probeFlags(bin, candidates) {
   try {
     const help = execFileSync(bin, ['--help'], { timeout: 60_000 }).toString()
-    for (const f of ['bing', 'google']) if (help.includes(`--${f}`)) return `--${f}`
-  } catch {}
-  return null
+    return candidates.filter((f) => help.includes(`--${f}`)).map((f) => `--${f}`)
+  } catch {
+    return []
+  }
 }
 
 async function main() {
@@ -156,18 +207,35 @@ async function main() {
 
     if (scenario === 'translate') {
       const bin = venvBin(venvDirOf(dataDir))
-      const flag = freeTranslatorFlag(bin)
-      if (!flag) fail('babeldoc --help 中没有 bing/google 免费后端，无法做无 key 翻译冒烟')
       const pdf = join(root, 'tiny.pdf')
       const out = join(root, 'out')
       await mkdir(out, { recursive: true })
       await writeFile(pdf, buildTinyPdf('The quick brown fox jumps over the lazy dog.'))
-      console.log(`[translate] 用 ${flag} 翻一页小 PDF …`)
-      execFileSync(
-        bin,
-        ['--files', pdf, '--lang-in', 'en', '--lang-out', 'zh-CN', flag, '--no-watermark', '--output', out],
-        { stdio: 'inherit', timeout: 20 * 60_000, env: { ...process.env, HF_ENDPOINT: 'https://hf-mirror.com' } },
-      )
+      const mock = await startMockOpenAI()
+      console.log(`[translate] mock OpenAI 端点 ${mock.url}，真跑 babeldoc 管线 …`)
+      try {
+        // 必须异步：mock server 与 babeldoc 同进程,execFileSync 会阻塞事件循环,
+        // mock 永远 accept 不到请求 → 双等死锁(已踩过)
+        await execFileP(
+          bin,
+          [
+            '--files', pdf, '--lang-in', 'en', '--lang-out', 'zh-CN',
+            '--openai', '--openai-model', 'mock',
+            '--openai-base-url', mock.url, '--openai-api-key', 'mock',
+            '--qps', '16', '--no-watermark', '--output', out,
+            // 与 translate.ts 相同的可选参数探测（skip-figure-text 仅 fork 有）
+            ...probeFlags(bin, ['skip-figure-text', 'no-auto-extract-glossary']),
+          ],
+          { timeout: 20 * 60_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, HF_ENDPOINT: 'https://hf-mirror.com' } },
+        ).catch((e) => {
+          // 失败时打出 babeldoc 日志尾巴再抛,CI 上不用翻原始日志
+          const tail = `${e.stdout ?? ''}\n${e.stderr ?? ''}`.trim().slice(-2000)
+          if (tail) console.error(tail)
+          throw e
+        })
+      } finally {
+        await mock.close()
+      }
       const produced = (await readdir(out)).filter((f) => f.endsWith('.pdf'))
       if (produced.length === 0) fail('翻译未产出 PDF')
       console.log(`[ok] 翻译产出：${produced.join(', ')}`)

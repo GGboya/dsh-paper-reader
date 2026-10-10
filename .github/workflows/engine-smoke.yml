@@ -54,14 +54,16 @@ jobs:
       - run: pnpm build
 
       - name: 冒烟 ${{ matrix.scenario }}
+        env:
+          # api.github.com 匿名限流 60/h 按 runner 共享出口 IP 算,极易 403;带上 token 走 5000/h
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/engine-smoke.mjs ${{ matrix.scenario }}
 
-  # 真实翻译一页小 PDF（bing/google 免费后端，不依赖 LLM key）。
-  # 依赖外网与 babeldoc 版本参数，波动大，单独一个 job 且不阻塞结论——红了去看日志，不算发版阻塞项。
+  # 真实跑一遍 babeldoc 翻译管线:一页小 PDF + 本地 mock OpenAI 端点(确定性、无需 LLM key)。
+  # 覆盖安装之外的一半战场:babeldoc 参数兼容性、版面模型下载、产出搬运。
   translate-e2e:
     runs-on: windows-latest
     timeout-minutes: 45
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -73,4 +75,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: node scripts/engine-smoke.mjs translate
+      - env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/engine-smoke.mjs translate
