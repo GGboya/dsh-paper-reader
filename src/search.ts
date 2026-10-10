@@ -2,6 +2,9 @@
 // 移植 pdfqa 的 chunkText + searchPaper，新增：片段 → 页码映射（经 pages.json 偏移表）。
 
 import type { PageSpan } from './transcribe.ts'
+// 折叠项 1：查询侧归一化复用**投影侧同一个** token 级归一化函数（normalizeMathBody 的导出别名），
+// 规则逐字符一致，不存在「两套实现各自漂移」的可能。
+import { normalizeMathTokens } from './mineru.ts'
 
 export interface Chunk {
   /** 片段序号（1 起，按原文顺序） */
@@ -106,4 +109,55 @@ export function formatHits(hits: SearchHit[], totalChunks: number, query: string
     parts.push(`=== 片段 ${h.chunk.index}/${totalChunks}${where} ===\n${h.chunk.text}\n`)
   }
   return parts.join('\n')
+}
+
+/**
+ * 折叠项 1 —— 查询侧 LaTeX 归一化。
+ * 投影侧把 `.txt` 里单 token 的下标/上标去了花括号（`Q_{t}` → `Q_t`），代价是带花括号的查询
+ * 命中为 0。这里把同一个规则作用在**查询**上：`Q_{t}` → `Q_t`，于是两种写法命中同一页。
+ * 规则一致由代码保证（直接调投影侧同一个 normalizeMathBody）；无需归一化时返回 null：
+ * 纯散文查询（没有 `_{...}`/`^{...}` 形态）与多 token 参数（`x_{ij}`、`x_{t-1}`）都原样返回。
+ */
+export function compactQuery(query: string): string | null {
+  const compact = normalizeMathTokens(query)
+  return compact === query ? null : compact
+}
+
+/**
+ * 检索实际要用的查询写法：**原样永远保留**，有紧凑写法时追加一条。
+ * 保留原样是关键——归一化只增加召回，不会让任何既有命中消失（对 pdfjs 来源的论文同理）。
+ */
+export function queryVariants(query: string): string[] {
+  const compact = compactQuery(query)
+  return compact === null ? [query] : [query, compact]
+}
+
+/**
+ * 按论文来源决定查询写法：投影侧的紧凑写法只出现在 **MinerU** 产物里，
+ * 所以查询侧的镜像变体也只在 MinerU 来源的论文上追加——pdfjs / 旧缓存论文保持
+ * 「原查询原样」（不引入任何新行为，也不丢任何既有命中）。
+ */
+export function queryVariantsFor(producer: string | null | undefined, query: string): string[] {
+  const mineru = producer === 'mineru-local' || producer === 'mineru-cloud'
+  return mineru ? queryVariants(query) : [query]
+}
+
+/**
+ * 多写法关键词检索：逐个写法跑一遍 searchChunks，按 chunk 合并（取最高分），再按原有语义取 top-k
+ * 并按原文顺序返回。只有一个写法时**直接走 searchChunks**，与改造前逐字节一致。
+ */
+export function searchChunksMulti(chunks: Chunk[], pages: PageSpan[] | null, queries: string[], k = 5): SearchHit[] {
+  const use = queries.filter((q) => q !== '')
+  if (use.length <= 1) return searchChunks(chunks, pages, use[0] ?? '', k)
+  const merged = new Map<number, SearchHit>()
+  for (const q of use) {
+    for (const hit of searchChunks(chunks, pages, q, k)) {
+      const prev = merged.get(hit.chunk.index)
+      if (prev === undefined || hit.score > prev.score) merged.set(hit.chunk.index, hit)
+    }
+  }
+  return [...merged.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(1, k))
+    .sort((a, b) => a.chunk.index - b.chunk.index)
 }
