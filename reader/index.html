@@ -48,6 +48,8 @@
   #pager { display: flex; align-items: center; gap: 4px; flex: none; }
   #page-input { width: 3.5em; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px; text-align: right; }
   #page-total { flex: none; color: var(--text-2); font-size: 12px; white-space: nowrap; }
+  /* 插件版本号（host 注入；未被替换时隐藏——比如旧 host 配新页面的错位场景） */
+  #ver { flex: none; font-size: 10.5px; color: var(--text-2); opacity: .65; user-select: none; }
   .page { position: relative; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
   .page.flash { outline: 3px solid var(--hl); outline-offset: 2px; transition: outline .15s; }
   /* textLayer CSS 必须是 pdf.js 6.x 官方规则的子集：TextLayer 只往 span 写 --font-height/--scale-x/--rotate
@@ -126,6 +128,7 @@
   <span id="zoom-label">100%</span>
   <button id="zoom-in" class="tbtn">＋</button>
   <button id="zoom-fit" class="tbtn">适宽</button>
+  <span id="ver" title="插件版本">__DPR_VERSION__</span>
 </div>
 
 <div id="main">
@@ -871,7 +874,11 @@ bootstrap().catch((e) => {
   $('empty').textContent = '文献库加载失败：' + e.message;
 });
 
+// 版本号未被 host 注入（旧宿主配新页面的错位场景）时藏掉占位符
+if (!/^v\d/.test(document.getElementById('ver').textContent)) document.getElementById('ver').style.display = 'none';
+
 window.dpr = {
+  version: document.getElementById('ver').textContent,
   openPaper: (topic, name, page, q) => openPaper(topic, name, { page, q }),
   jumpToPage,
   // 伴读会话的跳转链接用：当前文档里原地跳转，不重载 —— 用户正在看中文版就落在中文版；

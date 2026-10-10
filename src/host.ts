@@ -2,7 +2,7 @@
 // 壳层代码：只做 HTTP ↔ 纯函数核心(library/transcribe)的转接。
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createReadStream } from 'node:fs'
+import { createReadStream, readFileSync } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
@@ -125,6 +125,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
   // dist/host.js → 包根/reader/index.html
   const readerHtml = new URL('../reader/index.html', import.meta.url)
   const readerVendorDir = new URL('../reader/vendor/', import.meta.url)
+  // 插件版本（读包根 package.json，注入阅读器顶栏——用户截图反馈时一眼可见）
+  const pluginVersion = 'v' + (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
   // 自带「论文伴读」agent preset → $DSH_HOME/.agent-presets/（实时扫描，免重启）；
   // 失败（旧版 dsh/无权限）则回退默认 preset，功能不受影响。
   const presetDir = installPaperPreset(new URL('../', import.meta.url))
@@ -227,8 +229,15 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     const sub = url.pathname.slice('/paper-reader'.length) // '' | '/' | '/api/...'
 
     if ((sub === '' || sub === '/') && req.method === 'GET') {
-      const html = await readFile(readerHtml)
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': html.length })
+      // no-cache：桌面端 webview 无法强刷（README 里浏览器 Cmd+Shift+R 的建议对桌面端
+      // 无效），不带缓存头时升级插件后用户会一直看到缓存的旧阅读器页面（实测空白 bug
+      // 「修了还在」正是这个）。版本号注入供用户截图反馈时一眼对版本。
+      const html = (await readFile(readerHtml)).toString('utf8').replaceAll('__DPR_VERSION__', pluginVersion)
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': Buffer.byteLength(html),
+        'cache-control': 'no-cache',
+      })
       res.end(html)
       return
     }
@@ -243,7 +252,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const mime: Record<string, string> = { '.mjs': 'text/javascript', '.js': 'text/javascript', '.css': 'text/css', '.map': 'application/json' }
       try {
         const body = await readFile(new URL(name, readerVendorDir))
-        res.writeHead(200, { 'content-type': (mime[name.slice(name.lastIndexOf('.'))] ?? 'application/octet-stream') + '; charset=utf-8', 'content-length': body.length, 'cache-control': 'max-age=3600' })
+        res.writeHead(200, { 'content-type': (mime[name.slice(name.lastIndexOf('.'))] ?? 'application/octet-stream') + '; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-cache' })
         res.end(body)
       } catch {
         json(res, 404, { error: 'not found' })
