@@ -9,7 +9,7 @@
 
 A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin that turns your agent workspace into a **paper reading workbench**: PDF transcription & search, native chat-based companion reading, and a built-in PDF reader — with answers that cite page numbers and **jump back to the exact highlighted passage in the PDF**.
 
-> **👉 Just want a working app?** Skip this page and grab [**PaperReader**](https://github.com/GGboya/PaperReader) — a desktop app with this plugin preinstalled. Download the DMG, drag it into Applications, done. No environment setup. This repository is for people who want to install the plugin themselves or hack on the code.
+> **👉 Just want to use it?** Jump to [Install → Option 1](#install): get the official DeepSeek desktop app and add the plugin — no dev environment needed. This repository is for people who want to install the plugin themselves or hack on the code.
 
 The agent loop, model layer, and session persistence are all handled by the dsh framework; this plugin is a thin shell composing transcription + retrieval + reader UI.
 
@@ -35,36 +35,21 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 
 ## Install
 
-### Option 1: PaperReader desktop app (one-click, recommended)
-
-[PaperReader](https://github.com/GGboya/PaperReader) is a desktop app with this plugin **preinstalled** (packaged on top of the community desktop client [DSH Desktop](https://github.com/anywhere-labs/dsh-desktop)):
-
-1. Download the DMG from [Releases](https://github.com/GGboya/PaperReader/releases/latest) (macOS Universal — Intel and Apple Silicon; Windows build coming)
-2. Open the DMG, drag PaperReader into Applications
-3. On first launch use right-click → Open (unsigned release — it only asks once); the first launch also runs a one-time initialization of a few minutes
-
-You get the library + reader + companion chat out of the box — no commands needed.
-
-### Option 2: Install the plugin into an existing desktop client
+### Option 1: Official desktop app + plugin (recommended)
 
 **DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
 
 1. Install, launch, and sign in
-2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.2.0`
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.2.1`
 3. Newly installed plugins start **disabled**: open the plugin's detail and flip the **Enable** switch
 4. **Restart the desktop app** (with the plugin enabled live, opening papers silently fails until a restart brings it into the boot composition — tested)
 
 > Verified on official desktop V0.2.0-rc.2 (bundled dsh 0.2.0-rc.2, macOS arm64): library tree, new topic, PDF upload, PDF reader, native companion chat, history/new-chat buttons all work.
 > Requires >= 1.2.0 — older versions are denied by the 0.2.x runtime's peer-compatibility check (shown as an error in the plugin list).
 
-**Community DSH Desktop** ([anywhere-labs/dsh-desktop](https://github.com/anywhere-labs/dsh-desktop), the community DeepSeek Harness desktop client for macOS / Windows, no Node.js required):
+> The former PaperReader desktop app (a preinstalled bundle built on the community DSH Desktop) is **no longer maintained** — everything has converged onto the official desktop + plugin path; existing users please migrate to this option.
 
-1. Launch DSH Desktop
-2. Tray menu → **Open DSH Terminal** (that terminal comes with `dsh`/`pnpm`)
-3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.2.0`
-4. Quit and reopen DSH Desktop (plugin changes need a restart to enter the Loader composition)
-
-### Option 3: CLI dsh (developers)
+### Option 2: CLI dsh (developers)
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader
@@ -78,7 +63,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **Existing users must pass an explicit version** — a bare `add` is a no-op for an already-installed dependency (pnpm resolves from the range recorded at first install and won't chase newer releases):
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.2.0
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.2.1
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 
