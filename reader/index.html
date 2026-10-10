@@ -160,6 +160,7 @@
   <button id="zoom-in" class="tbtn">＋</button>
   <button id="zoom-fit" class="tbtn">适宽</button>
   <button id="eq-toggle" class="tbtn" title="公式引用（MinerU LaTeX）">∑ 公式</button>
+  <span id="ver" title="插件版本">__DPR_VERSION__</span>
 </div>
 
 <div id="main">
@@ -227,16 +228,11 @@ function toast(msg, ms = 3200) {
 }
 function esc(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-// 路径复制：clipboard API 失败（iframe 权限等）退回 textarea + execCommand
+// 路径复制：与「复制 LaTeX」共用同一个 copyText（剪贴板写入只有一处实现，见文件末尾定义）
 $('pdf-path').onclick = async () => {
   const p = $('pdf-path').textContent;
   if (!p) return;
-  try { await navigator.clipboard.writeText(p); toast('路径已复制'); return; } catch { /* 走兜底 */ }
-  const ta = document.createElement('textarea');
-  ta.value = p; document.body.appendChild(ta); ta.select();
-  try { document.execCommand('copy'); toast('路径已复制'); }
-  catch { toast('复制失败，路径见按钮悬停提示'); }
-  ta.remove();
+  toast((await copyText(p)) ? '路径已复制' : '复制失败，路径见按钮悬停提示');
 };
 
 let current = null;        // { topic, name }
@@ -276,14 +272,15 @@ async function openPaper(topic, name, opts = {}) {
   pathBtn.title = (meta.pdfPath || '') + '（点击复制）';
   pathBtn.style.display = meta.pdfPath ? '' : 'none';
   await refreshZhState();
-  // 公式索引（MinerU content_list）：**先等它回来再渲染**——热区是在 renderAllPages 里
-  // 按 eqIndex 铺的，先渲染会漏画/残留上一篇的矩形。失败也不影响打开文献，降级成「无公式」。
-  await loadFormulas();
   // 恢复该论文上次的语言版本（译文已不存在时回落原文）
   const saved = localStorage.getItem(variantKey(topic, name));
   zhVariant = (saved === 'zh' && zhState.zh) || (saved === 'dual' && zhState.dual) ? saved : null;
   $('zh-toggle').classList.toggle('active', zhVariant !== null);
   if (zhVariant) { fitMode = true; fitBtn.classList.add('active'); } // 译文版页宽不同，强制适宽
+  // 公式索引（MinerU content_list）：**必须在 loadPdf 之前到货**——热区是在 paintPage 里
+  // 按 eqIndex 铺的，先渲染会漏画/残留上一篇的矩形；又必须排在 zhVariant 定稿之后——
+  // eqHotEnabled()/renderEqPanel() 都按 zhVariant 决定「译文视图关热区」。失败不影响打开文献。
+  await loadFormulas();
   updateDlBtn();
   await loadPdf(pdfUrl(zhVariant));
   if (opts.page) jumpTo(opts.page, opts.q); // 不 await：跳转内部自带「等页面渲出来」轮询
@@ -591,6 +588,12 @@ async function paintPage(page, div, viewport, token) {
   if (token !== renderToken) return;
   // pdf.js 6.x: renderTextLayer() 移除，改 TextLayer 类
   await new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport }).render();
+  // 公式热区层（pointer-events:none，只画描边；命中在 JS 里按坐标算）。
+  // 唯一铺层点放在这里（不是各自的渲染循环里）：滚动与翻页两条路径共用它——
+  // renderPaged 完全绕过 renderAllPages 的循环，写在那边翻页模式热区会全哑。
+  // 也不放进 makePageNode：它靠 div.firstChild/lastChild 取 canvas/textLayer，
+  // 提前 append 热区层会让 lastChild 变成热区层 → TextLayer 挂错容器、文本层错位。
+  paintEqLayer(div, viewport, +div.dataset.page);
 }
 
 /** 当前模式的全量重渲入口：缩放/DPR/换文档/换变体统一走这里。 */
@@ -615,8 +618,9 @@ async function renderAllPages() {
   const range = pane.scrollHeight - pane.clientHeight;
   const anchorRatio = range > 0 ? pane.scrollTop / range : 0;
   container.innerHTML = '';
-  EQ_BY_PAGE.clear(); // 旧页的公式几何随 DOM 一起作废，避免命中测试打到已卸载的页
-  $('zoom-label').textContent = Math.round(zoomScale / 1.5 * 100) + '%';
+  container.classList.remove('paged'); // 切回滚动：必须摘掉单页布局类（paged 由 renderPaged 加上）
+  clearEqGeometry();                   // 旧页几何 + 跨页残留的 hover/hit 描边随 DOM 一起作废
+  $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
 
   for (let i = 1; i <= pdfDoc.numPages; i++) {
     if (token !== renderToken) return;
@@ -625,14 +629,9 @@ async function renderAllPages() {
     const viewport = page.getViewport({ scale });
     const div = makePageNode(i, viewport);
     container.appendChild(div);
+    // 位图 + 文本层 + 公式热区层都在 paintPage 里（滚动/翻页两条路径共用同一个铺层点）
     await paintPage(page, div, viewport, token);
     if (token !== renderToken) return;
-    const tc = await page.getTextContent();
-    if (token !== renderToken) return;
-    // pdf.js 6.x: renderTextLayer() 移除，改 TextLayer 类
-    await new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport }).render();
-    // 公式热区层（pointer-events:none，只画描边；命中在 JS 里按坐标算）
-    paintEqLayer(div, viewport, i);
   }
   const newRange = pane.scrollHeight - pane.clientHeight;
   pane.scrollTop = anchorRatio * Math.max(0, newRange);
@@ -647,6 +646,7 @@ async function renderPaged() {
   const scale = zoomScale; // 同 renderAllPages：快照，防混合缩放
   curPage = Math.min(Math.max(1, curPage), pdfDoc.numPages);
   container.innerHTML = '';
+  clearEqGeometry(); // 同上：翻页模式下换页/缩放时，旧页几何与 hover 残留必须一起作废（否则命中整体偏移）
   container.classList.add('paged');
   $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
   updatePager();
@@ -857,6 +857,16 @@ const EQ_PAD = 6;                 // pt（= scale 1 时的 CSS px），随 zoomS
 let eqIndex = { source: 'none', equations: [], reason: 'no-mineru-artifact', bboxSpace: 'normalized-1000' };
 const EQ_BY_PAGE = new Map();     // pageNo → [{eq,x0,y0,x1,y1,w,h,pad}]
 let eqHoverId = null;
+
+/** 页节点被整体重建（renderAllPages / renderPaged 里 `container.innerHTML = ''`）时调用：
+    旧页的几何必须一起作废，否则命中测试会打到已卸载的页/上一档缩放的矩形（翻页模式下表现为
+    「点击整体偏移」）；顺手清掉跨页残留的 hover 态 —— eqHoverId 不清的话，setEqHover(id) 会在
+    `id === eqHoverId` 时提前 return，换页后鼠标停在公式上也不再出现虚线描边。 */
+function clearEqGeometry() {
+  EQ_BY_PAGE.clear();
+  eqHoverId = null;
+  clearEqHit();
+}
 
 /** 去掉 MinerU 文本外层 `$$`：`$$\n\\pi…\n$$` → `\pi…` */
 function eqLatex(raw) {
@@ -1087,8 +1097,9 @@ async function transcribeWithMineru(btn) {
     });
     toast('MinerU 转录完成');
     await loadFormulas();
-    // 新索引到手：整页重渲一次把热区铺上去（页宽/滚动位置由 renderAllPages 自己保住）
-    if (pdfDoc) await renderAllPages();
+    // 新索引到手：按**当前模式**重渲一次把热区铺上去（翻页模式下必须仍是 renderPaged，
+    // 否则会把全量页渲出来、摘掉 #pdf-pages 的 paged 类，与顶栏 ▣ 的 active 状态脱节）
+    if (pdfDoc) await rerender();
   } catch (e) {
     toast('MinerU 转录失败：' + e.message, 6000);
   } finally {
@@ -1162,20 +1173,30 @@ $('ask-cancel').onclick = () => { askPop.style.display = 'none'; };
 $('ask-copy').onclick = async () => {
   const latex = askSelection && askSelection.kind === 'equation' ? askSelection.text : '';
   if (!latex) return;
+  // 只在用户显式点按钮时写剪贴板；引用公式/弹气泡本身绝不自动写
+  toast((await copyText(latex)) ? '已复制公式 LaTeX' : '复制失败，请手动选择文本', 5000);
+};
+
+/** 剪贴板写入的**唯一**实现（路径复制与复制 LaTeX 共用）：clipboard API 优先，
+ *  失败/不可用（iframe 权限、非安全上下文）退回 textarea + execCommand。
+ *  返回是否成功——文案由调用方决定。 */
+async function copyText(text) {
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(latex);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = latex;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
+      await navigator.clipboard.writeText(text);
+      return true;
     }
-    toast('已复制公式 LaTeX');
-  } catch (err) { toast('复制失败：' + err.message, 5000); }
-};
+  } catch { /* 走下面的兜底 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    return true;
+  } catch { return false; }
+}
 
 $('ask-send').onclick = async () => {
   const question = $('ask-input').value.trim();
