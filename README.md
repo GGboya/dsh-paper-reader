@@ -32,6 +32,84 @@
 - 📍 **引用定位**：回答里的「第 N 页」可点击，平滑跳回 PDF 对应页并闪烁
 - 🀄 **中英切换**：顶栏「中」按钮原文 ↔ 纯中文切换；无译文时一键后台生成（babeldoc），生成需配置 `translate` 端点；**无需预装 Python**——首次生成时自动下载 uv + 托管 Python + babeldoc（macOS / Linux / Windows，约几分钟），全程落在用户目录
 - 🔍 **PDF 转录 + 检索**：本地提取（pdf.js，纯 Node 无需 Python），页眉页脚剔除 / 连字 / 断词愈合 / 段落重排，产出页码偏移表；可选接入 TypeSafe/Jev 语义重排（设置面板填端点即启用，不配置时退回纯关键词排序）；兼容 pdfqa 的 `data/` 缓存布局（旧缓存读取时自动补建页码索引）
+- 🧲 **可选 MinerU 解析后端**：扫描件 / 复杂版式 / 表格公式场景可切到 MinerU（本地 API 或 mineru.net v4 云端），产出仍是同一套带页码索引的缓存；默认关闭，不配置时行为与旧版本完全一致（详见下文「MinerU 解析后端」）
+
+## MinerU 解析后端（可选）
+
+默认用本地 pdf.js 抽文本层（纯 Node，无需 Python，文本型 PDF 毫秒级）。可选接入 **MinerU** 作为解析后端，
+用于扫描件 / 复杂版式 / 表格公式场景 —— 产出仍然是同一套带页码索引的缓存（`.txt` + `.pages.json`），
+检索、跳页、旧缓存行为都不变。
+
+两种模式，在 **设置 → 论文伴读 → 「MinerU 解析后端」卡片** 里选（也可写配置文件）：
+
+| 模式 | 说明 |
+| --- | --- |
+| `off`（默认） | 不启用，行为与旧版本完全一致 |
+| `local` | 本机 MinerU API（默认 `http://127.0.0.1:8000`），启动方式见下 |
+| `cloud` | mineru.net v4 云端，需要一个 token |
+
+**本地 MinerU**（官方 API 服务，本仓库用 3.4.5 实测）：
+
+```bash
+pip install -U "mineru[core]"
+mineru-api --host 127.0.0.1 --port 8000        # 或 uvicorn mineru.cli.fast_api:app
+curl -s http://127.0.0.1:8000/health           # {"status":"healthy","version":"3.4.5",...}
+```
+
+默认 backend 取 `pipeline`（通用、不依赖 VLM 模型）；有 GPU 且想更准可切 `hybrid-engine`
+（需要 VLM 模型已就绪，实测 2 页合成 PDF 约 5 秒）。扫描件建议把「本地解析方式」设为 `auto`，由 MinerU 自行决定 OCR。
+
+**云端 MinerU**：到 [mineru.net](https://mineru.net) 注册 → API 管理里创建 token → 填进卡片的「云端 token」。
+一次解析的序列是：申请批量上传地址 → PUT 上传 → 轮询结果 → 下载并解析 zip。
+⚠️ **云端路径在本仓库未做真机实测**（开发机没有 token），只有 mock HTTP 的单测覆盖，请当作实验特性。
+token 只落盘到 `~/.dsh/.dsh-paper-reader/mineru.json`（0600）；读取接口只回掩码，日志 / 错误 / 响应都不出现明文。
+
+**配置文件 / 环境变量**（优先级逐字段：文件 > profile YAML `config.mineru` > 环境变量 > 默认值）：
+
+```yaml
+- id: dsh-paper-reader
+  config:
+    mineru:
+      mode: local
+      local:
+        baseUrl: http://127.0.0.1:8000
+        backend: pipeline
+        parseMethod: auto
+      # cloud:
+      #   apiKey: ''          # 一般不用写在这里，UI 里填即可
+```
+
+| 环境变量 | 覆盖字段 |
+| --- | --- |
+| `DSH_MINERU_LOCAL_URL` | `local.baseUrl` |
+| `MINERU_API_KEY` | `cloud.apiKey` |
+
+**缓存与来源**：MinerU 解析仍然写 `.txt` + `.pages.json`（`page` 从 1 起，检索映射页码用），
+另加 `.transcript.json`（来源标记：`pdfjs` / `mineru-local` / `mineru-cloud`）与 MinerU 富产物
+`.mineru.md` / `.mineru.json`（Markdown + content_list，供人工核对）。旧缓存没有来源标记时归类为 pdfjs，
+**升级后不会触发重新解析**；要换来源就对目标论文显式指定（agent 侧 `transcribe_pdf` 的 `source` 参数，
+HTTP 侧 `POST /api/transcribe` 的 `source`，取值 `auto|pdfjs|mineru-local|mineru-cloud`）。
+MinerU 解析失败时**不动**已有缓存，错误信息带 HTTP 状态与脱敏后的服务端 message。
+
+**API**（设置面板用的读写口，走 `/paper-reader` 前缀与既有鉴权）：`GET|POST|DELETE /api/mineru/config`
+（GET 只回掩码；POST 预检通过才落盘；DELETE 回落 profile/环境变量）、`POST /api/mineru/test`
+与 `GET /api/mineru/health`（连通性预检，不落盘）。
+
+**常见错误**：
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 保存时报「本地 MinerU 连接测试失败：HTTP 404 …」 | 地址指向了别的服务，或 MinerU 版本过老（2.x 没有 `/health`）；`curl {baseUrl}/health` 自查 |
+| 保存时报「不是已识别的 MinerU API 服务」 | `/health` 返回里缺 `status`/`version`，不是 MinerU |
+| 解析报「本地 MinerU 解析失败（HTTP 409）」 | 服务端任务执行失败，看响应里的 error 字段。MinerU 3.4.5 的 409 是**解析失败**，不是「服务忙」 |
+| 解析报「MinerU 未返回可用内容（md_content 与投影文本均为空）」或「MinerU 转录结果过短(N 字符)，疑似失败，请重试」 | 服务端没产出 md/content_list（模型未就绪等）；先用 `curl -F files=@x.pdf http://127.0.0.1:8000/file_parse` 验证服务本身 |
+| 解析超时 | 长论文默认总上限 30 分钟（`jobTimeoutMs`），仍不够时在配置文件里调大 |
+| 云端报「HTTP 401：云端 token 无效或已过期」 | token 过期，或把 `Bearer` 前缀也填进了输入框（只填 token 本体） |
+
+> **已知限制**：云端（mineru.net v4）链路按官方 API 实现，但**只有 mock 覆盖、未用真实 token 跑过**，视为实验特性；
+> 本地链路在 MinerU 3.4.5 上端到端实测通过。其余为若干 low 级记录项（云端多文件写盘非事务、云端轮询间隔不随时间递增、
+> zip 解析里的残留死代码等），均不影响默认路径：`mode` 默认 `off`，不配置 MinerU 时行为与接入前完全一致。
+
 
 ## 安装
 
@@ -50,7 +128,7 @@
 **DeepSeek 官方桌面端**（[deepseek.com/download](https://www.deepseek.com/download/) 下载，即 DeepSeek Harness 桌面版）：
 
 1. 安装并启动，登录 DeepSeek 账号
-2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.2.0` 安装
+2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.3.3` 安装
 3. 装完默认**停用**：点进插件详情，打开「启用」开关
 4. **重启桌面端**（热启用状态下打开论文的链路会静默失效，重启进开机组合才正常，实测）
 
@@ -65,7 +143,7 @@
 
 1. 下载安装 DSH Desktop 并启动
 2. 托盘菜单 → **Open DSH Terminal**（终端里自带 `dsh`/`pnpm`，只对那个终端生效）
-3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.2.0`
+3. 执行 `dsh plugin add @ggboy123/dsh-paper-reader@1.3.3`
 4. 退出并重开 DSH Desktop（插件变更要重启才进 Loader 组合）
 
 > 已在 DSH Desktop 2.0.13（内置 dsh 0.1.5-rc.2）上实测通过：侧栏文献库、PDF 阅读器、选中即问、页码跳转、原生对话伴读、翻译引擎自动安装（uv + Python + babeldoc 全程落在用户目录）全部可用。
@@ -85,7 +163,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **已装过的用户升级必须带显式版本号**——不带版本的 `add` 对已存在的依赖是 no-op（pnpm 按首次安装时记录的版本范围解析，不会追新）：
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.2.0
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.3
 # 重启 dsh web 生效；浏览器 Cmd+Shift+R 强刷，避免旧阅读器页面缓存
 ```
 
@@ -155,8 +233,10 @@ src/
   tools.ts      5 个 agent 工具：list_papers / transcribe_pdf / search_paper / study_progress / study_update
   host.ts       webServer 路由（/paper-reader/*），connection.requestRejection 鉴权；
                 sessionController.create/prompt（agentPreset=paper-reader）+ follow SSE 桥
-  library.ts    纯函数：文献库目录约定与解析
-  transcribe.ts 纯函数：pdf.js 提取 + 页码偏移表（视觉兜底后置）
+  library.ts    纯函数：文献库目录约定与解析（.txt/.pages.json/.transcript.json/.mineru.* 产物路径）
+  transcribe.ts 纯函数：pdf.js 提取 + 页码偏移表 + MinerU 后端选择与缓存来源语义
+  mineru.ts     纯函数：MinerU 客户端（本地 legacy /tasks 轮询 + /file_parse；mineru.net v4 云端 + 最小 ZIP 读取器）
+  mineru-config.ts 纯函数：MinerU 配置读写（$DSH_HOME 下 0600）+ 掩码 + 连通性预检
   search.ts     纯函数：分段 + 关键词打分 + 页码映射
   study.ts      纯函数：学习档案（计划 + 检验成绩）读写
   translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）

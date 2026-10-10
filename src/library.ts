@@ -22,6 +22,12 @@ export interface PaperRef {
   txtPath: string
   /** 页码偏移表路径 */
   pagesPath: string
+  /** 来源标记 + 提交标记（MinerU 接入后新增；缺失=legacy） */
+  transcriptPath: string
+  /** MinerU Markdown 富产物 */
+  mineruMdPath: string
+  /** MinerU content_list 富产物 */
+  mineruJsonPath: string
 }
 
 const PDF2ZH_SUFFIXES = ['-en', '-zh', '-dual']
@@ -80,6 +86,9 @@ function refFor(topic: string, name: string, pdfPath: string): PaperRef {
     pdfPath,
     txtPath: base + '.txt',
     pagesPath: base + '.pages.json',
+    transcriptPath: base + '.transcript.json',
+    mineruMdPath: base + '.mineru.md',
+    mineruJsonPath: base + '.mineru.json',
   }
 }
 

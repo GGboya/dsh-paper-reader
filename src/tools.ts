@@ -3,11 +3,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { listPapers, listTopics, resolveDataDir, resolvePaper, type PaperRef } from './library.ts'
-import { transcribePaper, readTranscript } from './transcribe.ts'
+import { transcribePaper, readTranscript, type SourceArg } from './transcribe.ts'
 import { chunkText, searchChunks, formatHits } from './search.ts'
 import { resolveRerankClient, resolveShortlistSize, rerankHits, type RerankConfig } from './rerank.ts'
 import { completeStep, formatStudy, readStudy, recordQuiz, setPlan } from './study.ts'
 import { readerOrigin } from './origin.ts'
+import { resolveMineruConfig, type MineruConfig } from './mineru-config.ts'
 
 export interface PluginConfig {
   /** 文献库数据目录；默认 ~/.dsh-paper-reader/data */
@@ -20,6 +21,13 @@ export interface PluginConfig {
   }
   /** 检索语义重排（Jev / TypeSafe）。凭据优先级：设置面板 > 此 YAML > 环境变量 TYPESAFE_API_KEY；都没有时退回纯关键词排序 */
   typesafe?: RerankConfig
+  /** MinerU 解析后端（本地 legacy API + mineru.net v4 云端）。mode 默认 off，未配置时行为与改造前一致 */
+  mineru?: MineruConfig
+}
+
+const MINERU_SOURCES = ['auto', 'pdfjs', 'mineru-local', 'mineru-cloud'] as const
+function sourceArg(v: unknown): SourceArg {
+  return (MINERU_SOURCES as readonly string[]).includes(v as string) ? (v as SourceArg) : 'auto'
 }
 
 /** 文献定位参数（三工具共用的 args 子集）。 */
@@ -81,6 +89,26 @@ const readerUrlSchema = {
 /** render 文本尾部统一带出的链接基址行（preset 规定了用法，这里只暴露值）。 */
 const readerUrlLine = (url: string | null) => (url ? `\n阅读器链接基址：${url}` : '')
 
+/** 4 个 source 值的文案（§10.1：不得把 MinerU 结果误报成「本地提取」）。 */
+function sourceLabel(source: string): string {
+  switch (source) {
+    case 'cache': return '缓存复用'
+    case 'local': return '本地提取(pdf.js)'
+    case 'mineru-local': return '本地 MinerU 解析'
+    case 'mineru-cloud': return '云端 MinerU 解析'
+    default: return source
+  }
+}
+
+function producerLabel(producer: string): string {
+  switch (producer) {
+    case 'pdfjs': return 'pdf.js'
+    case 'mineru-local': return '本地 MinerU'
+    case 'mineru-cloud': return '云端 MinerU'
+    default: return producer
+  }
+}
+
 export function registerTools(ctx: Context, config: PluginConfig) {
   const dataDir = resolveDataDir(config.dataDir)
   const shortlistSize = resolveShortlistSize(config.typesafe)
@@ -130,11 +158,19 @@ export function registerTools(ctx: Context, config: PluginConfig) {
   ctx.tools.register(defineTool({
     name: 'transcribe_pdf',
     description:
-      '把一篇 PDF 论文转录为纯文本（本地 pdf.js 提取，带页码索引），结果落盘缓存。' +
+      '把一篇 PDF 论文转录为纯文本（默认本地 pdf.js 提取，带页码索引），结果落盘缓存。' +
+      '可指定 source=mineru-local/mineru-cloud 改走 MinerU 解析后端（本地/云端，适合扫描件）。' +
       '读一篇新论文的第一步：先转录，再用 search_paper 检索。已有缓存时秒回。',
     parameters: {
       ...locateParams,
       force: { type: 'boolean', description: '忽略缓存重新转录。' },
+      source: {
+        type: 'string',
+        enum: ['auto', 'pdfjs', 'mineru-local', 'mineru-cloud'],
+        description:
+          '解析来源：auto=有缓存复用、无缓存按配置（默认 pdfjs）；pdfjs=本地 pdf.js 文本层；' +
+          'mineru-local=本地 MinerU API；mineru-cloud=mineru.net v4 云端。',
+      },
     },
     output: {
       schema: {
@@ -145,7 +181,18 @@ export function registerTools(ctx: Context, config: PluginConfig) {
           chars: { type: 'integer', required: true },
           pageCount: { type: 'integer', required: true },
           hasPageIndex: { type: 'boolean', required: true, description: '是否有页码索引（检索结果能否带页码）。' },
-          source: { type: 'string', required: true, enum: ['cache', 'local'] },
+          source: { type: 'string', required: true, enum: ['cache', 'local', 'mineru-local', 'mineru-cloud'] },
+          producer: {
+            type: 'string',
+            required: true,
+            enum: ['legacy', 'pdfjs', 'mineru-local', 'mineru-cloud'],
+            description: '产出这份文本的引擎；legacy=旧缓存（缺来源标记，等价 pdfjs）。',
+          },
+          backend: {
+            oneOf: [{ type: 'string' }, { type: 'null' }],
+            required: true,
+            description: '实际 MinerU backend（本地）或 modelVersion（云端）；非 MinerU 为 null。',
+          },
           readerUrl: readerUrlSchema,
         },
         additionalProperties: false,
@@ -155,7 +202,10 @@ export function registerTools(ctx: Context, config: PluginConfig) {
           type: 'text',
           text:
             `已转录《${value.paper}》：${value.chars} 字符，${value.pageCount} 页` +
-            `（${value.source === 'cache' ? '缓存复用' : '本地提取'}${value.hasPageIndex ? '，含页码索引' : '，无页码索引'}）。` +
+            `（${sourceLabel(value.source)}${value.hasPageIndex ? '，含页码索引' : '，无页码索引'}）。` +
+            (value.source !== 'cache' && value.producer !== 'pdfjs' && value.producer !== 'legacy'
+              ? ` 引擎：${producerLabel(value.producer)}${value.backend ? `（${value.backend}）` : ''}。`
+              : '') +
             `接下来可用 search_paper 检索具体内容。` +
             readerUrlLine(value.readerUrl),
         },
@@ -163,7 +213,8 @@ export function registerTools(ctx: Context, config: PluginConfig) {
     },
     execute: async (args, exec) => {
       const ref = locate(dataDir, args, exec)
-      const t = await transcribePaper(ref, { force: args.force === true })
+      const mineru = await resolveMineruConfig(config.mineru)
+      const t = await transcribePaper(ref, { force: args.force === true, source: sourceArg(args.source), mineru })
       return {
         paper: `${ref.topic}/${ref.name}`,
         txtPath: ref.txtPath,
@@ -171,6 +222,8 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         pageCount: t.pageCount,
         hasPageIndex: t.pages.length > 0,
         source: t.source,
+        producer: t.producer,
+        backend: t.backend,
         readerUrl: readerUrl(ref),
       }
     },
@@ -240,7 +293,8 @@ export function registerTools(ctx: Context, config: PluginConfig) {
       const ref = locate(dataDir, args, exec)
       let cached = await readTranscript(ref)
       if (!cached) {
-        await transcribePaper(ref)
+        const mineru = await resolveMineruConfig(config.mineru)
+        await transcribePaper(ref, { source: 'auto', mineru })
         cached = await readTranscript(ref)
       }
       if (!cached) throw new Error('转录失败，无法检索')

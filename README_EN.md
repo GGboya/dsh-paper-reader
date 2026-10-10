@@ -32,6 +32,90 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 - 📍 **Citation jumping**: "Page N" in an answer is clickable — smooth-scrolls back to that PDF page and flashes the cited passage
 - 🀄 **Chinese/English toggle**: the "中" button in the top bar switches original ↔ full Chinese; if no translation exists, one click generates it in the background (babeldoc) — **no Python preinstall required**: first use auto-downloads uv + managed Python + babeldoc (macOS / Linux / Windows, a few minutes), everything stays in the user directory
 - 🔍 **PDF transcription + search**: local extraction (pdf.js, pure Node, no Python), header/footer stripping / ligature / hyphenation repair / paragraph reflow, with a page-offset table; compatible with pdfqa's `data/` cache layout
+- 🧲 **Optional MinerU parsing backend**: for scanned PDFs / complex layouts / tables and formulas you can switch to MinerU (local API or mineru.net v4 cloud); output is the same page-indexed cache. Off by default — with no configuration the behavior is identical to previous versions (see "MinerU parsing backend" below)
+
+## MinerU parsing backend (optional)
+
+By default text is extracted locally with pdf.js (pure Node, no Python, milliseconds for text PDFs). Optionally you can
+use **MinerU** as the parsing backend for scanned PDFs / complex layouts / tables and formulas — the output is still the
+same page-indexed cache (`.txt` + `.pages.json`), and search / page jumping / old caches behave exactly as before.
+
+Pick a mode in **Settings → Paper Reader → "MinerU parser"** (or set it in the config file):
+
+| Mode | Meaning |
+| --- | --- |
+| `off` (default) | Disabled; behavior is identical to previous versions |
+| `local` | Local MinerU API (default `http://127.0.0.1:8000`) |
+| `cloud` | mineru.net v4 cloud; requires a token |
+
+**Local MinerU** (the official API server; this repo was tested against 3.4.5):
+
+```bash
+pip install -U "mineru[core]"
+mineru-api --host 127.0.0.1 --port 8000        # or: uvicorn mineru.cli.fast_api:app
+curl -s http://127.0.0.1:8000/health           # {"status":"healthy","version":"3.4.5",...}
+```
+
+The default backend is `pipeline` (general purpose, no VLM model needed); with a GPU you can switch to `hybrid-engine`
+(needs the VLM model ready — a 2-page synthetic PDF took ~5s here). For scanned PDFs keep the parse method on `auto`
+and let MinerU decide on OCR.
+
+**Cloud MinerU**: sign up at [mineru.net](https://mineru.net) → create a token under API management → paste it into the
+card's "Cloud token" field. One parse runs: request batch upload URLs → PUT upload → poll results → download and parse
+the zip. ⚠️ **The cloud path is not live-tested in this repo** (the dev machine has no token); it is covered only by
+mock-HTTP unit tests — treat it as experimental. The token is stored only in
+`~/.dsh/.dsh-paper-reader/mineru.json` (0600); read endpoints return a masked hint only, and no log / error / response
+ever contains the plaintext key.
+
+**Config file / environment variables** (per-field priority: file > profile YAML `config.mineru` > env > defaults):
+
+```yaml
+- id: dsh-paper-reader
+  config:
+    mineru:
+      mode: local
+      local:
+        baseUrl: http://127.0.0.1:8000
+        backend: pipeline
+        parseMethod: auto
+      # cloud:
+      #   apiKey: ''          # usually unnecessary — fill it in the UI
+```
+
+| Environment variable | Field |
+| --- | --- |
+| `DSH_MINERU_LOCAL_URL` | `local.baseUrl` |
+| `MINERU_API_KEY` | `cloud.apiKey` |
+
+**Cache and provenance**: MinerU still writes `.txt` + `.pages.json` (`page` starts at 1, used to map search hits back to
+pages), plus `.transcript.json` (origin marker: `pdfjs` / `mineru-local` / `mineru-cloud`) and the MinerU rich artifacts
+`.mineru.md` / `.mineru.json` (Markdown + content_list for manual inspection). An old cache without an origin marker is
+treated as pdfjs, and **upgrading never triggers a re-parse**; to switch origins, ask explicitly for one paper
+(agent-side: the `source` parameter of `transcribe_pdf`; HTTP-side: `source` in `POST /api/transcribe`, values
+`auto|pdfjs|mineru-local|mineru-cloud`). When MinerU fails, the existing cache is left **untouched** and the error carries
+the HTTP status plus a sanitized server message.
+
+**API** (used by the settings panel, behind the usual `/paper-reader` prefix and auth): `GET|POST|DELETE /api/mineru/config`
+(GET returns masked values only; POST persists only after a successful pre-check; DELETE falls back to profile/env),
+plus `POST /api/mineru/test` and `GET /api/mineru/health` for connectivity checks (they never persist anything).
+
+**Common errors**:
+
+| Symptom | Cause / fix |
+| --- | --- |
+| Save fails with "local MinerU connection test failed: HTTP 404 …" | The URL points at another service, or MinerU is too old (2.x has no `/health`); check with `curl {baseUrl}/health` |
+| "not a recognized MinerU API server" | `/health` lacks `status`/`version` — not MinerU |
+| Parse fails with "local MinerU parse failed (HTTP 409)" | The server-side task failed; read the `error` field. On MinerU 3.4.5 a 409 means **parse failure**, not "server busy" |
+| "result is empty / no content" | The server produced no md/content_list (models not ready, etc.); validate the service itself with `curl -F files=@x.pdf http://127.0.0.1:8000/file_parse` |
+| Parse times out | A single paper is capped at 30 minutes by default (`jobTimeoutMs`); raise it in the config file |
+| Cloud says the token is invalid | The token expired, or you pasted the `Bearer ` prefix too (enter the token body only) |
+
+> **Known limitations**: the cloud path (mineru.net v4) follows the official API but is covered by mock tests only —
+> it has never been exercised with a real token, so treat it as experimental. The local path is verified end-to-end
+> against MinerU 3.4.5. A few low-severity items remain (non-transactional multi-file writes and a non-increasing
+> poll interval on the cloud path, leftover dead code in the ZIP reader). None of them affect the default path:
+> `mode` defaults to `off`, and behaviour is identical to before when MinerU is not configured.
+
 
 ## Install
 
@@ -50,7 +134,7 @@ You get the library + reader + companion chat out of the box — no commands nee
 **DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
 
 1. Install, launch, and sign in
-2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.2.0`
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.3.3`
 3. Newly installed plugins start **disabled**: open the plugin's detail and flip the **Enable** switch
 4. **Restart the desktop app** (with the plugin enabled live, opening papers silently fails until a restart brings it into the boot composition — tested)
 
@@ -61,7 +145,7 @@ You get the library + reader + companion chat out of the box — no commands nee
 
 1. Launch DSH Desktop
 2. Tray menu → **Open DSH Terminal** (that terminal comes with `dsh`/`pnpm`)
-3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.2.0`
+3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.3.3`
 4. Quit and reopen DSH Desktop (plugin changes need a restart to enter the Loader composition)
 
 ### Option 3: CLI dsh (developers)
@@ -78,7 +162,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **Existing users must pass an explicit version** — a bare `add` is a no-op for an already-installed dependency (pnpm resolves from the range recorded at first install and won't chase newer releases):
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.2.0
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.3
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 
@@ -128,8 +212,10 @@ src/
   tools.ts      5 agent tools: list_papers / transcribe_pdf / search_paper / study_progress / study_update
   host.ts       webServer routes (/paper-reader/*), connection.requestRejection auth;
                 sessionController.create/prompt (agentPreset=paper-reader) + follow SSE bridge
-  library.ts    pure functions: library directory conventions & parsing
-  transcribe.ts pure functions: pdf.js extraction + page-offset table
+  library.ts    pure functions: library directory conventions & parsing (.txt/.pages.json/.transcript.json/.mineru.*)
+  transcribe.ts pure functions: pdf.js extraction + page-offset table + MinerU backend selection & cache provenance
+  mineru.ts     pure functions: MinerU client (local legacy /tasks polling + /file_parse; mineru.net v4 cloud + minimal ZIP reader)
+  mineru-config.ts pure functions: MinerU config I/O (0600) + masking + connectivity pre-check
   search.ts     pure functions: chunking + keyword scoring (fast search) + page mapping
   study.ts      pure functions: study profile (plan + quiz scores) I/O
   translate.ts  pure functions: babeldoc invocation (Chinese / bilingual PDF generation)

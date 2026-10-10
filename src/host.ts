@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { PluginConfig } from './tools.ts'
 import { listPapers, listTopics, resolveDataDir, resolvePaper } from './library.ts'
-import { readTranscript, transcribePaper } from './transcribe.ts'
+import { readTranscript, transcribePaper, type SourceArg } from './transcribe.ts'
 import { pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
 import {
   clearTranslateConfig,
@@ -25,6 +25,15 @@ import {
   testTypesafeEndpoint,
   writeTypesafeConfig,
 } from './typesafe-config.ts'
+import {
+  clearMineruConfig,
+  mergeMineruBody,
+  precheckMineruConfig,
+  resolveMineruConfig,
+  testMineruCloud,
+  testMineruLocal,
+  writeMineruConfig,
+} from './mineru-config.ts'
 import { installPaperPreset, PAPER_PRESET_ID } from './preset.ts'
 import { noteOrigin } from './origin.ts'
 
@@ -485,11 +494,112 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       return
     }
 
+    // ── MinerU 解析后端配置（设置面板第三张卡片的读写口）────────────────────
+    // 与 translate/typesafe 同一套约定：GET 只回显掩码 key；POST 预检通过才落盘；DELETE 回落。
+    const MINERU_SOURCES = new Set(['auto', 'pdfjs', 'mineru-local', 'mineru-cloud'])
+
+    if (sub === '/api/mineru/config' && req.method === 'GET') {
+      const { config: cfg, source } = await resolveMineruConfig(config.mineru)
+      json(res, 200, {
+        mode: cfg.mode,
+        source,
+        local: {
+          baseUrl: cfg.local.baseUrl,
+          backend: cfg.local.backend,
+          effort: cfg.local.effort,
+          parseMethod: cfg.local.parseMethod,
+          langList: cfg.local.langList,
+          hasApiKey: Boolean(cfg.local.apiKey),
+          apiKeyHint: cfg.local.apiKey ? maskApiKey(cfg.local.apiKey) : '',
+        },
+        cloud: {
+          baseUrl: cfg.cloud.baseUrl,
+          modelVersion: cfg.cloud.modelVersion,
+          hasApiKey: Boolean(cfg.cloud.apiKey),
+          apiKeyHint: cfg.cloud.apiKey ? maskApiKey(cfg.cloud.apiKey) : '',
+        },
+      })
+      return
+    }
+
+    // POST：校验 → 预检 → 通了才落盘。key 留空沿用已存值（明文不回传，前端无法预填）。
+    if (sub === '/api/mineru/config' && req.method === 'POST') {
+      const body = (await readBody(req)) as { mode?: string; local?: Record<string, unknown>; cloud?: Record<string, unknown> }
+      if (body.mode !== undefined && body.mode !== 'off' && body.mode !== 'local' && body.mode !== 'cloud') {
+        json(res, 400, { error: 'mode 只能是 off/local/cloud' })
+        return
+      }
+      const prev = await resolveMineruConfig(config.mineru)
+      const next = mergeMineruBody(prev.config, body)
+      const test = await precheckMineruConfig(next)
+      if (!test.ok) {
+        json(res, 400, { error: test.detail ?? '连接测试失败' })
+        return
+      }
+      await writeMineruConfig(next)
+      json(res, 200, { ok: true })
+      return
+    }
+
+    // DELETE：清掉文件，回落到 profile 的 mineru / 环境变量
+    if (sub === '/api/mineru/config' && req.method === 'DELETE') {
+      await clearMineruConfig()
+      json(res, 200, { ok: true })
+      return
+    }
+
+    // 连通性预检（不落盘）：设置面板「测试连接」按钮用；HTTP 恒 200，便于 UI 展示。
+    if (sub === '/api/mineru/test' && req.method === 'POST') {
+      const body = (await readBody(req)) as { mode?: string; local?: Record<string, unknown>; cloud?: Record<string, unknown> }
+      const prev = await resolveMineruConfig(config.mineru)
+      const next = mergeMineruBody(prev.config, body)
+      const test = await precheckMineruConfig(next)
+      if (test.ok) json(res, 200, { reachable: true, mode: next.mode })
+      else json(res, 200, { reachable: false, mode: next.mode, error: test.detail ?? '连接测试失败' })
+      return
+    }
+
+    // 健康探针：GET /api/mineru/health（可选 ?mode=local|cloud，默认按生效 mode）
+    if (sub === '/api/mineru/health' && req.method === 'GET') {
+      const modeParam = url.searchParams.get('mode')
+      const mode = modeParam === 'local' || modeParam === 'cloud' ? modeParam : (await resolveMineruConfig(config.mineru)).config.mode
+      if (mode === 'off') {
+        json(res, 200, { reachable: false, mode: 'off', error: 'MinerU 未启用（mode=off）' })
+        return
+      }
+      if (mode === 'local') {
+        const { config: cfg } = await resolveMineruConfig(config.mineru)
+        const t = await testMineruLocal(cfg.local.baseUrl)
+        if (!t.ok) {
+          json(res, 200, { reachable: false, mode: 'local', error: t.detail ?? '不可达' })
+          return
+        }
+        const h = t.health ?? {}
+        json(res, 200, {
+          reachable: true,
+          mode: 'local',
+          status: h['status'] ?? 'healthy',
+          version: t.version ?? '',
+          protocolVersion: h['protocol_version'] ?? null,
+          queuedTasks: h['queued_tasks'] ?? 0,
+          processingTasks: h['processing_tasks'] ?? 0,
+        })
+        return
+      }
+      const { config: cfg } = await resolveMineruConfig(config.mineru)
+      const t = await testMineruCloud(cfg.cloud.baseUrl, cfg.cloud.apiKey)
+      if (t.ok) json(res, 200, { reachable: true, mode: 'cloud' })
+      else json(res, 200, { reachable: false, mode: 'cloud', error: t.detail ?? '不可达' })
+      return
+    }
+
     if (sub === '/api/transcribe' && req.method === 'POST') {
-      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }
+      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; force?: boolean; source?: string }
       const ref = resolvePaper(dataDir, body)
-      const t = await transcribePaper(ref)
-      json(res, 200, { chars: t.chars, pageCount: t.pageCount, hasPageIndex: t.pages.length > 0, source: t.source })
+      const mineru = await resolveMineruConfig(config.mineru)
+      const source: SourceArg = MINERU_SOURCES.has(body.source ?? 'auto') ? (body.source as SourceArg) : 'auto'
+      const t = await transcribePaper(ref, { force: body.force === true, source, mineru })
+      json(res, 200, { chars: t.chars, pageCount: t.pageCount, hasPageIndex: t.pages.length > 0, source: t.source, producer: t.producer, backend: t.backend })
       return
     }
 
