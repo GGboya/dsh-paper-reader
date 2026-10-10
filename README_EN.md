@@ -36,7 +36,7 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 - 🔍 **PDF transcription + search**: local extraction (pdf.js, pure Node, no Python), header/footer stripping / ligature / hyphenation repair / paragraph reflow, with a page-offset table; compatible with pdfqa's `data/` cache layout
 - 🧲 **Optional MinerU parsing backend**: for scanned PDFs / complex layouts / tables and formulas you can switch to MinerU (local API or mineru.net v4 cloud); output is the same page-indexed cache. Off by default — with no configuration the behavior is identical to previous versions (see "MinerU parsing backend" below)
 - 🧮 **Click-to-cite formulas** (v1.5.0): formulas in the PDF text layer come out as garbage (`𝑧𝑧1 𝑥𝑥𝑡𝑡`-style duplicated glyphs), so selecting them is useless; now you **click a formula in the PDF** and cite the **LaTeX** MinerU recognized (e.g. `$$\pi(\mathbf{s}_t)$$`), which enters the session through the existing select-to-ask path. **Requires the paper to have been parsed by MinerU first** (see "Formula citing and library management" below)
-- 🗂️ **Library management: delete & rename** (v1.5.0): topic rows and paper rows in the sidebar tree gained a `⋯` menu — rename topic/paper, delete paper/topic. Deletion is **destructive**: artifacts are moved into a trash folder inside the library (`data/.trash/`, recoverable), behind a confirmation dialog and server-side preconditions (read "What deletion does" below)
+- 🗂️ **Library management: delete & rename** (v1.5.0): topic rows and paper rows in the sidebar tree gained hover `✎` (rename) / `🗑` (delete) buttons — rename topic/paper, delete paper/topic, both in in-page portal dialogs (Electron has no window.prompt/confirm). Deletion is **destructive**: artifacts are moved into a trash folder inside the library (`data/.trash/`, recoverable), behind a confirmation dialog and server-side preconditions (read "What deletion does" below)
 
 ## Formula citing and library management (v1.5.0)
 
@@ -55,7 +55,7 @@ The reader toolbar has a new **"∑ 公式" (Formulas)** button. Two entry point
 
 ### Delete and rename
 
-Both **topic rows** and **paper rows** in the sidebar library tree have a `⋯` menu:
+Both **topic rows** and **paper rows** in the sidebar library tree show `✎` (rename) and `🗑` (delete) buttons on hover:
 
 | Action | Behaviour |
 | --- | --- |
@@ -228,7 +228,7 @@ touches embeddings, so transcription speed and failure surface are unaffected.
 **DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
 
 1. Install, launch, and sign in
-2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@1.4.0`
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@latest`
 3. Newly installed plugins start **disabled**: open the plugin's detail and flip the **Enable** switch
 4. **Restart the desktop app** (with the plugin enabled live, opening papers silently fails until a restart brings it into the boot composition — tested)
 
@@ -237,12 +237,7 @@ touches embeddings, so transcription speed and failure surface are unaffected.
 
 > The former PaperReader desktop app (a preinstalled bundle built on the community DSH Desktop) is **no longer maintained** — everything has converged onto the official desktop + plugin path; existing users please migrate to this option.
 
-1. Launch DSH Desktop
-2. Tray menu → **Open DSH Terminal** (that terminal comes with `dsh`/`pnpm`)
-3. Run `dsh plugin add @ggboy123/dsh-paper-reader@1.4.0`
-4. Quit and reopen DSH Desktop (plugin changes need a restart to enter the Loader composition)
-
-### Option 3: CLI dsh (developers)
+### Option 2: CLI dsh (developers)
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader
@@ -256,7 +251,8 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **Use `@latest` (or an explicit version) to upgrade** — a bare `add` without any version/tag is a no-op for an already-installed dependency (dsh's plugin manager resolves from the version recorded at first install, verified), so either pin the version or use the tag:
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.4.0
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # always newest
+# dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.5.0  # or pin a version
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 
