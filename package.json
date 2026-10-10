@@ -45,6 +45,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke:engine": "node scripts/engine-smoke.mjs",
     "prepublishOnly": "tsc -p tsconfig.json"
   },
   "keywords": [

@@ -132,6 +132,21 @@ dsh --profile web                                  # 侧栏变为文献库树
 
 > 伴读模式是**按需开启**的：默认不注册 `sidebar.workspaces`（官方工作区/会话列表原样），侧栏底部「📚 论文伴读」开关点击才接管，再点还原；模式选择记在 localStorage。退出模式时已打开的 PDF 页签和伴读会话不受影响。
 
+### 翻译引擎冒烟测试（Windows 依赖完整性）
+
+Windows 用户最常见的翻车点是翻译引擎装不上（杀软拦 uv、网络截断、venv 残缺）。安装逻辑 `src/babeldoc-install.ts` 是纯 Node 模块（不依赖 Cordis/Electron），配了 GitHub Actions 在**全新干净机器**上跑冒烟，无需本地 Windows：
+
+```bash
+pnpm build
+pnpm smoke:engine clean          # 全新安装全链路
+pnpm smoke:engine managed-uv     # 强制走插件托管 uv 下载（sha256 校验路径）
+pnpm smoke:engine pip-fallback   # 强制走 pip + 国内镜像备用通道
+pnpm smoke:engine repair         # 破坏 venv（删 pymupdf）后验证自检→自动修复
+pnpm smoke:engine translate      # 再用免费后端真翻一页小 PDF（依赖外网，波动大）
+```
+
+CI（`.github/workflows/engine-smoke.yml`）：`windows-latest` 跑全部四个场景，`macos-latest`/`ubuntu-latest` 跑 clean 防回归；改安装/翻译代码的 push 触发，外加每周一定时（uv/PyPI 在变，代码不动也可能突然坏）。`translate` 单独一个非阻塞 job——红了去看日志，但不算发版阻塞项。两个测试钩子环境变量：`DSH_PR_MANAGED_UV_ONLY=1`（跳过系统 uv 查找）、`DSH_PR_FORCE_PIP_CHANNEL=1`（跳过 uv 装包通道）。
+
 ## 架构
 
 ```

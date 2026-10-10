@@ -1,0 +1,76 @@
+# 翻译引擎安装链路冒烟测试。
+# 每次 push 改到安装/翻译代码时触发 + 每周一定时（uv/PyPI 会变，代码不动也可能「突然坏」）。
+# windows-latest 每次都是全新干净机器，正好等价于「用户刚装完系统的环境」。
+name: engine-smoke
+
+on:
+  push:
+    paths:
+      - src/babeldoc-install.ts
+      - src/translate.ts
+      - scripts/engine-smoke.mjs
+      - .github/workflows/engine-smoke.yml
+  workflow_dispatch:
+  schedule:
+    - cron: '23 2 * * 1' # 每周一 02:23 UTC
+
+permissions: {}
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows 是主战场：四个场景全覆盖
+          - os: windows-latest
+            scenario: clean
+          - os: windows-latest
+            scenario: managed-uv
+          - os: windows-latest
+            scenario: pip-fallback
+          - os: windows-latest
+            scenario: repair
+          # macOS / Linux 防回归，跑全新安装即可
+          - os: macos-latest
+            scenario: clean
+          - os: ubuntu-latest
+            scenario: clean
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: 冒烟 ${{ matrix.scenario }}
+        run: node scripts/engine-smoke.mjs ${{ matrix.scenario }}
+
+  # 真实翻译一页小 PDF（bing/google 免费后端，不依赖 LLM key）。
+  # 依赖外网与 babeldoc 版本参数，波动大，单独一个 job 且不阻塞结论——红了去看日志，不算发版阻塞项。
+  translate-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: node scripts/engine-smoke.mjs translate

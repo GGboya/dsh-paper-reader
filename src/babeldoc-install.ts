@@ -72,6 +72,9 @@ export function uvPath(home: string): string {
 async function findUv(home: string): Promise<string | null> {
   const own = uvPath(home)
   if (existsSync(own)) return own
+  // 测试钩子：CI runner 常在 PATH 预装 uv，会静默绕过 downloadUv；
+  // DSH_PR_MANAGED_UV_ONLY=1 时跳过系统查找，强制走插件托管下载链路（含 sha256 校验）。
+  if (process.env.DSH_PR_MANAGED_UV_ONLY === '1') return null
   if (await whichOk('uv')) return 'uv'
   const candidates = isWin
     ? [join(homedir(), '.local', 'bin', 'uv.exe')]
@@ -83,6 +86,25 @@ async function findUv(home: string): Promise<string | null> {
 }
 
 interface GhAsset { id: number; name: string; digest?: string }
+
+/**
+ * fetch 带重试：用户网络抖一下（尤其国内到 GitHub）就直接失败太脆了。
+ * 只对网络错误和 5xx 重试，4xx 是确定性错误直接抛。
+ */
+async function fetchWithRetry(url: string, init: RequestInit, tries = 3): Promise<Response> {
+  let lastErr: unknown = null
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, init)
+      if (r.ok || (r.status >= 400 && r.status < 500)) return r
+      lastErr = new Error(`HTTP ${r.status}`)
+    } catch (e) {
+      lastErr = e
+    }
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, 2000 * (i + 1)))
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+}
 
 /**
  * 下载 uv 独立二进制。全程走 api.github.com（资产接口 + octet-stream 直连），
@@ -102,7 +124,7 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
   await mkdir(tmp, { recursive: true })
   try {
     onPhase('正在安装翻译引擎（1/3 下载 uv）…')
-    const rel = await fetch('https://api.github.com/repos/astral-sh/uv/releases/latest', {
+    const rel = await fetchWithRetry('https://api.github.com/repos/astral-sh/uv/releases/latest', {
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-paper-reader' },
       signal: AbortSignal.timeout(30_000),
     })
@@ -113,7 +135,7 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
     const sumAsset = assets.find((a) => a.name === want + '.sha256')
 
     const download = async (a: GhAsset): Promise<Buffer> => {
-      const r = await fetch(`https://api.github.com/repos/astral-sh/uv/releases/assets/${a.id}`, {
+      const r = await fetchWithRetry(`https://api.github.com/repos/astral-sh/uv/releases/assets/${a.id}`, {
         headers: { accept: 'application/octet-stream', 'user-agent': 'dsh-paper-reader' },
         signal: AbortSignal.timeout(180_000),
       })
@@ -216,12 +238,22 @@ async function installBabeldoc(uv: string, venvDir: string, onPhase: PhaseFn): P
     await run(uv, ['venv', venvDir, '--python', '3.12', '--python-preference', 'only-managed'], { timeout: 10 * 60_000 })
   }
   onPhase('正在安装翻译引擎（3/3 安装 babeldoc，首次约几分钟）…')
-  try {
-    await run(uv, ['pip', 'install', '--python', py, 'babeldoc'], { timeout: 20 * 60_000 })
-  } catch (uvErr) {
+  const viaPipFallback = async (cause: unknown) => {
     onPhase('正在安装翻译引擎（3/3 备用通道：pip + 国内镜像）…')
-    console.warn('[dsh-paper-reader] uv 安装 babeldoc 失败，改用 pip 镜像通道:', uvErr instanceof Error ? uvErr.message : uvErr)
+    if (cause) {
+      console.warn('[dsh-paper-reader] uv 安装 babeldoc 失败，改用 pip 镜像通道:', cause instanceof Error ? cause.message : cause)
+    }
     await pipInstallBabeldoc(py)
+  }
+  // 测试钩子：DSH_PR_FORCE_PIP_CHANNEL=1 跳过 uv 通道，让 CI 确定性覆盖 pip 备用路径
+  //（杀软锁 uv 入口 exe、PyPI 截断时的逃生通道，Windows 上最关键的一条路径）
+  if (process.env.DSH_PR_FORCE_PIP_CHANNEL === '1') await viaPipFallback(null)
+  else {
+    try {
+      await run(uv, ['pip', 'install', '--python', py, 'babeldoc'], { timeout: 20 * 60_000 })
+    } catch (uvErr) {
+      await viaPipFallback(uvErr)
+    }
   }
   if (!existsSync(bin)) throw new Error('babeldoc 安装完成但未找到可执行文件')
   return bin
