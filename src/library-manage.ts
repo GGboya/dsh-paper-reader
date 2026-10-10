@@ -51,6 +51,9 @@ export function isManageError(e: unknown): e is ManageError {
 
 // ── 名称校验 ────────────────────────────────────────────────────────────────
 
+/** 回收站目录名（保留名；`listTopics` 因隐藏而跳过它，因此不会显示成专题）。 */
+export const TRASH_DIR = '.trash'
+
 /** 与 host 的「新建专题」校验保持同一口径：拒绝 `/`、`\`、`..`；另加隐藏名与长度上限。 */
 export function validateName(raw: unknown, label: 'topic' | 'paper'): string {
   const what = label === 'topic' ? '专题名' : '文献名'
@@ -62,6 +65,31 @@ export function validateName(raw: unknown, label: 'topic' | 'paper'): string {
   if (raw.includes('..')) throw new ManageError('bad-name', 400, `${what}不能包含 ..`)
   if (raw.startsWith('.')) throw new ManageError('bad-name', 400, `${what}不能以 . 开头`)
   if (basename(raw) !== raw) throw new ManageError('bad-name', 400, `${what}非法`)
+  return raw
+}
+
+/**
+ * 边界类校验（删除 / 改名-from / 已存在条目用）：只挡**安全边界**——空、路径分隔符、`..`、NUL。
+ *
+ * 与 `validateName`（命名规范类：长度、前导点、控制字符）的分工是 PR-1 的分层原则：
+ * 命名规范只在**创建/改名**时强制（那是用户在新起一个名字）；删除/改名-from 作用于
+ * **已存在**的条目，若也按命名规范卡，「创建时宽松、事后规范收紧」或历史遗留的名字
+ * （前导点、超长、`\x01`）就会变成删不掉的孤儿。反之，凡是能通过写入路径（upload /
+ * 新建专题，都走 `validateName`）落到盘上的名字，都能被这里放行 → 创建/删除对称。
+ *
+ * 原样返回 raw（**不 trim**），与 `validateName` 一致：保证按字面名匹配磁盘条目。
+ */
+export function validateEntryBoundary(raw: unknown, label: 'topic' | 'paper'): string {
+  const what = label === 'topic' ? '专题名' : '文献名'
+  if (typeof raw !== 'string' || raw.length === 0) throw new ManageError('bad-name', 400, `${what}不能为空`)
+  if (raw.trim().length === 0) throw new ManageError('bad-name', 400, `${what}不能只有空白`)
+  if (/[/\\\u0000]/.test(raw)) throw new ManageError('bad-name', 400, `${what}不能包含 / \\ 或空字符`)
+  if (raw.includes('..')) throw new ManageError('bad-name', 400, `${what}不能包含 ..`)
+  if (raw === '.') throw new ManageError('bad-name', 400, `${what}非法`)
+  if (basename(raw) !== raw) throw new ManageError('bad-name', 400, `${what}非法`)
+  // 回收站是插件自己的保留目录（listTopics 因隐藏而跳过它，用户也创建不了）：
+  // 不允许把它当专题删掉/改名，否则回收站里的可恢复文件会被误销毁。
+  if (raw === TRASH_DIR) throw new ManageError('bad-name', 400, `${what}是保留名，不能操作`)
   return raw
 }
 
@@ -94,9 +122,9 @@ export function realDataDir(dataDir: string): string {
   }
 }
 
-/** 解析专题目录：必须存在、必须是真目录（不是符号链接）、必须落在 dataDir 内。 */
-export function resolveTopicDir(dataDir: string, topic: string): string {
-  const name = validateName(topic, 'topic')
+/** 解析专题目录的公共实现：`boundaryOnly` 选择词法校验的强度（见 validateEntryBoundary）。 */
+function resolveTopicDirChecked(dataDir: string, topic: unknown, boundaryOnly: boolean): string {
+  const name = boundaryOnly ? validateEntryBoundary(topic, 'topic') : validateName(topic, 'topic')
   const root = realDataDir(dataDir)
   const dir = join(root, name)
   let st
@@ -111,6 +139,17 @@ export function resolveTopicDir(dataDir: string, topic: string): string {
   if (real !== dir) throw new ManageError('escape-rejected', 400, `专题目录真实路径异常，拒绝操作：${name}`)
   assertInside(root, real)
   return real
+}
+
+/** 解析专题目录（写入路径用）：必须存在、必须是真目录（不是符号链接）、必须落在 dataDir 内。 */
+export function resolveTopicDir(dataDir: string, topic: unknown): string {
+  return resolveTopicDirChecked(dataDir, topic, false)
+}
+
+/** 解析**已存在**的专题目录（删除 / 改名-from 用）：只做边界类校验，历史遗留的
+ *  不规范名（前导点、超长、控制字符）同样能操作，避免「删不掉的孤儿」。 */
+export function resolveExistingTopicDir(dataDir: string, topic: unknown): string {
+  return resolveTopicDirChecked(dataDir, topic, true)
 }
 
 // ── 产物清单（精确 stem 匹配） ────────────────────────────────────────────────
@@ -275,9 +314,17 @@ export interface PaperDeletePlan {
   notDeleted: string[]
 }
 
-export function planPaperDelete(dataDir: string, topic: string, name: string): PaperDeletePlan {
+export function planPaperDelete(dataDir: string, topic: unknown, name: unknown): PaperDeletePlan {
+  // 词法层分两档（见 validateEntryBoundary 的分工说明）：
+  //   · 文献名 = 命名规范类（validateName）——写入路径（upload / rename 的 to 侧）都走它，
+  //     「能创建的必然能删除」已由同一口径闭合；且既有断言明确要求 `.hidden`/超长名在
+  //     删除·改名路由上被拒 400（reader-ux C6 / VA14 / VB4），不能放行。
+  //   · 专题名 = 边界类——只挡空/分隔符/`..`/NUL/保留名（`.trash`），让历史遗留的
+  //     不规范专题目录（`.legacy`、含 `\x01`）仍可被删除，不产生「删不掉的孤儿」。
+  // realpath 层由 resolveExistingTopicDir / assertArtifactsContained 兜底（与词法层无关）。
   const paperName = validateName(name, 'paper')
-  const topicDir = resolveTopicDir(dataDir, topic)
+  const topicName = validateEntryBoundary(topic, 'topic')
+  const topicDir = resolveExistingTopicDir(dataDir, topicName)
   const files = listArtifacts(topicDir, paperName)
   assertArtifactsContained(dataDir, topicDir, files)
   // `.pdf` 必须是**常规文件**：符号链接不是文献（listPapers 只看常规文件，故 resolvePaper 找不到它，
@@ -286,7 +333,7 @@ export function planPaperDelete(dataDir: string, topic: string, name: string): P
     throw new ManageError('not-found', 404, `文献不存在：${paperName}.pdf`)
   }
   return {
-    topic: validateName(topic, 'topic'),
+    topic: topicName,
     name: paperName,
     files,
     totalBytes: files.reduce((n, f) => n + f.bytes, 0),
@@ -309,9 +356,9 @@ export interface PaperDeleteResult {
   trashRel: string
 }
 
-export function deletePaper(dataDir: string, topic: string, name: string): PaperDeleteResult {
+export function deletePaper(dataDir: string, topic: unknown, name: unknown): PaperDeleteResult {
   const plan = planPaperDelete(dataDir, topic, name)
-  const topicDir = resolveTopicDir(dataDir, plan.topic)
+  const topicDir = resolveExistingTopicDir(dataDir, plan.topic)
   const bundle = newTrashBundle(dataDir)
   const res = moveToTrash(bundle, topicDir, plan.files)
   writeManifest(bundle.abs, {
@@ -352,9 +399,10 @@ export interface TopicDeletePlan {
   hidden: string[]
 }
 
-export function planTopicDelete(dataDir: string, name: string): TopicDeletePlan {
-  const topic = validateName(name, 'topic')
-  const topicDir = resolveTopicDir(dataDir, topic)
+export function planTopicDelete(dataDir: string, name: unknown): TopicDeletePlan {
+  // 删除专题同样只做边界类校验：隐藏名专题（历史遗留）必须能删，否则是删不掉的孤儿。
+  const topic = validateEntryBoundary(name, 'topic')
+  const topicDir = resolveExistingTopicDir(dataDir, topic)
   const all = readdirSync(topicDir, { withFileTypes: true })
   const visible = all.filter((e) => !e.name.startsWith('.'))
   const papers = visible.filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.pdf')).map((e) => e.name.slice(0, -4))
@@ -374,7 +422,7 @@ export interface TopicDeleteResult {
   trashRel: string | null
 }
 
-export function deleteTopic(dataDir: string, name: string): TopicDeleteResult {
+export function deleteTopic(dataDir: string, name: unknown): TopicDeleteResult {
   const plan = planTopicDelete(dataDir, name)
   if (plan.entries.length > 0) {
     throw new ManageError('topic-not-empty', 409, `专题内还有 ${plan.entries.length} 个条目（${plan.papers.length} 篇文献），请先逐篇删除`, {
@@ -382,7 +430,7 @@ export function deleteTopic(dataDir: string, name: string): TopicDeleteResult {
       papers: plan.papers,
     })
   }
-  const topicDir = resolveTopicDir(dataDir, plan.name)
+  const topicDir = resolveExistingTopicDir(dataDir, plan.name)
   let movedHidden: string[] = []
   let trashDir: string | null = null
   let trashRel: string | null = null
@@ -439,9 +487,11 @@ export function renamedName(fileName: string, paperName: string, newName: string
 }
 
 /** 重命名文献：先校验全部目标，再逐个 rename；中途失败 best-effort 回滚。 */
-export function renamePaper(dataDir: string, topic: string, name: string, newNameRaw: unknown): RenameResult {
+export function renamePaper(dataDir: string, topic: unknown, name: unknown, newNameRaw: unknown): RenameResult {
+  // 文献名/新名 = 命名规范类（与写入路径同口径）；专题选择子 = 边界类（同 planPaperDelete）。
+  const topicName = validateEntryBoundary(topic, 'topic')
   const paperName = validateName(name, 'paper')
-  const topicDir = resolveTopicDir(dataDir, topic)
+  const topicDir = resolveExistingTopicDir(dataDir, topicName)
   const newName = validateNewPaperName(newNameRaw, paperName)
   const files = listArtifacts(topicDir, paperName)
   assertArtifactsContained(dataDir, topicDir, files)
@@ -485,11 +535,12 @@ export function renamePaper(dataDir: string, topic: string, name: string, newNam
 }
 
 /** 重命名专题：目录整体 rename（专题为空时才允许？——不：目录改名与内容无关，非空也可改）。 */
-export function renameTopic(dataDir: string, name: string, newNameRaw: unknown): RenameResult {
-  const topic = validateName(name, 'topic')
+export function renameTopic(dataDir: string, name: unknown, newNameRaw: unknown): RenameResult {
+  // from 侧是已存在目录 → 边界类（历史遗留名也能改名）；to 侧是新名字 → 命名规范类。
+  const topic = validateEntryBoundary(name, 'topic')
   const newTopic = validateName(newNameRaw, 'topic')
   if (newTopic === topic) throw new ManageError('bad-request', 400, '新名称与原名称相同')
-  const dir = resolveTopicDir(dataDir, topic)
+  const dir = resolveExistingTopicDir(dataDir, topic)
   const root = realDataDir(dataDir)
   const target = join(root, newTopic)
   if (existsSync(target)) throw new ManageError('target-exists', 409, `已存在同名专题：${newTopic}`)

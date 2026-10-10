@@ -2,10 +2,10 @@
 // 壳层代码：只做 HTTP ↔ 纯函数核心(library/transcribe)的转接。
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createReadStream, existsSync, realpathSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import type { PluginConfig } from './tools.ts'
 import { listPapers, listTopics, resolveDataDir, resolvePaper, type PaperRef } from './library.ts'
 import {
@@ -137,11 +137,13 @@ async function readBody(req: Req): Promise<unknown> {
   for await (const c of req) chunks.push(c as Buffer)
   const raw = Buffer.concat(chunks).toString('utf8')
   if (!raw) return {}
+  // 畸形 JSON / 整包 null / 非对象 → {}：路由据此给**可读 400**（原来是 JSON.parse 抛错 →
+  // 外层兜底 500 internal，错误分类错误）。PR-1 的错误分类收口，rebase 时一并带入。
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch {
-    return {} // 畸形 JSON 与整包 null/非对象同待遇：路由据此给可读 400（不再 500）
+    return {}
   }
   return parsed !== null && typeof parsed === 'object' ? parsed : {}
 }
@@ -440,16 +442,23 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       return
     }
 
-    // 新建专题（目录）。校验与 rename 的 to 侧一致（validateEntryName：边界 + 命名规范），
-    // 保证「能创建的必然能删除/改名」（R12：创建/删除对称）。
+    // 新建专题（目录）。校验与 upload / rename 的 to 侧同一套（validateName：边界 + 命名规范），
+    // 保证「能创建的必然能删除/改名」（PR-1 的创建/删除对称原则；创建走 inline 正则时，
+    // `.hidden`/超长/含控制字符的名字都能被创建，却是删不掉的孤儿）。
     if (sub === '/api/library/topic' && req.method === 'POST') {
       const body = (await readBody(req)) as { name?: string }
-      if (typeof body.name !== 'string' || !body.name.trim()) { json(res, 400, { error: '专题名不能为空' }); return }
-      const err = validateEntryName(body.name)
-      if (err) { json(res, 400, { error: err }); return }
-      const name = body.name.trim()
-      await mkdir(join(dataDir, name), { recursive: true })
-      json(res, 200, { ok: true, topic: name })
+      try {
+        const name = validateName(body.name, 'topic')
+        const root = realDataDir(dataDir)
+        const dir = join(root, name)
+        // 已存在 → 必须是真目录且不是符号链接（与 upload 同一条链路）；不存在 → 词法层已保证不越界
+        if (existsSync(dir)) resolveTopicDir(dataDir, name)
+        else assertInside(root, dir)
+        await mkdir(dir, { recursive: true })
+        json(res, 200, { ok: true, topic: name })
+      } catch (err) {
+        if (!manageFail(res, err)) throw err
+      }
       return
     }
 
@@ -459,14 +468,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const topic = decodeHdr(req.headers['x-dpr-topic'])
       const filename = decodeHdr(req.headers['x-dpr-name'])
       if (typeof topic !== 'string' || typeof filename !== 'string' || !topic.trim() || !filename.trim()) {
-        json(res, 400, { error: '缺少 x-dpr-topic / x-dpr-name 头' })
+        json(res, 400, { error: '缺少 x-dpr-topic / x-dpr-name 头', code: 'bad-request' })
         return
       }
       // 词法层：与其余 CRUD 同强度（../ / \ 隐藏名 控制字符 超长 空串）
       const errName = validateEntryName(topic)
       if (errName) { json(res, 400, { error: errName }); return }
       if (!filename.toLowerCase().endsWith('.pdf')) {
-        json(res, 400, { error: '只支持 PDF 文件' })
+        json(res, 400, { error: '只支持 PDF 文件', code: 'bad-request' })
         return
       }
       // 写路径边界校验（t4 范围外发现：upload 的 topic 原先直接 join，缺穿越校验）：
@@ -493,7 +502,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       for await (const c of req) chunks.push(c as Buffer)
       const buf = Buffer.concat(chunks)
       if (buf.length < 100) {
-        json(res, 400, { error: '文件内容为空' })
+        json(res, 400, { error: '文件内容为空', code: 'bad-request' })
         return
       }
       await mkdir(dir, { recursive: true })
@@ -508,6 +517,23 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       json(res, 200, { ok: true, topic: topicName, name: paperName, bytes: buf.length })
       return
     }
+
+    /* ── 路由名兼容层 ─────────────────────────────────────────────────────
+       上游 v1.3.0（614b935）为文献库自建了 4 条 CRUD 路由
+       `/api/library/{delete,rename}-{topic,paper}`，上游 UI 与文档都走它们 —— **对外规范路径**。
+       我们分支的 `/api/library/{topic,paper}/{delete,rename}` 保留为别名（既有测试大量引用）。
+       两族共用同一批 handler，底层永远是 library-manage 的加固实现
+       （回收站可恢复 / 精确 stem / realpath 三层穿越防护 / 会话·翻译·在途 409 / 删除计划）。
+       上游那份带穿越洞的第二实现（rmSync(recursive) 且 topic 未校验）已整段删除 —— 任何时刻
+       只有一份实现，不存在「UI 打到有洞那条路由」的窗口。
+       body 键也做兼容：name ?? topic、newName ?? to。 */
+    const ROUTE_ALIAS: Record<string, string> = {
+      '/api/library/delete-topic': '/api/library/topic/delete',
+      '/api/library/rename-topic': '/api/library/topic/rename',
+      '/api/library/delete-paper': '/api/library/paper/delete',
+      '/api/library/rename-paper': '/api/library/paper/rename',
+    }
+    const route = ROUTE_ALIAS[sub] ?? sub
 
     /* ── 文献管理：删除 / 重命名（契约 §2）─────────────────────────────────
        顺序固定：先校验全部前提（名称、越界、前置条件、目标冲突）→ 再动手；
@@ -543,7 +569,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     // 删除文献：产物移入 <dataDir>/.trash/（可恢复）
-    if (sub === '/api/library/paper/delete' && req.method === 'POST') {
+    // 对外路径 /api/library/delete-paper（上游 UI）+ 别名 /api/library/paper/delete
+    if (route === '/api/library/paper/delete' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }
       if (rejectWritePath(body, res)) return
       await withInflight(`${String(body.topic ?? '')}\u0000${String(body.name ?? '')}`, res, async () => {
@@ -565,13 +592,15 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     // 重命名文献：全部同名产物一起改名（含译文变体），`.pdf` 最后移
-    if (sub === '/api/library/paper/rename' && req.method === 'POST') {
-      const body = (await readBody(req)) as { topic?: string; name?: string; newName?: string; path?: string }
+    // 对外路径 /api/library/rename-paper（上游 UI，体 {topic,name,to}）+ 别名 /api/library/paper/rename（体 {topic,name,newName}）
+    if (route === '/api/library/paper/rename' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; newName?: string; to?: string; path?: string }
       if (rejectWritePath(body, res)) return
       await withInflight(`${String(body.topic ?? '')}\u0000${String(body.name ?? '')}`, res, async () => {
         try {
           const topic = String(body.topic ?? '')
           const name = String(body.name ?? '')
+          const newName = body.newName ?? body.to
           // 先校验名称/越界/存在（planPaperDelete 内部做全套检查）——不能先 resolvePaper：
           // 非法名（如 ../../etc/passwd）会在那里抛出非 ManageError 的普通错误，被外层记成 500。
           const plan = planPaperDelete(dataDir, topic, name)
@@ -581,7 +610,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           if (zhStatus(ref).busy) {
             throw new ManageError('translation-busy', 409, '该文献正在生成译文，请等待完成后再重命名', {})
           }
-          const r = renamePaper(dataDir, ref.topic, ref.name, body.newName)
+          const r = renamePaper(dataDir, ref.topic, ref.name, newName)
           // 会话 id 内嵌 topic/name → 改名后旧会话不再出现在该文献的列表里（不删除，如实回显）
           json(res, 200, { ...r, detachedSessions: sessions.total })
         } catch (err) {
@@ -592,12 +621,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     // 删除专题：仅空专题（非隐藏条目为 0），非递归语义；隐藏条目进回收站而不是销毁
-    if (sub === '/api/library/topic/delete' && req.method === 'POST') {
-      const body = (await readBody(req)) as { name?: string; confirmName?: string; path?: string }
+    // 对外路径 /api/library/delete-topic（上游 UI，体 {topic, confirmName}）+ 别名 /api/library/topic/delete（体 {name, confirmName}）
+    if (route === '/api/library/topic/delete' && req.method === 'POST') {
+      const body = (await readBody(req)) as { name?: string; topic?: string; confirmName?: string; path?: string }
       if (rejectWritePath(body, res)) return
-      await withInflight(`topic\u0000${String(body.name ?? '')}`, res, async () => {
+      const rawName = typeof body.name === 'string' && body.name.length > 0 ? body.name : body.topic
+      await withInflight(`topic\u0000${String(rawName ?? '')}`, res, async () => {
         try {
-          const name = typeof body.name === 'string' ? body.name : ''
+          const name = typeof rawName === 'string' ? rawName : ''
           if (!name || body.confirmName !== name) {
             throw new ManageError('confirm-mismatch', 400, '需要 confirmName 与 name 完全一致才允许删除专题', {})
           }
@@ -625,12 +656,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     // 重命名专题：目录整体改名（历史会话不删除，但不再出现在该专题下）
-    if (sub === '/api/library/topic/rename' && req.method === 'POST') {
-      const body = (await readBody(req)) as { name?: string; newName?: string; path?: string }
+    // 对外路径 /api/library/rename-topic（上游 UI，体 {topic, to}）+ 别名 /api/library/topic/rename（体 {name, newName}）
+    if (route === '/api/library/topic/rename' && req.method === 'POST') {
+      const body = (await readBody(req)) as { name?: string; topic?: string; newName?: string; to?: string; path?: string }
       if (rejectWritePath(body, res)) return
-      await withInflight(`topic\u0000${String(body.name ?? '')}`, res, async () => {
+      const rawName = typeof body.name === 'string' && body.name.length > 0 ? body.name : body.topic
+      await withInflight(`topic\u0000${String(rawName ?? '')}`, res, async () => {
         try {
-          const name = String(body.name ?? '')
+          const name = String(rawName ?? '')
           const plan = planTopicDelete(dataDir, name)      // 复用同一个「存在且合法」校验
           if (!(await requireTopicSessionsClear(plan.name, res))) return
           let busy = 0
@@ -646,9 +679,10 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
             if (zhStatus(ref).busy) busy++
           }
           if (busy > 0) throw new ManageError('translation-busy', 409, '该专题有正在生成译文的文献，请等待完成后再重命名', {})
-          const r = renameTopic(dataDir, plan.name, body.newName)
+          const r = renameTopic(dataDir, plan.name, body.newName ?? body.to)
           workspaceCache.delete(join(dataDir, plan.name))
-          json(res, 200, { ...r, detachedSessions: detached })
+          // 响应补 `topic`（上游 UI/文档读法）——我们的 RenameResult 用 from/to
+          json(res, 200, { ...r, topic: r.to, detachedSessions: detached })
         } catch (err) {
           if (!manageFail(res, err)) throw err
         }
@@ -660,106 +694,6 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     if (sub === '/api/formulas' && req.method === 'GET') {
       const ref = locate(url) // 只读路径，沿用 path/topic/name 三种定位
       json(res, 200, await readFormulaIndex(ref))
-      return
-    }
-
-    /* ---- 库管理：专题/文献 改名与删除。----
-     * 翻译进行中（busy）一律 409 拒绝——babeldoc 异步跑着会往旧路径写 -zh/-dual 产物，
-     * 改名/删除会让它写丢；busy 键控在旧路径上，动了就失联。
-     * Windows 下删除被阅读器 iframe 占用的文件可能 EBUSY/EPERM，转成可读文案。 */
-    const busyPapersInTopic = (topic: string): string[] =>
-      listPapers(dataDir, topic)
-        .filter((p) => zhStatus(paperRefFor(dataDir, p.topic, p.name)).busy)
-        .map((p) => p.name)
-    const fsError = (res2: Res, err: unknown) => {
-      const e = err as NodeJS.ErrnoException
-      if (e?.code === 'EBUSY' || e?.code === 'EPERM') {
-        json(res2, 409, { error: '文件被占用（可能正在阅读器或其他程序中打开），关闭后重试' })
-      } else {
-        json(res2, 400, { error: readableError(err) })
-      }
-    }
-
-    /** 非法/越界名字 → 400 可读文案（词法层；realpath 子路径层在 library primitive 内兜底）。
-     *  放在 busyPapersInTopic / resolvePaper 之前，越界输入不会碰任何文件系统。返回 true 表示已响应。 */
-    const badEntry = (res: Res, raw: unknown): boolean => {
-      const err = typeof raw === 'string' ? validateEntryName(raw) : '名字不能为空'
-      if (!err) return false
-      json(res, 400, { error: err })
-      return true
-    }
-
-    /** 删除/改名-from 用：只做边界类校验（安全），不做命名规范类（长度/前导点）。
-     *  删除是对已存在文件的操作——upload 能创建的名字（前导点、超长、\x01 等）必须能删。 */
-    const badEntryBoundary = (res: Res, raw: unknown): boolean => {
-      const err = typeof raw === 'string' ? validateEntryBoundary(raw) : '名字不能为空'
-      if (!err) return false
-      json(res, 400, { error: err })
-      return true
-    }
-
-    if (sub === '/api/library/rename-topic' && req.method === 'POST') {
-      const body = (await readBody(req)) as { topic?: string; to?: string }
-      if (typeof body.topic !== 'string' || !body.topic.trim()) { json(res, 400, { error: '缺少 topic' }); return }
-      if (badEntry(res, body.topic)) return
-      if (badEntry(res, body.to ?? '')) return
-      const busy = busyPapersInTopic(body.topic.trim())
-      if (busy.length) { json(res, 409, { error: `以下文献正在翻译，稍后再试：${busy.join('、')}` }); return }
-      try {
-        renameTopic(dataDir, body.topic.trim(), body.to ?? '')
-      } catch (err) { fsError(res, err); return }
-      workspaceCache.delete(join(dataDir, body.topic.trim())) // 旧目录的工作区记录失效（残留无害）
-      json(res, 200, { ok: true, topic: body.to?.trim() })
-      return
-    }
-
-    if (sub === '/api/library/delete-topic' && req.method === 'POST') {
-      const body = (await readBody(req)) as { topic?: string }
-      if (typeof body.topic !== 'string' || !body.topic.trim()) { json(res, 400, { error: '缺少 topic' }); return }
-      if (badEntry(res, body.topic)) return
-      const busy = busyPapersInTopic(body.topic.trim())
-      if (busy.length) { json(res, 409, { error: `以下文献正在翻译，稍后再试：${busy.join('、')}` }); return }
-      try {
-        deleteTopic(dataDir, body.topic.trim())
-      } catch (err) { fsError(res, err); return }
-      json(res, 200, { ok: true })
-      return
-    }
-
-    if (sub === '/api/library/rename-paper' && req.method === 'POST') {
-      const body = (await readBody(req)) as { topic?: string; name?: string; to?: string }
-      if (typeof body.topic !== 'string' || !body.topic.trim() || typeof body.name !== 'string' || !body.name.trim()) { json(res, 400, { error: '缺少 topic / name' }); return }
-      if (badEntry(res, body.topic)) return
-      if (badEntryBoundary(res, body.name)) return
-      if (badEntry(res, body.to ?? '')) return
-      let ref
-      try {
-        ref = resolvePaper(dataDir, { topic: body.topic.trim(), name: body.name.trim() })
-      } catch (err) { fsError(res, err); return }
-      if (zhStatus(ref).busy) { json(res, 409, { error: '该文献正在翻译，稍后再试' }); return }
-      let renamed: string[]
-      try {
-        renamed = renamePaper(dataDir, ref.topic, ref.name, body.to ?? '')
-      } catch (err) { fsError(res, err); return }
-      json(res, 200, { ok: true, topic: ref.topic, name: body.to?.trim(), renamed })
-      return
-    }
-
-    if (sub === '/api/library/delete-paper' && req.method === 'POST') {
-      const body = (await readBody(req)) as { topic?: string; name?: string }
-      if (typeof body.topic !== 'string' || !body.topic.trim() || typeof body.name !== 'string' || !body.name.trim()) { json(res, 400, { error: '缺少 topic / name' }); return }
-      if (badEntry(res, body.topic)) return
-      if (badEntryBoundary(res, body.name)) return
-      let ref
-      try {
-        ref = resolvePaper(dataDir, { topic: body.topic.trim(), name: body.name.trim() })
-      } catch (err) { fsError(res, err); return }
-      if (zhStatus(ref).busy) { json(res, 409, { error: '该文献正在翻译，稍后再试' }); return }
-      let deleted: string[]
-      try {
-        deleted = deletePaper(dataDir, ref.topic, ref.name)
-      } catch (err) { fsError(res, err); return }
-      json(res, 200, { ok: true, deleted })
       return
     }
 
