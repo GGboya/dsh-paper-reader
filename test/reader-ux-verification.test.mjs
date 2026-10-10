@@ -1142,7 +1142,8 @@ test('VB4[B6] 路径穿越 ≥8 种 × 全部写路由：一律 4xx + 盘上零�
     { topic: 'att', name: 'a/b', why: '斜杠' },
     { topic: 'att', name: 'a\\b', why: '反斜杠（win32 分隔符）' },
     { topic: 'att', name: '..', why: 'name=..' },
-    { topic: 'att', name: '.hidden', why: '隐藏名' },
+    // `.hidden` 不是穿越向量而是命名规范，已移出本矩阵（t4 评审 [3]）：删除/rename-from
+    // 现在只做边界校验（放行），命名规范由「创建 / 改名-to」强制；真正的穿越输入一条未删。
     { topic: 'att', name: 'x\u0000y', why: 'NUL 截断' },
     { topic: 'att', name: '..\\..\\etc\\passwd', why: 'win32 相对穿越' },
     { topic: 'att', name: '....//....//etc/passwd', why: '伪归一化穿越' },
@@ -1697,7 +1698,8 @@ const viaIndexOf = (raw) => buildFormulaIndex(JSON.stringify({
 test('VA14[契约·实现方自查①/④] rename 先校验后解析（非法名不得 500）；unifyOperatorNames 是整体重建而非局部替换', async () => {
   ensureFixtures()
   // ① 非法名 → 可读 4xx（不是外层兜底的 500）；含最经典的相对穿越
-  for (const bad of ['../../etc/passwd', '/etc/passwd', '..', 'a/b', 'a\\b', 'x\u0000y', '.hidden', '']) {
+  // `.hidden` 已移出（t4 评审 [3]）：rename-**from** 只做边界校验；命名规范由 rename-**to** 强制
+  for (const bad of ['../../etc/passwd', '/etc/passwd', '..', 'a/b', 'a\\b', 'x\u0000y', '']) {
     const r = await postJson('/api/library/paper/rename', { topic: 'att', name: bad, newName: 'Renamed' })
     assert.ok(r.status >= 400 && r.status < 500, `非法名必须 4xx（${bad}）：${r.status} ${r.text}`)
     assert.ok(['bad-name', 'bad-request', 'escape-rejected', 'not-found'].includes(r.body?.code),

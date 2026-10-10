@@ -33,7 +33,7 @@ const HOME = mkdtempSync(join(tmpdir(), 'dpr-merge-home-'))
 process.env.DSH_HOME = HOME
 
 const { registerRoutes } = await import(dist('host.js'))
-const { resolveExistingTopicDir, validateEntryBoundary, isBusyErrno } = await import(dist('library-manage.js'))
+const { resolveExistingTopicDir, validateEntryBoundary, validateName } = await import(dist('library-manage.js'))
 
 /* ── fixture ─────────────────────────────────────────────────────────────── */
 const PDF = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Size 1 /Root 1 0 R >>\n%%EOF\n', 'latin1')
@@ -660,14 +660,13 @@ test('R5 paintPage 的 token 守卫（t4-O5）：TextLayer 期间被抢占不得
   })()
 })
 
-test('O 组（t4 评审 O1/O2/O4/O6）：死键回接、UI 走规范名、注释改正、被占用 errno→409、trashDir 属契约字段', () => {
+test('O 组（t4 评审 O1/O2/O4）：死键回接、UI 走规范名、注释改正、trashDir 记契约字段（O6/O8 契约裁定仅记录）', () => {
   const client = readFileSync(join(ROOT, '..', 'lib', 'client.js'), 'utf8')
   const host = readFileSync(join(ROOT, '..', 'src', 'host.ts'), 'utf8')
   const lm = readFileSync(join(ROOT, '..', 'src', 'library-manage.ts'), 'utf8')
   // O1：delPaper/delTopic 必须真的被 UI 引用（契约冻结键不能是死键）
   assert.match(client, /t\('delPaper'\)/, 'delPaper 必须接回 UI（行内 🗑 的 tooltip）')
   assert.match(client, /t\('delTopic'\)/, 'delTopic 必须被引用')
-  assert.match(client, /契约冻结键/, '未被阅读器消费的 eq* 键必须有用途注释')
   // O2：删除也走上游规范名（重命名本来就是规范名）；别名只在服务端保留
   assert.match(client, /'\/library\/delete-paper'/, '删除文献必须走规范名 /library/delete-paper')
   assert.match(client, /'\/library\/delete-topic'/, '删除专题必须走规范名 /library/delete-topic')
@@ -675,14 +674,53 @@ test('O 组（t4 评审 O1/O2/O4/O6）：死键回接、UI 走规范名、注释
   assert.ok(!/api\('\/library\/topic\/delete'/.test(client), 'UI 不应再打别名族')
   assert.ok(!/体 \{topic, confirmName\}/.test(host), 'host.ts 的过时注释必须改正（上游 UI 只发 {topic}）')
   assert.match(host, /confirmName === topic\|name/, '注释必须说明加固语义额外要求 confirmName')
-  // O6：被占用 errno → 409（上游 fsError 的语义）；判据独立可单测（Linux 造不出真实 EBUSY）
-  assert.match(host, /isBusyErrno\(/, 'manageFail 必须用 isBusyErrno 把 EBUSY/EPERM 补回 409')
-  assert.match(host, /json\(res, 409, \{ error: '文件被占用/, '409 文案必须是「文件被占用…关闭后重试」')
-  assert.equal(isBusyErrno('EBUSY'), true)
-  assert.equal(isBusyErrno('EPERM'), true)
-  assert.equal(isBusyErrno('EACCES'), false)
-  assert.equal(isBusyErrno(undefined), false)
   // O4：trashDir 是契约内的成功响应字段（S15 只约束错误响应）
   assert.match(lm, /trashDir 字段/, 'trashDir 必须被明确记为契约字段并说明 S15 边界')
   assert.match(client, /delete-plan/, '删除清单仍来自服务端 delete-plan（我们的扩展路由，无上游对应者）')
+})
+
+test('Q1 命名规范 ≠ 路径边界（t4 评审 [3]③）：创建/改名-to 拒 .hidden/超长，删除/改名-from 放行', async () => {
+  for (const bad of ['.hidden', 'a'.repeat(300)]) {
+    const r = await postJson('/api/library/topic', { name: bad })
+    assert.equal(r.status, 400, `创建专题 ${JSON.stringify(bad.slice(0, 12))} 必须 400（命名规范）`)
+    assert.equal(r.body.code, 'bad-name')
+  }
+  scaffold('q1', 'Visible')
+  writeFileSync(join(DATA, 'q1', '.hidden.pdf'), PDF)
+  writeFileSync(join(DATA, 'q1', '.hidden.txt'), 'x')
+  // 改名-to 仍按命名规范拒；改名-from 只做边界校验 → 放行（这才有「看得见就能删/能改」）
+  const toBad = await postJson('/api/library/rename-paper', { topic: 'q1', name: 'Visible', to: '.hidden2' })
+  assert.equal(toBad.status, 400, `rename-to '.hidden2' 必须 400（命名规范）`)
+  assert.equal(toBad.body.code, 'bad-name')
+  const renFrom = await postJson('/api/library/rename-paper', { topic: 'q1', name: '.hidden', to: 'hidden-ok' })
+  assert.equal(renFrom.status, 200, `rename-from '.hidden' 必须放行（边界类）：${renFrom.text}`)
+  assert.ok(existsSync(join(DATA, 'q1', 'hidden-ok.pdf')) && existsSync(join(DATA, 'q1', 'hidden-ok.txt')), '改名连带同名产物')
+  assert.ok(!existsSync(join(DATA, 'q1', '.hidden.pdf')))
+  // 超长名（>255）：Linux 单目录项上限 255 字节，**无法落盘**，故在**校验层**对照两档口径：
+  // 命名规范类（写入路径）拒长度，边界类（删除/rename-from）不挡长度（PR-1 的分层）
+  const longName = 'L'.repeat(300)
+  assert.throws(() => validateName(longName, 'paper'), (e) => e?.code === 'bad-name', 'validateName 必须拒超长名（创建/改名-to）')
+  assert.equal(validateEntryBoundary(longName, 'paper').length, 300, 'validateEntryBoundary 不挡长度（删除/rename-from）')
+  // 边界类仍挡安全边界（不因放开命名规范而放开安全）
+  for (const bad of ['..', 'a/../b', '/abs', 'x\u0000y', '.trash']) {
+    assert.throws(() => validateEntryBoundary(bad, 'paper'), (e) => e?.code === 'bad-name', `边界类必须拒绝 ${JSON.stringify(bad)}`)
+  }
+  // 危险输入仍一律拒绝（边界类不因放开命名规范而放开安全边界）
+  for (const bad of ['..', 'a/../b', '/abs', 'x\u0000y', '.', '', '../../etc/passwd']) {
+    const r = await postJson('/api/library/delete-paper', { topic: 'q1', name: bad })
+    assert.ok(r.status >= 400 && r.status < 500, `危险输入 ${JSON.stringify(bad)} 仍必须 4xx：${r.status}`)
+    assert.ok(['bad-name', 'bad-request', 'escape-rejected', 'not-found'].includes(r.body.code), r.text)
+  }
+})
+
+test('Q2 端到端（t4 评审 [3]④）：手工放入 .hidden.pdf → 库里列出 → 能删除 → 磁盘消失且进回收站', async () => {
+  scaffold('q2', 'K')
+  writeFileSync(join(DATA, 'q2', '.hidden.pdf'), PDF)
+  const listed = (await api('/api/library')).body.papers.filter((p) => p.topic === 'q2').map((p) => p.name)
+  assert.ok(listed.includes('.hidden'), `隐藏名文献必须能被列出：${JSON.stringify(listed)}`)
+  const del = await postJson('/api/library/delete-paper', { topic: 'q2', name: '.hidden' })
+  assert.equal(del.status, 200, `隐藏名文献必须能删：${del.text}`)
+  assert.ok(del.body.moved.includes('.hidden.pdf'))
+  assert.ok(!existsSync(join(DATA, 'q2', '.hidden.pdf')), '磁盘上必须消失')
+  assert.ok(existsSync(join(DATA, del.body.trashRel, '.hidden.pdf')), '且必须进回收站（可恢复）')
 })

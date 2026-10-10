@@ -49,19 +49,6 @@ export function isManageError(e: unknown): e is ManageError {
   return e instanceof ManageError
 }
 
-/**
- * 「文件被占用」类 errno（Windows 上阅读器/其他程序正打开着目标文件时，
- * rename 会失败于 EBUSY 或 EPERM）。
- *
- * 用途：上游 v1.3.0 的 `fsError` 把这两个 errno 映射成 **HTTP 409 + 可读文案**（可重试），
- * 我们的加固实现把它们包成 `trash-move-failed`(500) / `rename-partial`(500)（t4 评审 O6 指出的
- * 行为变化）。409 才是「换一下再试就行」的正确语义，故 host 的 `manageFail` 用本判据把它补回来；
- * 判据独立成函数是为了可单测（Linux CI 上造不出真实 EBUSY）。
- */
-export function isBusyErrno(cause: unknown): boolean {
-  return cause === 'EBUSY' || cause === 'EPERM'
-}
-
 // ── 名称校验 ────────────────────────────────────────────────────────────────
 
 /** 回收站目录名（保留名；`listTopics` 因隐藏而跳过它，因此不会显示成专题）。 */
@@ -340,14 +327,13 @@ export interface PaperDeletePlan {
 }
 
 export function planPaperDelete(dataDir: string, topic: unknown, name: unknown): PaperDeletePlan {
-  // 词法层分两档（见 validateEntryBoundary 的分工说明）：
-  //   · 文献名 = 命名规范类（validateName）——写入路径（upload / rename 的 to 侧）都走它，
-  //     「能创建的必然能删除」已由同一口径闭合；且既有断言明确要求 `.hidden`/超长名在
-  //     删除·改名路由上被拒 400（reader-ux C6 / VA14 / VB4），不能放行。
-  //   · 专题名 = 边界类——只挡空/分隔符/`..`/NUL/保留名（`.trash`），让历史遗留的
-  //     不规范专题目录（`.legacy`、含 `\x01`）仍可被删除，不产生「删不掉的孤儿」。
+  // 词法层统一走**边界类**（PR-1 的既定分层，t4 评审 [2] 的裁定）：删除/rename-from 只挡
+  // 空/分隔符/`..`/NUL/保留名 `.trash`，**不**挡命名规范（前导点、超长、控制字符）。
+  // 理由（实测为真）：listPapers 不过滤隐藏文件 → 手工放进库的 `.hidden.pdf` 会出现在列表里
+  // 却删不掉；pdfqa 旧库与手工整理都会产生这类条目。命名规范只在**创建 / 改名-to** 时强制
+  // （validateName / validateNewPaperName），即「能创建的必然能删除」。
   // realpath 层由 resolveExistingTopicDir / assertArtifactsContained 兜底（与词法层无关）。
-  const paperName = validateName(name, 'paper')
+  const paperName = validateEntryBoundary(name, 'paper')
   const topicName = validateEntryBoundary(topic, 'topic')
   const topicDir = resolveExistingTopicDir(dataDir, topicName)
   const files = listArtifacts(topicDir, paperName)
@@ -515,9 +501,9 @@ export function renamedName(fileName: string, paperName: string, newName: string
 
 /** 重命名文献：先校验全部目标，再逐个 rename；中途失败 best-effort 回滚。 */
 export function renamePaper(dataDir: string, topic: unknown, name: unknown, newNameRaw: unknown): RenameResult {
-  // 文献名/新名 = 命名规范类（与写入路径同口径）；专题选择子 = 边界类（同 planPaperDelete）。
+  // rename-from（topic/name）只做边界类校验；改名**目标**名仍走命名规范类（validateNewPaperName）。
   const topicName = validateEntryBoundary(topic, 'topic')
-  const paperName = validateName(name, 'paper')
+  const paperName = validateEntryBoundary(name, 'paper')
   const topicDir = resolveExistingTopicDir(dataDir, topicName)
   const newName = validateNewPaperName(newNameRaw, paperName)
   const files = listArtifacts(topicDir, paperName)

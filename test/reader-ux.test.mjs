@@ -518,7 +518,10 @@ test('C6 路径穿越防护：≥6 种恶意输入一律拒绝且盘上无变化
     { topic: 'demo', name: 'a/b' },
     { topic: 'demo', name: 'a\\b' },
     { topic: 'demo', name: '..' },
-    { topic: 'demo', name: '.hidden' },
+    // `.hidden` 不是路径穿越向量而是命名规范，已移出本矩阵（t4 评审 [3] 裁定）：
+    // 删除 / rename-from 现在只做边界校验（手工放进库的隐藏文件可删），
+    // 命名规范仍由「创建 / 改名-to」强制——两条口径另有显式断言
+    // （test/integration-upstream-merge.test.mjs 的 Q1/Q2）。真危险输入一条未删。
     { topic: 'demo', name: 'x\u0000y' },
   ]
   for (const body of evilName) {

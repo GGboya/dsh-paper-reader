@@ -13,7 +13,6 @@ import {
   assertInside,
   deletePaper,
   deleteTopic,
-  isBusyErrno,
   isManageError,
   planPaperDelete,
   planTopicDelete,
@@ -280,14 +279,9 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
      结构性字段（trashDir/trashRel）只在必须给用户恢复线索时出现（见 O4 说明）。 */
   const manageFail = (res: Res, err: unknown): boolean => {
     if (!isManageError(err)) return false
-    // O6（t4 评审）：上游 fsError 把 EBUSY/EPERM（文件被阅读器或其他程序占用）映射成 409 +
-    // 可读文案；换成我们的实现后这两个 errno 会走 trash-move-failed(500)/rename-partial(500)。
-    // 这里按 extra.cause 补回 409 —— 「被占用」对调用方是可重试语义，不该报 500。
-    // code 不变（仍 trash-move-failed / rename-partial）→ 前端按 code 分支的行为不受影响。
-    if (isBusyErrno((err.extra as { cause?: unknown }).cause)) {
-      json(res, 409, { error: '文件被占用（可能正在阅读器或其他程序中打开），关闭后重试', code: err.code, ...err.extra })
-      return true
-    }
+    // 记录（t4 评审 O6，t6 契约裁定「明确不做，仅记录」）：上游 fsError 把 EBUSY/EPERM（文件被占用）
+    // 映射成 409；换成我们的实现后走 trash-move-failed(500)/rename-partial(500)——语义仍可读、
+    // 绝不回退 unlink，只是错误码 409→500。该差异写进 PR 描述，本轮不改代码。
     json(res, err.status, { error: err.message, code: err.code, ...err.extra })
     return true
   }
