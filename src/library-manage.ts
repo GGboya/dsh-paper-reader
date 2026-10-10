@@ -49,6 +49,19 @@ export function isManageError(e: unknown): e is ManageError {
   return e instanceof ManageError
 }
 
+/**
+ * 「文件被占用」类 errno（Windows 上阅读器/其他程序正打开着目标文件时，
+ * rename 会失败于 EBUSY 或 EPERM）。
+ *
+ * 用途：上游 v1.3.0 的 `fsError` 把这两个 errno 映射成 **HTTP 409 + 可读文案**（可重试），
+ * 我们的加固实现把它们包成 `trash-move-failed`(500) / `rename-partial`(500)（t4 评审 O6 指出的
+ * 行为变化）。409 才是「换一下再试就行」的正确语义，故 host 的 `manageFail` 用本判据把它补回来；
+ * 判据独立成函数是为了可单测（Linux CI 上造不出真实 EBUSY）。
+ */
+export function isBusyErrno(cause: unknown): boolean {
+  return cause === 'EBUSY' || cause === 'EPERM'
+}
+
 // ── 名称校验 ────────────────────────────────────────────────────────────────
 
 /** 回收站目录名（保留名；`listTopics` 因隐藏而跳过它，因此不会显示成专题）。 */
@@ -154,12 +167,18 @@ export function resolveExistingTopicDir(dataDir: string, topic: unknown): string
 
 // ── 产物清单（精确 stem 匹配） ────────────────────────────────────────────────
 
-export const PAPER_STEM_SUFFIXES = ['.pdf', '.txt', '.pages.json', '.transcript.json', '.mineru.md', '.mineru.json', '.embeddings.json'] as const
+// `.study.json` = 论文伴读的学习档案（阅读计划 / 检验成绩，src/study.ts 写在文献旁边；preset 的
+// study_update 工具会真的写它）。上游 v1.3.0 的 PAPER_SIDECARS 覆盖了它、release note 也写明
+// 「转录 / 译文 / 学习档案连带搬家」；整合时上游实现被我们的加固版整段替换，该后缀随之丢失
+// （t4 评审 F1）。少它的后果：① 改名后档案仍挂旧名 → readStudy 找不到，用户以为进度全丢；
+// ② 删除时不进回收站、moved/skipped 都不报告；③ 残留条目既不是文献也不是专题，任何 API 都
+// 清不掉，永久阻塞删专题（409 topic-not-empty）。本次归位：改名连带、删除移入回收站。
+export const PAPER_STEM_SUFFIXES = ['.pdf', '.txt', '.pages.json', '.transcript.json', '.mineru.md', '.mineru.json', '.embeddings.json', '.study.json'] as const
 export const PDF2ZH_VARIANT_SUFFIXES = ['-en', '-zh', '-dual'] as const
 /** atomicTempPath(): `${path}.tmp-${pid}-${uuid.slice(0,8)}`（src/transcribe.ts）。 */
 const TMP_RE = /\.tmp-\d+-[0-9a-f]{8}$/
 
-export type ArtifactKind = 'pdf' | 'cache' | 'mineru' | 'embed' | 'variant' | 'tmp'
+export type ArtifactKind = 'pdf' | 'cache' | 'mineru' | 'embed' | 'study' | 'variant' | 'tmp'
 
 export interface ManagedFile {
   /** 文件名（不含目录） */
@@ -191,6 +210,7 @@ function kindOf(paperName: string, entry: string): ArtifactKind {
   for (const v of PDF2ZH_VARIANT_SUFFIXES) if (base === paperName + v + '.pdf') return isTmp ? 'tmp' : 'variant'
   if (base === paperName + '.mineru.json' || base === paperName + '.mineru.md') return isTmp ? 'tmp' : 'mineru'
   if (base === paperName + '.embeddings.json') return isTmp ? 'tmp' : 'embed'
+  if (base === paperName + '.study.json') return isTmp ? 'tmp' : 'study'
   return isTmp ? 'tmp' : 'cache'
 }
 
@@ -210,8 +230,8 @@ export function listArtifacts(topicDir: string, paperName: string): ManagedFile[
     if (st.isDirectory()) continue
     out.push({ name: e.name, kind: kindOf(paperName, e.name), bytes: st.size, symlink: st.isSymbolicLink() })
   }
-  // 阅读序稳定输出：先变体/缓存，`.pdf` 最后（删除与重命名都靠这个顺序）
-  const order: ArtifactKind[] = ['variant', 'mineru', 'embed', 'cache', 'tmp', 'pdf']
+  // 阅读序稳定输出：先变体/缓存，`.pdf` 最后（删除与重命名都靠这个顺序；study 也要排在 .pdf 前）
+  const order: ArtifactKind[] = ['variant', 'mineru', 'embed', 'study', 'cache', 'tmp', 'pdf']
   return out.sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.name.localeCompare(b.name))
 }
 
@@ -245,7 +265,12 @@ export function assertArtifactsContained(dataDir: string, topicDir: string, file
 export interface TrashResult {
   /** 相对 dataDir 的回收站目录（UI 展示用，不含机器上的绝对路径） */
   trashRel: string
-  /** 绝对路径（与冻结契约的 trashDir 一致） */
+  /**
+   * 回收站的**绝对路径** —— 冻结契约（docs/reader-ux-requirements.md §2）里的 trashDir 字段。
+   * S15 口径（「响应不泄露服务端路径」）的边界在这里：**错误响应**一律不含绝对路径
+   * （文案脱敏，见 host 的 stripAbsPaths），而这个**成功响应**里的字段是刻意保留的
+   * 「恢复线索」——用户/脚本据此直接去回收站把文件移回来（t4 评审 O4）。
+   */
   trashDir: string
   moved: string[]
 }
@@ -339,7 +364,9 @@ export function planPaperDelete(dataDir: string, topic: unknown, name: unknown):
     totalBytes: files.reduce((n, f) => n + f.bytes, 0),
     trashRoot: '.trash',
     notDeleted: [
-      '伴读会话历史（保存在 dsh 会话库里，不随文献删除）',
+      // 明确「会话历史不删、学习档案文件会随文献进回收站」——原文案只说「会话历史不删」，
+      // 用户会以为学习进度（<文献>.study.json）也留着；实际它是派生产物，和 .txt/译文一样被移走（可恢复）。
+      '伴读会话历史（保存在 dsh 会话库里，不随文献删除；学习档案文件 <文献>.study.json 随文献移入回收站，可在回收站恢复）',
       '共享翻译环境（.venv-pdf2zh）与翻译草稿目录（.pdf2zh-tmp）',
       '专题目录本身（如需删除专题请另行操作）',
     ],

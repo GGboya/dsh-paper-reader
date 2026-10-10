@@ -13,6 +13,7 @@ import {
   assertInside,
   deletePaper,
   deleteTopic,
+  isBusyErrno,
   isManageError,
   planPaperDelete,
   planTopicDelete,
@@ -276,9 +277,17 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
 
   /* ── 破坏性操作（删除/重命名）的共用出口 ──────────────────────────────────
      契约：docs/reader-ux-requirements.md §2。错误文案一律不含服务端绝对路径；
-     结构性字段（trashDir/trashRel）只在必须给用户恢复线索时出现。 */
+     结构性字段（trashDir/trashRel）只在必须给用户恢复线索时出现（见 O4 说明）。 */
   const manageFail = (res: Res, err: unknown): boolean => {
     if (!isManageError(err)) return false
+    // O6（t4 评审）：上游 fsError 把 EBUSY/EPERM（文件被阅读器或其他程序占用）映射成 409 +
+    // 可读文案；换成我们的实现后这两个 errno 会走 trash-move-failed(500)/rename-partial(500)。
+    // 这里按 extra.cause 补回 409 —— 「被占用」对调用方是可重试语义，不该报 500。
+    // code 不变（仍 trash-move-failed / rename-partial）→ 前端按 code 分支的行为不受影响。
+    if (isBusyErrno((err.extra as { cause?: unknown }).cause)) {
+      json(res, 409, { error: '文件被占用（可能正在阅读器或其他程序中打开），关闭后重试', code: err.code, ...err.extra })
+      return true
+    }
     json(res, err.status, { error: err.message, code: err.code, ...err.extra })
     return true
   }
@@ -569,7 +578,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     // 删除文献：产物移入 <dataDir>/.trash/（可恢复）
-    // 对外路径 /api/library/delete-paper（上游 UI）+ 别名 /api/library/paper/delete
+    // 对外路径 /api/library/delete-paper = 上游 v1.3.0 的规范名（体 {topic,name}，与上游 UI 一致）+ 别名 /api/library/paper/delete
     if (route === '/api/library/paper/delete' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }
       if (rejectWritePath(body, res)) return
@@ -621,7 +630,9 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     // 删除专题：仅空专题（非隐藏条目为 0），非递归语义；隐藏条目进回收站而不是销毁
-    // 对外路径 /api/library/delete-topic（上游 UI，体 {topic, confirmName}）+ 别名 /api/library/topic/delete（体 {name, confirmName}）
+    // 对外路径 /api/library/delete-topic = 上游 v1.3.0 的规范名（上游 UI 只发 {topic}，没有确认字段）；
+    // 别名 /api/library/topic/delete 是我们分支的旧名。两族同一 handler，**加固语义要求
+    // confirmName === topic|name**（比上游「同一按钮点两次」严格更强），我们的 UI 发 {topic, confirmName}。
     if (route === '/api/library/topic/delete' && req.method === 'POST') {
       const body = (await readBody(req)) as { name?: string; topic?: string; confirmName?: string; path?: string }
       if (rejectWritePath(body, res)) return

@@ -593,6 +593,9 @@ async function paintPage(page, div, viewport, token) {
   // renderPaged 完全绕过 renderAllPages 的循环，写在那边翻页模式热区会全哑。
   // 也不放进 makePageNode：它靠 div.firstChild/lastChild 取 canvas/textLayer，
   // 提前 append 热区层会让 lastChild 变成热区层 → TextLayer 挂错容器、文本层错位。
+  // token 守卫（t4 评审 O5）：TextLayer.render() 也是 await，期间可能已被更新的渲染抢占；
+  // 少了这一行，被抢占的收尾会把**上一档缩放**的几何写回 EQ_BY_PAGE → 点击热区整体偏移。
+  if (token !== renderToken) return;
   paintEqLayer(div, viewport, +div.dataset.page);
 }
 

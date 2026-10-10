@@ -33,7 +33,7 @@ const HOME = mkdtempSync(join(tmpdir(), 'dpr-merge-home-'))
 process.env.DSH_HOME = HOME
 
 const { registerRoutes } = await import(dist('host.js'))
-const { resolveExistingTopicDir, validateEntryBoundary } = await import(dist('library-manage.js'))
+const { resolveExistingTopicDir, validateEntryBoundary, isBusyErrno } = await import(dist('library-manage.js'))
 
 /* ── fixture ─────────────────────────────────────────────────────────────── */
 const PDF = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Size 1 /Root 1 0 R >>\n%%EOF\n', 'latin1')
@@ -372,6 +372,7 @@ function loadReader() {
     matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }),
   }
   let textLayers = 0
+  let textLayerHook = null
   const ctx = {
     document: doc, window: win, navigator: {}, localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     location: { search: '' }, matchMedia: win.matchMedia,
@@ -381,20 +382,21 @@ function loadReader() {
     // observePages 用（滚动模式的当前页探测）
     IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return [] } },
     // pdf.js 只需要 TextLayer 类（paintPage 用它渲染文本层）
-    pdfjsLib: { TextLayer: class { async render() { textLayers++ } } },
+    pdfjsLib: { TextLayer: class { async render() { textLayers++; if (textLayerHook) textLayerHook() } } },
   }
   ctx.globalThis = ctx
   vm.createContext(ctx)
   const harness = `
     ;globalThis.__t = {
-      EQ_BY_PAGE, paintEqLayer, hitTestFormula, eqGeom,
+      EQ_BY_PAGE, paintEqLayer, hitTestFormula, eqGeom, paintPage, makePageNode,
+      token: () => renderToken, bumpToken: () => ++renderToken,
       setEq: (i) => { eqIndex = i }, setVariant: (v) => { zhVariant = v },
       setZoom: (z) => { zoomScale = z }, setPageMode: (m) => { pageMode = m },
       setCurPage: (n) => { curPage = n }, setPdfDoc: (d) => { pdfDoc = d },
       renderPaged, renderAllPages, rerender,
     };`
   vm.runInContext(SCRIPT_SRC + harness, ctx, { filename: 'reader-inline.js' })
-  return { t: ctx.__t, els, created, textLayers: () => textLayers }
+  return { t: ctx.__t, els, created, textLayers: () => textLayers, setTextLayerHook: (f) => { textLayerHook = f } }
 }
 
 const pageNodes = (R) => R.created.filter((e) => e.className === 'page')
@@ -597,4 +599,90 @@ test('R4 翻页模式的几何→命中链（模拟 V-P1/V-P2/V-P3）：换页/�
     await T.rerender()
     assert.equal(hitOn(pageNodes(R).pop(), 680, 860)?.eq?.id, 'p3-a', '切回原文后热区恢复')
   })()
+})
+
+test('G4 .study.json（t4-F1 回归）：改名连带、删除进回收站、清空后专题可删、kind 归类', async () => {
+  scaffold('g4', 'Study Paper')
+  writeFileSync(join(DATA, 'g4', 'Study Paper.study.json'), JSON.stringify({ plan: [], quizzes: [] }))
+  // ① 改名连带（旧名不残留 → 不留孤儿）
+  const ren = await postJson('/api/library/rename-paper', { topic: 'g4', name: 'Study Paper', to: 'Renamed' })
+  assert.equal(ren.status, 200, ren.text)
+  assert.ok(ren.body.moved.includes('Renamed.study.json'), `moved 必须报告 .study.json：${JSON.stringify(ren.body.moved)}`)
+  assert.ok(existsSync(join(DATA, 'g4', 'Renamed.study.json')), '改名必须连带 .study.json（否则学习档案变孤儿、readStudy 找不到）')
+  assert.ok(!existsSync(join(DATA, 'g4', 'Study Paper.study.json')), '旧名不得残留')
+  // ② 删除：.study.json 进回收站；`.pdf` 仍最后移
+  const del = await postJson('/api/library/delete-paper', { topic: 'g4', name: 'Renamed' })
+  assert.equal(del.status, 200, del.text)
+  assert.ok(del.body.moved.includes('Renamed.study.json'), `moved 必须含 .study.json：${JSON.stringify(del.body.moved)}`)
+  assert.equal(del.body.moved[del.body.moved.length - 1], 'Renamed.pdf', '`.pdf` 仍必须最后移')
+  assert.ok(existsSync(join(DATA, del.body.trashRel, 'Renamed.study.json')), '.study.json 必须真的在回收站里')
+  // ③ 清空后删专题不再 409（残留 .study.json 曾永久阻塞删专题）
+  const td = await postJson('/api/library/delete-topic', { topic: 'g4', confirmName: 'g4' })
+  assert.equal(td.status, 200, `删完文献后专题必须可删（残留 .study.json 曾 409）：${td.text}`)
+  assert.ok(!existsSync(join(DATA, 'g4')))
+  // ④ kind 归类：study（不是 cache），delete-plan 里可直接区分
+  scaffold('g5', 'K Paper')
+  writeFileSync(join(DATA, 'g5', 'K Paper.study.json'), '{}')
+  const plan = await api(`/api/library/paper/delete-plan?topic=g5&name=${encodeURIComponent('K Paper')}`)
+  assert.equal(plan.status, 200, plan.text)
+  const study = plan.body.files.find((f) => f.name === 'K Paper.study.json')
+  assert.equal(study?.kind, 'study', `kindOf 必须把 .study.json 归类为 study：${JSON.stringify(plan.body.files)}`)
+  assert.ok(plan.body.totalBytes >= 2, 'study 文件字节数必须计入清单总量')
+  assert.match(plan.body.notDeleted.join(' '), /\.study\.json/, 'notDeleted 必须明说学习档案文件的去向（会话历史不删、档案文件随文献进回收站）')
+})
+
+test('R5 paintPage 的 token 守卫（t4-O5）：TextLayer 期间被抢占不得写回旧几何', () => {
+  const R = loadReader()
+  const T = R.t
+  T.setVariant(null)
+  T.setZoom(1)
+  T.setEq({
+    source: 'mineru-local', reason: null, bboxSpace: 'normalized-1000',
+    equations: [{ id: 's1', index: 1, page: 2, latex: 'x', bbox: [100, 100, 300, 200] }],
+  })
+  const viewport = { width: 612, height: 792, scale: 1 }
+  const page = { render: () => ({ promise: Promise.resolve() }), getTextContent: async () => ({ items: [] }) }
+  return (async () => {
+    const div = T.makePageNode(2, viewport)
+    // ① 完全过期的 token：早早返回，绝不铺层
+    await T.paintPage(page, div, viewport, T.token() - 1)
+    assert.equal(T.EQ_BY_PAGE.get(2), undefined, '过期 token 不得写入几何')
+    // ② 真场景（t3-F1/t4-O5）：render/getTextContent 都通过后，TextLayer.render() 期间被
+    //    另一路渲染抢占（token 推进）——收尾若照写，就会把这一档（旧）缩放的几何写回
+    //    EQ_BY_PAGE，命中随之整体偏移。这里用钩子在同一 await 里推进 token 复现。
+    R.setTextLayerHook(() => T.bumpToken())
+    await T.paintPage(page, div, viewport, T.token()) // 传入时**有效**，在 TextLayer 期间才失效
+    assert.equal(T.EQ_BY_PAGE.get(2), undefined, 'TextLayer 期间被抢占 → 不得写几何（O5）')
+    // ③ 无抢占：正常铺层
+    R.setTextLayerHook(null)
+    await T.paintPage(page, div, viewport, T.token())
+    assert.equal(T.EQ_BY_PAGE.get(2)?.length, 1, '无抢占时必须正常铺层')
+  })()
+})
+
+test('O 组（t4 评审 O1/O2/O4/O6）：死键回接、UI 走规范名、注释改正、被占用 errno→409、trashDir 属契约字段', () => {
+  const client = readFileSync(join(ROOT, '..', 'lib', 'client.js'), 'utf8')
+  const host = readFileSync(join(ROOT, '..', 'src', 'host.ts'), 'utf8')
+  const lm = readFileSync(join(ROOT, '..', 'src', 'library-manage.ts'), 'utf8')
+  // O1：delPaper/delTopic 必须真的被 UI 引用（契约冻结键不能是死键）
+  assert.match(client, /t\('delPaper'\)/, 'delPaper 必须接回 UI（行内 🗑 的 tooltip）')
+  assert.match(client, /t\('delTopic'\)/, 'delTopic 必须被引用')
+  assert.match(client, /契约冻结键/, '未被阅读器消费的 eq* 键必须有用途注释')
+  // O2：删除也走上游规范名（重命名本来就是规范名）；别名只在服务端保留
+  assert.match(client, /'\/library\/delete-paper'/, '删除文献必须走规范名 /library/delete-paper')
+  assert.match(client, /'\/library\/delete-topic'/, '删除专题必须走规范名 /library/delete-topic')
+  assert.ok(!/api\('\/library\/paper\/delete'/.test(client), 'UI 不应再打别名族')
+  assert.ok(!/api\('\/library\/topic\/delete'/.test(client), 'UI 不应再打别名族')
+  assert.ok(!/体 \{topic, confirmName\}/.test(host), 'host.ts 的过时注释必须改正（上游 UI 只发 {topic}）')
+  assert.match(host, /confirmName === topic\|name/, '注释必须说明加固语义额外要求 confirmName')
+  // O6：被占用 errno → 409（上游 fsError 的语义）；判据独立可单测（Linux 造不出真实 EBUSY）
+  assert.match(host, /isBusyErrno\(/, 'manageFail 必须用 isBusyErrno 把 EBUSY/EPERM 补回 409')
+  assert.match(host, /json\(res, 409, \{ error: '文件被占用/, '409 文案必须是「文件被占用…关闭后重试」')
+  assert.equal(isBusyErrno('EBUSY'), true)
+  assert.equal(isBusyErrno('EPERM'), true)
+  assert.equal(isBusyErrno('EACCES'), false)
+  assert.equal(isBusyErrno(undefined), false)
+  // O4：trashDir 是契约内的成功响应字段（S15 只约束错误响应）
+  assert.match(lm, /trashDir 字段/, 'trashDir 必须被明确记为契约字段并说明 S15 边界')
+  assert.match(client, /delete-plan/, '删除清单仍来自服务端 delete-plan（我们的扩展路由，无上游对应者）')
 })
