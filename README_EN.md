@@ -11,6 +11,8 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 
 > **👉 Just want to use it?** Jump to [Install → Option 1](#install): get the official DeepSeek desktop app and add the plugin — no dev environment needed. This repository is for people who want to install the plugin themselves or hack on the code.
 
+> 💬 **QQ group: 1127244508** — questions, feature requests, and bug reports are all welcome.
+
 The agent loop, model layer, and session persistence are all handled by the dsh framework; this plugin is a thin shell composing transcription + retrieval + reader UI.
 
 **Does not modify the official UI on install** — a single "📚 Paper Reading" toggle appears at the bottom of the sidebar. Click it to enter reading mode (sidebar becomes a paper library tree), click again to restore the official workspace list:
