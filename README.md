@@ -42,7 +42,7 @@
 **DeepSeek 官方桌面端**（[deepseek.com/download](https://www.deepseek.com/download/) 下载，即 DeepSeek Harness 桌面版）：
 
 1. 安装并启动，登录 DeepSeek 账号
-2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.3.1` 安装
+2. 侧栏 → **插件** → **添加插件**，输入 `@ggboy123/dsh-paper-reader@1.3.2` 安装
 3. 装完默认**停用**：点进插件详情，打开「启用」开关
 4. **重启桌面端**（热启用状态下打开论文的链路会静默失效，重启进开机组合才正常，实测）
 
@@ -69,7 +69,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 **已装过的用户升级必须带显式版本号**——不带版本的 `add` 对已存在的依赖是 no-op（pnpm 按首次安装时记录的版本范围解析，不会追新）：
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.1
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.2
 # 重启 dsh web 生效；浏览器 Cmd+Shift+R 强刷，避免旧阅读器页面缓存
 ```
 
