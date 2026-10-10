@@ -66,12 +66,15 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 
 ### 升级
 
-**已装过的用户升级必须带显式版本号**——不带版本的 `add` 对已存在的依赖是 no-op（pnpm 按首次安装时记录的版本范围解析，不会追新）：
+**升级用 `@latest`（或显式版本号）**——不带任何版本/tag 的 `add` 对已装过的依赖是 no-op（dsh 的插件管理器按首次记录的版本处理，不追新，实测），所以要么写死版本、要么用 tag：
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.4
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # 永远装最新
+# dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.4  # 或钉住具体版本
 # 重启 dsh web 生效；浏览器 Cmd+Shift+R 强刷，避免旧阅读器页面缓存
 ```
+
+桌面端「添加插件」输入框同样填 `@ggboy123/dsh-paper-reader@latest` 即可。
 
 > **桌面端升级后插件开关会回到停用**（实测）：侧栏 → 插件 → 打开 `@ggboy123/dsh-paper-reader` 的「启用」开关 → 重启桌面端。不打开时的症状很有迷惑性：文献树还在（浏览器侧缓存活着）但点论文没反应（宿主侧已下线），看起来像坏了，其实只是没启用。
 
