@@ -205,9 +205,38 @@ export function stripHtmlTags(html: string): string {
 // （改命中 `Q_t`）。这是本轮验收明确选择的形态（MinerU 一律产出 `Q_{t}`，而用户/模型
 // 习惯写 `Q_t`）。
 
-/** 内部空格有正文语义、必须成组原样保留的命令（`\text` 一族 + 盒子/文字命令）。 */
+/**
+ * 「内容按正文排版、空格有语义」的命令白名单（**精确全名**匹配 —— F-R1：
+ * 前缀匹配会把 `\textwidth` / `\textstyle` 这类非正文命令也卷进来）。
+ * 注：`\textbf` 与白名单里的 `\textsf` / `\texttt` 同族（`\textbf{hello world}` 的空格同样是
+ * 排版语义），故一并纳入；多参数命令 `\textcolor` 见 TEXT_GROUP_COMMANDS_MULTI。
+ */
+const TEXT_GROUP_COMMANDS = new Set([
+  'text', 'textrm', 'textnormal', 'textup', 'textit', 'textbf', 'textsf', 'texttt', 'textsl', 'textsc', 'textmd',
+  'textsuperscript', 'textsubscript', 'mbox', 'hbox', 'fbox', 'operatorname', 'intertext', 'shortintertext',
+])
+
+/**
+ * 多参数命令 → **参数组个数**（F-R1 后半 + F-V2）。声明几个就保护几个，前缀里的每个参数组都保护：
+ *   `\textcolor{red}{hello world}`（2：颜色 + 正文）、`\colorbox{yellow}{hello world}`（2）、
+ *   `\fcolorbox{red}{blue}{keep me}`（3：边框色 + 底色 + 正文）。
+ * 未列入此表的命令（含所有单组命令）按 1 组处理；**命令之后不属于它参数的独立组不受保护**：
+ * `\textcolor{red}{hello world} {normal text}` 里的 `{normal text}` 是独立组，照常压缩空格。
+ */
+const TEXT_GROUP_COMMANDS_MULTI: ReadonlyMap<string, number> = new Map([
+  ['textcolor', 2],
+  ['colorbox', 2],
+  ['fcolorbox', 3],
+])
+
+/** 该命令的参数组是否需要原样保留内部空白。 */
 function keepsInnerSpaces(cmd: string): boolean {
-  return cmd.startsWith('text') || cmd === 'mbox' || cmd === 'hbox' || cmd === 'operatorname' || cmd === 'intertext' || cmd === 'shortintertext'
+  return TEXT_GROUP_COMMANDS.has(cmd) || TEXT_GROUP_COMMANDS_MULTI.has(cmd)
+}
+
+/** 该命令要保护的连续参数组个数（多参数命令按声明个数，其余 1 组）。 */
+function argGroupCount(cmd: string): number {
+  return TEXT_GROUP_COMMANDS_MULTI.get(cmd) ?? 1
 }
 
 function isAsciiLetter(ch: string | undefined): boolean {
@@ -265,6 +294,45 @@ function bracedGroupAfter(src: string, k: number): { start: number; end: number 
 }
 
 /**
+ * 读取 `\cmd` 之后需要**原样保留**的花括号组：返回 `{ start: 第一组 '{' 的下标, end: 最后一组闭合后的下标 }`。
+ * 读取的组数 = `argGroupCount(cmd)`：单组命令 1 组，多参数命令按声明个数
+ * （`\textcolor` 2 组、`\colorbox` 2 组、`\fcolorbox` 3 组 —— 含第三组正文，F-V2）。
+ * 只吃「连续」的参数组：命令之后的独立组（`\textcolor{red}{hi} {normal text}` 的后一组）不在此列，
+ * 由调用方按普通内容处理。
+ * `end === -1` 表示某组不配对（调用方随即原样保留剩余内容）；后面根本不是 `{` 则返回 null。
+ */
+function verbatimGroups(src: string, k: number, cmd: string): { start: number; end: number } | null {
+  const want = argGroupCount(cmd)
+  let cursor = k
+  let start = -1
+  let end = -1
+  for (let g = 0; g < want; g++) {
+    const grp = bracedGroupAfter(src, cursor)
+    if (!grp) break
+    if (grp.end === -1) return { start: start === -1 ? grp.start : start, end: -1 }
+    if (start === -1) start = grp.start
+    end = grp.end
+    cursor = grp.end
+  }
+  return start === -1 ? null : { start, end }
+}
+
+/**
+ * F-R2：定界符扫描时**跳过 `\text{...}` 一族组的内部**——组里的 `$` 是正文内容，不是定界符
+ * （否则 `$\text{costs $5}$` 会被内层 `$` 切断）。返回跳过后的下标；无需跳过时原样返回 i。
+ */
+function skipProtectedGroups(text: string, i: number): number {
+  if (text[i] !== '\\' || isEscapedAt(text, i)) return i
+  if (!isAsciiLetter(text[i + 1])) return i
+  let k = i + 1
+  while (k < text.length && isAsciiLetter(text[k])) k++
+  const cmd = text.slice(i + 1, k)
+  if (!keepsInnerSpaces(cmd)) return i
+  const grp = verbatimGroups(text, k, cmd)
+  return grp && grp.end !== -1 ? grp.end : i
+}
+
+/**
  * 压缩**已经是数学正文**的字符串里的空白（调用方负责界定区间）。
  * 唯一保留的空白：控制字与紧跟其后的字母之间留一个空格——`\times K` 若压成 `\timesK`
  * 就成了未定义命令（`\mathbb { R } ^ { K \times K }` → `\mathbb{R}^{K\times K}`，与验收一致）。
@@ -290,8 +358,8 @@ function compressMathBody(src: string): string {
         while (k < src.length && isAsciiLetter(src[k])) k++
         const cmd = src.slice(i + 1, k)
         if (keepsInnerSpaces(cmd)) {
-          // `\text` 一族：找到 `{` 就把整个花括号组逐字节搬走
-          const grp = bracedGroupAfter(src, k)
+          // `\text` 一族：整组（多参数命令是连续多组）逐字节搬走
+          const grp = verbatimGroups(src, k, cmd)
           if (grp) {
             if (grp.end !== -1) {
               out += '\\' + cmd + src.slice(grp.start, grp.end)
@@ -369,8 +437,8 @@ function normalizeMathBody(src: string): string {
         while (k < src.length && isAsciiLetter(src[k])) k++
         const cmd = src.slice(i + 1, k)
         if (keepsInnerSpaces(cmd)) {
-          // `\text` 一族整组原样搬走（组内的 `_`/`^` 是正文，不归一化）
-          const grp = bracedGroupAfter(src, k)
+          // `\text` 一族整组（多参数命令为连续多组）原样搬走（组内的 `_`/`^` 是正文，不归一化）
+          const grp = verbatimGroups(src, k, cmd)
           if (grp) {
             if (grp.end !== -1) {
               out += '\\' + cmd + src.slice(grp.start, grp.end)
@@ -399,6 +467,9 @@ function findInlineMathEnd(text: string, open: number): number {
   // 开定界符之后必须紧贴非空白（`\in$ $\mathbb{...}$` 里第一个 `$` 因此被排除，价格 `$5` 同理）
   if (isSpaceChar(text[open + 1])) return -1
   for (let j = open + 1; j < text.length; j++) {
+    // F-R2：`\text{...}` 组内部的 `$` 不算定界符，整组跳过
+    const skip = skipProtectedGroups(text, j)
+    if (skip > j) { j = skip - 1; continue }
     if (text[j] !== '$' || isEscapedAt(text, j)) continue
     // 闭定界符之前必须紧贴非空白；否则这个 `$` 更像「钱/变量」的第二个符号，整段放弃
     if (isSpaceChar(text[j - 1])) return -1
@@ -410,6 +481,9 @@ function findInlineMathEnd(text: string, open: number): number {
 /** 独立区间 `$$...$$`（MinerU 形如 `$$\n...\n$$`）：返回闭定界符之后的下标；失败返回 -1。 */
 function findDisplayMathEnd(text: string, open: number): number {
   for (let j = open + 2; j < text.length - 1; j++) {
+    // F-R2：同上，跳过 `\text{...}` 一族组的内部
+    const skip = skipProtectedGroups(text, j)
+    if (skip > j) { j = skip - 1; continue }
     if (text[j] !== '$' || text[j + 1] !== '$' || isEscapedAt(text, j)) continue
     return hasBlankLine(text.slice(open + 2, j)) ? -1 : j + 2
   }
@@ -459,6 +533,15 @@ export function compressMathSpaces(text: string): string {
  */
 export function normalizeMathBraces(text: string): string {
   return mapMathRegions(text, normalizeMathBody)
+}
+
+/**
+ * 折叠项 1（查询侧归一化）：把**同一套** token 级规则作用在裸文本上（不带 `$` 区间语义），
+ * 供 `search_paper` 归一化用户查询（`Q_{t}` → `Q_t`），保证与投影侧**逐字符同规则**
+ * （同一个 normalizeMathBody，不存在两套实现漂移的可能）。空白不动。
+ */
+export function normalizeMathTokens(text: string): string {
+  return normalizeMathBody(text)
 }
 
 function blockStr(b: MineruBlock, key: string): string | null {
