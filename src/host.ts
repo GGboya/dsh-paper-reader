@@ -17,6 +17,9 @@ import {
   renameTopic,
   resolveDataDir,
   resolvePaper,
+  resolveUploadTopic,
+  validateEntryBoundary,
+  validateEntryName,
 } from './library.ts'
 import { readTranscript, transcribePaper } from './transcribe.ts'
 import { pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
@@ -98,11 +101,29 @@ function json(res: Res, status: number, body: unknown) {
   res.end(buf)
 }
 
+/**
+ * 错误文案判别：带 `.code` 的 Node errno 系统错误 → 固定中文文案（不回显原始错误，
+ * 避免把 dataDir/目标绝对路径带进响应体）；不带 `.code` 的是我们自己抛的中文业务 Error
+ * （专题不存在/已存在同名/名字不能包含… 等）→ 保留 `e.message`，用户仍能定位问题。
+ */
+function readableError(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | null)?.code
+  if (typeof code === 'string' && code) return '系统错误，请稍后重试'
+  return err instanceof Error ? err.message : String(err)
+}
+
 async function readBody(req: Req): Promise<unknown> {
   const chunks: Buffer[] = []
   for await (const c of req) chunks.push(c as Buffer)
   const raw = Buffer.concat(chunks).toString('utf8')
-  return raw ? JSON.parse(raw) : {}
+  if (!raw) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return {} // 畸形 JSON 与整包 null/非对象同待遇：路由据此给可读 400（不再 500）
+  }
+  return parsed !== null && typeof parsed === 'object' ? parsed : {}
 }
 
 /** header 元数据解码：客户端 encodeURIComponent 过（HTTP header 值不允许非 Latin-1，如中文文件名）；非字符串/未编码原样返回。 */
@@ -203,7 +224,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       workspaceCache.set(dir, workspace.workspaceId)
       return workspace.workspaceId
     } catch (err) {
-      console.warn('[dsh-paper-reader] workspace 注册失败(回退 cwd 模式):', err)
+      console.warn('[dsh-paper-reader] workspace 注册失败(回退 cwd 模式):', readableError(err))
       return undefined
     }
   }
@@ -266,14 +287,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       return
     }
 
-    // 新建专题（目录）
+    // 新建专题（目录）。校验与 rename 的 to 侧一致（validateEntryName：边界 + 命名规范），
+    // 保证「能创建的必然能删除/改名」（R12：创建/删除对称）。
     if (sub === '/api/library/topic' && req.method === 'POST') {
       const body = (await readBody(req)) as { name?: string }
-      const name = body.name?.trim()
-      if (!name || /[/\\]|\.\./.test(name)) {
-        json(res, 400, { error: '专题名不能为空，且不能包含 / \\ ..' })
-        return
-      }
+      if (typeof body.name !== 'string' || !body.name.trim()) { json(res, 400, { error: '专题名不能为空' }); return }
+      const err = validateEntryName(body.name)
+      if (err) { json(res, 400, { error: err }); return }
+      const name = body.name.trim()
       await mkdir(join(dataDir, name), { recursive: true })
       json(res, 200, { ok: true, topic: name })
       return
@@ -288,11 +309,18 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: '缺少 x-dpr-topic / x-dpr-name 头' })
         return
       }
+      // 词法层：与其余 CRUD 同强度（../ / \ 隐藏名 控制字符 超长 空串）
+      const errName = validateEntryName(topic)
+      if (errName) { json(res, 400, { error: errName }); return }
       if (!filename.toLowerCase().endsWith('.pdf')) {
         json(res, 400, { error: '只支持 PDF 文件' })
         return
       }
       const safeName = filename.replaceAll('/', '_').replaceAll('\\', '_')
+      // 文件名也做边界类校验（空/分隔符/../NUL），与删除侧对称：upload 能创建的必须能被删
+      const stem = safeName.slice(0, -4) // 去掉 .pdf
+      const errStem = validateEntryBoundary(stem)
+      if (errStem) { json(res, 400, { error: errStem }); return }
       const chunks: Buffer[] = []
       for await (const c of req) chunks.push(c as Buffer)
       const buf = Buffer.concat(chunks)
@@ -300,10 +328,16 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: '文件内容为空' })
         return
       }
-      const dir = join(dataDir, topic.trim())
-      await mkdir(dir, { recursive: true })
-      const target = join(dir, safeName)
-      await writeFile(target, buf)
+      // realpath 子路径层：拒绝「data/<topic> → 库外」符号链接逃逸写（与 CRUD 同一套 primitive）
+      let dir: string
+      try {
+        dir = resolveUploadTopic(dataDir, topic.trim())
+      } catch (err) { json(res, 400, { error: readableError(err) }); return }
+      try {
+        await mkdir(dir, { recursive: true })
+        const target = join(dir, safeName)
+        await writeFile(target, buf)
+      } catch (err) { json(res, 400, { error: readableError(err) }); return }
       json(res, 200, { ok: true, topic: topic.trim(), name: safeName.slice(0, -4), bytes: buf.length })
       return
     }
@@ -321,13 +355,33 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       if (e?.code === 'EBUSY' || e?.code === 'EPERM') {
         json(res2, 409, { error: '文件被占用（可能正在阅读器或其他程序中打开），关闭后重试' })
       } else {
-        json(res2, 400, { error: e instanceof Error ? e.message : String(err) })
+        json(res2, 400, { error: readableError(err) })
       }
+    }
+
+    /** 非法/越界名字 → 400 可读文案（词法层；realpath 子路径层在 library primitive 内兜底）。
+     *  放在 busyPapersInTopic / resolvePaper 之前，越界输入不会碰任何文件系统。返回 true 表示已响应。 */
+    const badEntry = (res: Res, raw: unknown): boolean => {
+      const err = typeof raw === 'string' ? validateEntryName(raw) : '名字不能为空'
+      if (!err) return false
+      json(res, 400, { error: err })
+      return true
+    }
+
+    /** 删除/改名-from 用：只做边界类校验（安全），不做命名规范类（长度/前导点）。
+     *  删除是对已存在文件的操作——upload 能创建的名字（前导点、超长、\x01 等）必须能删。 */
+    const badEntryBoundary = (res: Res, raw: unknown): boolean => {
+      const err = typeof raw === 'string' ? validateEntryBoundary(raw) : '名字不能为空'
+      if (!err) return false
+      json(res, 400, { error: err })
+      return true
     }
 
     if (sub === '/api/library/rename-topic' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; to?: string }
-      if (!body.topic?.trim()) { json(res, 400, { error: '缺少 topic' }); return }
+      if (typeof body.topic !== 'string' || !body.topic.trim()) { json(res, 400, { error: '缺少 topic' }); return }
+      if (badEntry(res, body.topic)) return
+      if (badEntry(res, body.to ?? '')) return
       const busy = busyPapersInTopic(body.topic.trim())
       if (busy.length) { json(res, 409, { error: `以下文献正在翻译，稍后再试：${busy.join('、')}` }); return }
       try {
@@ -340,7 +394,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
 
     if (sub === '/api/library/delete-topic' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string }
-      if (!body.topic?.trim()) { json(res, 400, { error: '缺少 topic' }); return }
+      if (typeof body.topic !== 'string' || !body.topic.trim()) { json(res, 400, { error: '缺少 topic' }); return }
+      if (badEntry(res, body.topic)) return
       const busy = busyPapersInTopic(body.topic.trim())
       if (busy.length) { json(res, 409, { error: `以下文献正在翻译，稍后再试：${busy.join('、')}` }); return }
       try {
@@ -352,7 +407,10 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
 
     if (sub === '/api/library/rename-paper' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; to?: string }
-      if (!body.topic?.trim() || !body.name?.trim()) { json(res, 400, { error: '缺少 topic / name' }); return }
+      if (typeof body.topic !== 'string' || !body.topic.trim() || typeof body.name !== 'string' || !body.name.trim()) { json(res, 400, { error: '缺少 topic / name' }); return }
+      if (badEntry(res, body.topic)) return
+      if (badEntryBoundary(res, body.name)) return
+      if (badEntry(res, body.to ?? '')) return
       let ref
       try {
         ref = resolvePaper(dataDir, { topic: body.topic.trim(), name: body.name.trim() })
@@ -368,7 +426,9 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
 
     if (sub === '/api/library/delete-paper' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string }
-      if (!body.topic?.trim() || !body.name?.trim()) { json(res, 400, { error: '缺少 topic / name' }); return }
+      if (typeof body.topic !== 'string' || !body.topic.trim() || typeof body.name !== 'string' || !body.name.trim()) { json(res, 400, { error: '缺少 topic / name' }); return }
+      if (badEntry(res, body.topic)) return
+      if (badEntryBoundary(res, body.name)) return
       let ref
       try {
         ref = resolvePaper(dataDir, { topic: body.topic.trim(), name: body.name.trim() })
@@ -711,7 +771,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         noteOrigin(req.headers.host)
         const url = new URL(req.url ?? '/', 'http://x')
         dispatch(req, res, url).catch((err) => {
-          if (!res.headersSent) json(res, 500, { error: String(err instanceof Error ? err.message : err) })
+          if (!res.headersSent) json(res, 500, { error: readableError(err) })
           else res.end()
         })
       },
