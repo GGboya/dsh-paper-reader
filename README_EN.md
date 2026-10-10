@@ -60,10 +60,11 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader
 
 ### Upgrading
 
-**Existing users must pass an explicit version** — a bare `add` is a no-op for an already-installed dependency (pnpm resolves from the range recorded at first install and won't chase newer releases):
+**Use `@latest` (or an explicit version) to upgrade** — a bare `add` without any version/tag is a no-op for an already-installed dependency (dsh's plugin manager resolves from the version recorded at first install, verified), so either pin the version or use the tag:
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.4
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # always newest
+# dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.3.4  # or pin a version
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 
