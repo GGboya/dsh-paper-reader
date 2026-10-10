@@ -9,6 +9,11 @@ import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { TranslateEndpoint } from './translate.ts'
 import { dshHome } from './library.ts'
+// 预检会把端点响应体片段拼进错误文案，必须先脱敏（否则端点回显 Authorization 时 key 会泄露）。
+// 这里复用 MinerU 客户端里已经过三轮评审的 sanitizeDetail（含 URL 编码 / JSON 转义 / 短 key
+// 词边界处理）。mineru.ts 运行时只 import node:zlib（对 mineru-config.ts 是 type-only import），
+// 所以 translate-config → mineru 是单向依赖，**不会形成运行时循环**。
+import { sanitizeDetail } from './mineru.ts'
 
 /** 端点当前值的来源：file=UI 里填的 / profile=部署方 YAML / none=都没配全 */
 export type EndpointSource = 'file' | 'profile' | 'none'
@@ -110,10 +115,11 @@ export async function testTranslateEndpoint(ep: TranslateEndpoint): Promise<{ ok
         const data = JSON.parse(text) as { choices?: unknown }
         if (Array.isArray(data.choices)) return { ok: true }
       } catch { /* 非 JSON 也算失败，走下面报 body */ }
-      return { ok: false, detail: `HTTP 200 但响应不是补全结果：${text.slice(0, 200)}（多半是端点路径不对，如智谱应为 /api/paas/v4）` }
+      // 响应体可能回显 Authorization / 错误页：先按本次 key 脱敏再截断展示（保留排查价值）
+      return { ok: false, detail: `HTTP 200 但响应不是补全结果：${sanitizeDetail(text.slice(0, 200), apiKey)}（多半是端点路径不对，如智谱应为 /api/paas/v4）` }
     }
     const text = (await r.text().catch(() => '')).slice(0, 200)
-    return { ok: false, detail: `HTTP ${r.status}${text ? ' ' + text : ''}` }
+    return { ok: false, detail: `HTTP ${r.status}${text ? ' ' + sanitizeDetail(text, apiKey) : ''}` }
   } catch (err) {
     // Node 的 fetch 把真实原因（ECONNREFUSED / 证书错误 / 超时）塞在 cause 里，
     // 只报 "fetch failed" 对用户毫无帮助
