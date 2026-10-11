@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { normalizeEol, extractModuleScript } from './reader-script.mjs' // 行尾无关的 <script> 提取（Windows CRLF 检出）
 import { caseInsensitiveFs as caseInsensitiveFsOf, isTrashRelPath } from './fs-probe.mjs'
 import vm from 'node:vm'
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
@@ -203,8 +204,9 @@ function matches(el, sel) {
   return true
 }
 
-const READER_HTML = readFileSync(join(REPO, 'reader', 'index.html'), 'utf8')
-const SCRIPT_SRC = READER_HTML.match(/<script>\n([\s\S]*)\n<\/script>/)[1]
+// 行尾归一化后再取脚本（Windows 检出是 CRLF）——见 test/reader-script.mjs 的说明。
+const READER_HTML = normalizeEol(readFileSync(join(REPO, 'reader', 'index.html'), 'utf8'))
+const SCRIPT_SRC = extractModuleScript(READER_HTML, { where: 'reader/index.html' })
 
 /** 用真实阅读器脚本 + 可观测的 DOM stub 起一个实例。 */
 function loadReader() {
