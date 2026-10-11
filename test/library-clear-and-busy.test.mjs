@@ -105,6 +105,8 @@ test('A1 注入 EBUSY（Windows 占用）：409 file-busy，已移动的文件�
   assert.deepEqual(snap(data), before, '失败 = 库没变（逐字节）')
   assert.ok(!existsSync(join(bundle.abs, files[0].name)), '回滚后回收站里不留该文件')
   assert.ok(existsSync(join(topicDir, files[0].name)), '回滚后文件必须回到原处')
+  // R-3：回滚干净 ⇒ 本次创建的回收站目录 best-effort 清掉（与 clearTopic 对齐），不留空 bundle
+  assert.ok(!existsSync(bundle.abs), 'R-3：回滚干净后不得残留空回收站目录')
 })
 
 test('A2 注入 EPERM（同样算占用）：也是 409 file-busy（不是 500）', () => {
@@ -685,11 +687,44 @@ test('D1 【F-B】失败文案纯函数：点名未回滚文件 + 给出回收�
   assert.ok(!noRel.recovery.includes('/tmp/'), '客户端文案不得出现服务端绝对路径')
 })
 
-test('D2 【F-B】四个失败入口（删文献/删专题/清空/改名）都必须走 clearFailureText（退回旧的罐头文案 → 本用例红）', () => {
+/**
+ * 取「包含 idx 处代码的最内层花括号块」的原文（按 `{`/`}` 配对，不依赖缩进/注释长度）。
+ * 用于结构性断言「这个失败分支真的把恢复指引拼进了 toast」——只 grep 标识符或按固定字符数截窗
+ * 都能被「删掉拼接但保留注释」绕过（评审 R-1）。
+ */
+function enclosingBlock(src, idx) {
+  let depth = 0
+  let start = -1
+  for (let i = idx; i >= 0; i--) {
+    const c = src[i]
+    if (c === '}') depth++
+    else if (c === '{') { if (depth === 0) { start = i; break } depth-- }
+  }
+  assert.ok(start >= 0, `索引 ${idx} 处必须位于某个代码块内`)
+  depth = 0
+  for (let i = start; i < src.length; i++) {
+    const c = src[i]
+    if (c === '{') depth++
+    else if (c === '}') { depth--; if (depth === 0) return src.slice(start, i + 1) }
+  }
+  assert.fail('代码块未闭合')
+}
+
+test('D2 【F-B】四个失败入口都必须走 clearFailureText，且每个入口都真的把恢复指引拼进 toast（结构性断言，不依赖注释长度）', () => {
   const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
-  const calls = (src.match(/clearFailureText\((e|err), t\)/g) || []).length
-  assert.ok(calls >= 4, `删除/清空/改名共 4 条失败路径都必须调用它（现有 ${calls} 处）——否则用户只会看到罐头文案`)
-  assert.ok(!/catch \(e\) \{[\s\S]{0,80}errText\(e\), 8000/.test(src), 'clear 的 catch 不得退回「只 toast errText」的旧行为')
+  // 只数**调用**：排除 `function clearFailureText(err, t)` 这个定义行（旧正则 `clearFailureText((e|err), t)`
+  // 会把定义行也算一处 —— 删掉一个真实调用点仍然是 4，护栏形同虚设；评审 R-1 的变异正是这么绕过的）。
+  const all = [...src.matchAll(/clearFailureText\((?:e|err), t\)/g)]
+  const callSites = all.filter((m) => !/function\s*$/.test(src.slice(Math.max(0, m.index - 32), m.index)))
+  assert.equal(all.length, callSites.length + 1, '除定义行外不应有其它匹配（否则计数口径要重核）')
+  assert.equal(callSites.length, 4, `删除/清空/改名共 4 条失败路径都必须调用它（现有 ${callSites.length} 处调用 + 1 处定义）`)
+  // 结构性：对每个调用点，用花括号配对取出**它所在的失败分支**，断言该分支同时有 toast 与 f.recovery。
+  // 这样「把 clearFailureText 调用删掉」或「调用留着但不渲染 recovery」都会红。
+  callSites.forEach((m, i) => {
+    const block = enclosingBlock(src, m.index)
+    assert.match(block, /toast\(/, `第 ${i + 1} 个入口的失败分支必须 toast（不得静默）：${block.slice(0, 160)}`)
+    assert.match(block, /f\.recovery/, `第 ${i + 1} 个入口的 toast 必须拼接 f.recovery（R-1：删掉拼接即红）：${block.slice(0, 160)}`)
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

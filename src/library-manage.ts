@@ -374,6 +374,11 @@ export function moveToTrash(
           rollbackFailed.push(name)
         }
       }
+      // R-3：回滚干净时把本次创建的回收站目录 best-effort 清掉（与 clearTopic 的做法对齐），
+      // 不给用户留一个空的「回收站记录」；清不掉（非空/权限等）也不影响错误上报。
+      if (rollbackFailed.length === 0) {
+        try { rmdirSync(bundle.abs) } catch { /* 非空或权限问题：留着无害 */ }
+      }
       const inTrash = files.filter((x) => rollbackFailed.includes(x.name)).map((x) => x.name)
       const remaining = files.filter((x) => !inTrash.includes(x.name)).map((x) => x.name)
       const failure: MoveFailure = {
