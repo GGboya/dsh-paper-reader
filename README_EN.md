@@ -29,14 +29,14 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 - 💬 **Native chat companion**: clicking a paper opens its own native dsh conversation (streaming / tool cards / usage bars are all official UI); the 🕐 dropdown in the chat header replays **conversation history** with real titles and dates; ＋ starts a new conversation
 - 🔗 **Sessions bound to papers**: the session id encodes the paper's identity, so tool calls auto-locate the current paper — just ask questions in the input box without naming the paper; every answer cites page numbers
 - 🤖 **Dedicated agent preset "Paper Tutor"**: paper sessions automatically use a tutor-style preset — like a teacher guiding your reading: builds a step-by-step reading plan (each step with page numbers and reflection questions) → guides section by section, comments on your answers → quizzes you and grades each answer → scores and weak points are recorded in a `<paper>.study.json` study profile that accumulates across sessions; quick Q&A (select-to-ask) gets a direct answer, no lecture
-- 📖 **Centered PDF reader**: the paper sits in the middle (PDF.js zoom / Retina rendering / text-layer selection / fit-width mode), its native chat on the right — implemented via visual swapping, so column dragging/collapsing stays native dsh behavior; closing the PDF tab restores the official layout
+- 📖 **Centered PDF reader**: the paper sits in the middle (PDF.js zoom / Retina rendering / text-layer selection / fit-width mode / **scroll ↔ single-page paged mode** — `‹ ›` page buttons, jump by typing a page number, ← → / PageUp / PageDown / Space / Home / End keyboard paging), its native chat on the right — implemented via visual swapping, so column dragging/collapsing stays native dsh behavior; closing the PDF tab restores the official layout; the status bar shows the paper's full PDF path (click to copy)
 - 💬 **Select-to-ask**: select text in the reader → a question box pops up → injects into the current session, answered live in the native chat
 - 📍 **Citation jumping**: "Page N" in an answer is clickable — smooth-scrolls back to that PDF page and flashes the cited passage
-- 🀄 **Chinese/English toggle**: the "中" button in the top bar switches original ↔ full Chinese; if no translation exists, one click generates it in the background (babeldoc) — **no Python preinstall required**: first use auto-downloads uv + managed Python + babeldoc (macOS / Linux / Windows, a few minutes), everything stays in the user directory
+- 🀄 **Chinese/English toggle + export**: the "中" button in the top bar switches original ↔ full Chinese; if no translation exists, one click generates it in the background (babeldoc) — **no Python preinstall required**: first use auto-downloads uv + managed Python + babeldoc (macOS / Linux / Windows, a few minutes), everything stays in the user directory; the ⤓ button in the top bar **downloads the version you are looking at** (original / full Chinese / bilingual PDF)
 - 🔍 **PDF transcription + search**: local extraction (pdf.js, pure Node, no Python), header/footer stripping / ligature / hyphenation repair / paragraph reflow, with a page-offset table; compatible with pdfqa's `data/` cache layout
 - 🧲 **Optional MinerU parsing backend**: for scanned PDFs / complex layouts / tables and formulas you can switch to MinerU (local API or mineru.net v4 cloud); output is the same page-indexed cache. Off by default — with no configuration the behavior is identical to previous versions (see "MinerU parsing backend" below)
 - 🧮 **Click-to-cite formulas** (v1.5.0): formulas in the PDF text layer come out as garbage (`𝑧𝑧1 𝑥𝑥𝑡𝑡`-style duplicated glyphs), so selecting them is useless; now you **click a formula in the PDF** and cite the **LaTeX** MinerU recognized (e.g. `$$\pi(\mathbf{s}_t)$$`), which enters the session through the existing select-to-ask path. **Requires the paper to have been parsed by MinerU first** (see "Formula citing and library management" below)
-- 🗂️ **Library management: delete & rename** (v1.5.0): topic rows and paper rows in the sidebar tree gained hover `✎` (rename) / `🗑` (delete) buttons — rename topic/paper, delete paper/topic, both in in-page portal dialogs (Electron has no window.prompt/confirm). Deletion is **destructive**: artifacts are moved into a trash folder inside the library (`data/.trash/`, recoverable), behind a confirmation dialog and server-side preconditions (read "What deletion does" below)
+- 🗂️ **Library management: delete & rename** (v1.5.0): topic rows and paper rows in the sidebar tree gained hover `✎` (rename) / `🗑` (delete) buttons — rename topic/paper, delete paper/topic, both in in-page portal dialogs (Electron has no window.prompt/confirm). Deletion is **destructive**: **a single click on `🗑`** opens a confirmation dialog whose file list **comes from the server** (`/api/library/paper/delete-plan` — the front end never assembles it); artifacts are moved into a trash folder inside the library (`data/.trash/`, recoverable), behind server-side preconditions (read "What deletion does" below)
 
 ## Formula citing and library management (v1.5.0)
 
@@ -60,7 +60,7 @@ Both **topic rows** and **paper rows** in the sidebar library tree show `✎` (r
 | Action | Behaviour |
 | --- | --- |
 | Rename topic / paper | Renames all same-stem artifacts and translation variants together. **Note**: companion session ids embed "topic/paper", so past conversations are kept but no longer listed under the renamed paper (the dialog says so) |
-| Delete paper | A confirmation dialog lists every file and its size → on confirm the files are **moved to the trash** |
+| Delete paper | **One click on `🗑`** → a confirmation dialog lists every file **returned by the server** and its size → on confirm the files are **moved to the trash** |
 | Delete topic | **Only empty topics** (a topic that still has papers is rejected and asks you to delete them one by one); requires typing the topic name to confirm |
 
 **What deletion does (important)**:
@@ -236,12 +236,16 @@ touches embeddings, so transcription speed and failure surface are unaffected.
 > Verified on official desktop V0.2.0-rc.2 (bundled dsh 0.2.0-rc.2, macOS arm64): library tree, new topic, PDF upload, PDF reader, native companion chat, history/new-chat buttons all work.
 > Requires >= 1.2.0 — older versions are denied by the 0.2.x runtime's peer-compatibility check (shown as an error in the plugin list).
 
-> The former PaperReader desktop app (a preinstalled bundle built on the community DSH Desktop) is **no longer maintained** — everything has converged onto the official desktop + plugin path; existing users please migrate to this option.
+**Gotchas (all hit in practice)**:
+
+- **An upgrade resets the plugin toggle to disabled**: Sidebar → Plugins → flip **Enable** → restart. The symptom is misleading — the library tree is still there but clicking a paper does nothing (the browser-side cache is alive while the host side is offline). It is not an install problem, it is the toggle.
+- **Always add with `@latest`**: a bare `add` without a version is a no-op for an already-installed plugin (dsh's plugin manager resolves from the version recorded at first install, so it never follows new releases)
+- The former PaperReader desktop app (a preinstalled bundle built on the community DSH Desktop) is **no longer maintained**; migrate to the official desktop + plugin path above
 
 ### Option 2: CLI dsh (developers)
 
 ```bash
-dsh plugin --profile web add @ggboy123/dsh-paper-reader
+dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest
 ```
 
 > The package lives under the `@ggboy123` scope: the bare name `dsh-paper-reader` is taken by a different plugin (a one-shot "feed a paper, get a report" analyzer — different positioning from this plugin's "reader + conversational companion").
@@ -291,9 +295,24 @@ The library directory defaults to `~/.dsh-paper-reader/data`; override it in the
 > Translation endpoint: **prefer filling it in the reader UI** (click "中" — a form pops up if unset — or ⚙). The connection is tested before saving; takes effect without a restart.
 > The `translate` config above falls back to a **deployer-side default**, effective only when the UI is unset. babeldoc only speaks the OpenAI protocol — Anthropic-protocol endpoints (e.g. `api.kimi.com/coding/`) can't be used directly.
 
-> Translation engine **zero preinstall**: when babeldoc is missing, it auto-installs via the uv chain — standalone uv binary (GitHub Releases API download + sha256 verification) → uv-managed Python 3.12 → `uv pip install babeldoc`, landing in `~/.dsh/.dsh-paper-reader/bin/` and a sibling `.venv-pdf2zh/`, never touching system Python. Existing uv / babeldoc installs (including pdfqa's `.venv-pdf2zh`) are reused. Windows auto-install is not supported yet — install uv manually and retry.
+> Translation engine **zero preinstall**: when babeldoc is missing, it auto-installs via the uv chain — standalone uv binary (GitHub Releases API download + sha256 verification) → uv-managed Python 3.12 → `uv pip install babeldoc`, landing in `~/.dsh/.dsh-paper-reader/bin/` and a sibling `.venv-pdf2zh/`, never touching system Python. Existing uv / babeldoc installs (including pdfqa's `.venv-pdf2zh`) are reused. macOS / Linux / **Windows** all support auto-install (Windows gets uv's zip archive, unpacked with the `tar` that ships with Win10 1803+).
 
 > Reading mode is **opt-in**: by default `sidebar.workspaces` is not registered (official workspace/session list untouched); the "📚 Paper Reading" toggle at the bottom of the sidebar takes over only when clicked, and restores on second click; the mode choice is remembered in localStorage. Open PDF tabs and companion sessions are unaffected when leaving the mode.
+
+### Translation-engine smoke test (Windows dependency integrity)
+
+The most common Windows failure is the translation engine not installing (antivirus blocking uv, a truncated download, a broken venv). The install logic in `src/babeldoc-install.ts` is a pure Node module (no Cordis/Electron dependency), and a GitHub Actions workflow runs the smoke test on a **pristine machine**, so no local Windows box is needed:
+
+```bash
+pnpm build
+pnpm smoke:engine clean          # full first-time install
+pnpm smoke:engine managed-uv     # force the plugin-managed uv download (sha256 path)
+pnpm smoke:engine pip-fallback   # force pip + domestic mirror fallback channel
+pnpm smoke:engine repair         # break the venv (drop pymupdf), verify self-check → auto-repair
+pnpm smoke:engine translate      # start a local mock OpenAI endpoint and run the real babeldoc pipeline
+```
+
+CI (`.github/workflows/engine-smoke.yml`): `windows-latest` runs all four scenarios plus translate-e2e; `macos-latest`/`ubuntu-latest` run `clean` as a regression guard. Triggered by pushes that touch install/translate code, plus a weekly schedule (uv/PyPI change even when our code does not). Two test hooks: `DSH_PR_MANAGED_UV_ONLY=1` (skip the system uv lookup) and `DSH_PR_FORCE_PIP_CHANNEL=1` (skip the uv package channel).
 
 ## Architecture
 
@@ -312,6 +331,8 @@ src/
   translate.ts  pure functions: babeldoc invocation (Chinese / bilingual PDF generation)
   babeldoc-install.ts  pure functions: auto-install babeldoc without a Python env (uv → managed Python → venv)
   translate-config.ts  pure functions: translation endpoint config I/O (0600) + pre-save connection check
+  rerank.ts     pure functions: search_paper semantic rerank (TypeSafe/Jev; falls back to keyword ranking without credentials)
+  typesafe-config.ts  pure functions: TypeSafe endpoint config I/O (same conventions as the translate config)
   preset.ts     pure functions: installs the bundled agent preset into $DSH_HOME/.agent-presets/
 presets/paper-reader/  the "Paper Tutor" agent preset (full persona prompt + compaction)
 reader/index.html      the reader page (pdf.js, independent of the React host, iframe-carried)
