@@ -20,8 +20,9 @@ import {
   rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO = join(ROOT, '..')
@@ -33,8 +34,8 @@ const dist = (m) => join(REPO, 'dist', m)
 const PRE_FIX_REF = 'a574288'
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t11-home-'))
-const L = await import(dist('library.js'))
-const { registerRoutes } = await import(dist('host.js'))
+const L = await import(pathToFileURL(dist('library.js')).href)
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
 // ── 真实文献库指纹：证明本次验证一个字节都没碰它 ────────────────────────────
 const REAL_LIB = join(homedir(), '.dsh-paper-reader', 'data')
@@ -79,7 +80,7 @@ function workspace() {
 function snap(dir, base = dir, out = {}) {
   for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const p = join(dir, e.name)
-    const rel = relative(base, p)
+    const rel = relative(base, p).split(sep).join('/')
     if (e.isSymbolicLink()) out[rel] = 'symlink->' + readlinkSync(p)
     else if (e.isDirectory()) { out[rel] = '[dir]'; snap(p, base, out) }
     else out[rel] = readFileSync(p, 'utf8')
@@ -200,7 +201,7 @@ test(`V1(漏洞真实) 用上游基线 ${PRE_FIX_REF} 的 library.ts 复现三�
       + `把它编译到 .probe/prefix-verify 后复现三条逃逸。浅克隆/无 .git 时取不到该 commit，请补齐历史（git fetch --unshallow）后重跑。`)
     return
   }
-  const PRE = await import(PREFIX_JS)
+  const PRE = await import(pathToFileURL(PREFIX_JS).href)
   const log = []
   t.diagnostic(`修复前产物来源=${PRE_FIX_REF}（源内容 sha256=${prefixSrcHash}，无 realpathSync 的漏洞版）`)
 
@@ -250,7 +251,7 @@ test('V2(漏洞真实·路由层) 修复前的 host 端到端：4 条 CRUD 路�
       + `这样才能起一个「修复前」的 host 复现 4 条 CRUD 逃逸。浅克隆/无 .git 时取不到该 commit，请补齐历史（git fetch --unshallow）后重跑。`)
     return
   }
-  const { registerRoutes: preRegister } = await import(preHost)
+  const { registerRoutes: preRegister } = await import(pathToFileURL(preHost).href)
   const log = []
   const cases = [
     ['delete-topic', { topic: '../sentinel' }, (w) => ({ sentinelGone: !existsSync(w.sentinel) })],
@@ -414,7 +415,7 @@ test('V5 空白别名（trim 语义）：越界输入被拒；纯空白是「合
 
 test('V6 库内符号链接专题 → 库外：词法层放行、realpath 层拒绝（证明双层真的存在）', () => {
   const w = tmpParent()
-  symlinkSync(w.outside, join(w.data, 'evil'))
+  symlinkSync(w.outside, join(w.data, 'evil'), 'dir')
   // 关键前提：名字本身完全合法（词法黑名单不可能挡住它）
   assert.equal(L.validateEntryName('evil'), null, '符号链接的名字必须能通过词法校验（否则本用例无法检验第二层）')
   const before = snap(w.parent)
@@ -433,8 +434,8 @@ test('V7 符号链接专题的其它形状：多跳链 / 前缀同形兄弟目�
   // ① 多跳链：data/hopB → data/hopA → 库外
   {
     const w = tmpParent()
-    symlinkSync(w.outside, join(w.data, 'hopA'))
-    symlinkSync(join(w.data, 'hopA'), join(w.data, 'hopB'))
+    symlinkSync(w.outside, join(w.data, 'hopA'), 'dir')
+    symlinkSync(join(w.data, 'hopA'), join(w.data, 'hopB'), 'dir')
     const before = snap(w.parent)
     assert.throws(() => L.deleteTopic(w.data, 'hopB'), (e) => /路径越界/.test(e.message))
     assert.deepEqual(diff(before, snap(w.parent)), [])
@@ -446,7 +447,7 @@ test('V7 符号链接专题的其它形状：多跳链 / 前缀同形兄弟目�
     const dataX = join(w.parent, 'dataX')
     mkdirSync(dataX, { recursive: true })
     writeFileSync(join(dataX, 'keep.txt'), 'DATAX-KEEP')
-    symlinkSync(dataX, join(w.data, 'evilPrefix'))
+    symlinkSync(dataX, join(w.data, 'evilPrefix'), 'dir')
     const before = snap(w.parent)
     assert.throws(() => L.deleteTopic(w.data, 'evilPrefix'), (e) => /路径越界/.test(e.message), 'dataX 不是 data 的子路径，必须拒')
     assert.deepEqual(diff(before, snap(w.parent)), [])
@@ -456,7 +457,7 @@ test('V7 符号链接专题的其它形状：多跳链 / 前缀同形兄弟目�
   // ③ 悬空符号链接 → 可读的「专题不存在」，不崩
   {
     const w = tmpParent()
-    symlinkSync(join(w.parent, 'nowhere'), join(w.data, 'dangling'))
+    symlinkSync(join(w.parent, 'nowhere'), join(w.data, 'dangling'), 'dir')
     assert.throws(() => L.deleteTopic(w.data, 'dangling'), (e) => /不存在/.test(e.message))
     rmSync(w.parent, { recursive: true, force: true })
   }
@@ -465,7 +466,7 @@ test('V7 符号链接专题的其它形状：多跳链 / 前缀同形兄弟目�
     const w = tmpParent()
     mkdirSync(join(w.data, 'realTopic'), { recursive: true })
     writeFileSync(join(w.data, 'realTopic', 'R.pdf'), 'R-PDF')
-    symlinkSync(join(w.data, 'realTopic'), join(w.data, 'alias'))
+    symlinkSync(join(w.data, 'realTopic'), join(w.data, 'alias'), 'dir')
     L.deleteTopic(w.data, 'alias')
     t.diagnostic(`库内 alias → realTopic：deleteTopic(alias) 后 realTopic 内容 = ${JSON.stringify(readdirSync(join(w.data, 'realTopic')))}（rmSync 不跟随顶层符号链接）`)
     assert.ok(!existsSync(join(w.data, 'alias')), '链接本身被删')
@@ -479,8 +480,8 @@ test('V8 符号链接文件 / 硬链接：只动链接本身，库外目标逐�
   {
     const w = tmpParent()
     rmSync(join(w.data, 'T', 'P.pdf')); rmSync(join(w.data, 'T', 'P.txt'))
-    symlinkSync(join(w.outside, 'Victim.pdf'), join(w.data, 'T', 'P.pdf'))
-    symlinkSync(join(w.outside, 'Victim.txt'), join(w.data, 'T', 'P.txt'))
+    symlinkSync(join(w.outside, 'Victim.pdf'), join(w.data, 'T', 'P.pdf'), 'file')
+    symlinkSync(join(w.outside, 'Victim.txt'), join(w.data, 'T', 'P.txt'), 'file')
     const outsideBefore = snap(w.sideName ?? w.outside)
     const deleted = L.deletePaper(w.data, 'T', 'P')
     assert.deepEqual(deleted.sort(), ['P.pdf', 'P.txt'], '只列被删的链接名')
@@ -498,7 +499,7 @@ test('V8 符号链接文件 / 硬链接：只动链接本身，库外目标逐�
     mkdirSync(join(w.outside, 'odir'), { recursive: true })
     writeFileSync(join(w.outside, 'odir', 'x.txt'), 'ODIR-X')
     rmSync(join(w.data, 'T', 'P.txt'))
-    symlinkSync(join(w.outside, 'odir'), join(w.data, 'T', 'P.txt'))
+    symlinkSync(join(w.outside, 'odir'), join(w.data, 'T', 'P.txt'), 'dir')
     const before = snap(w.parent)
     const changed = () => diff(before, snap(w.parent)).filter((x) => x.startsWith('data/T/')).sort()
     let eisdir = false
@@ -580,7 +581,7 @@ test('V9 路由层：4 条 CRUD 对越界输入一律可读 4xx（非 500），�
       }
     }
     // 主题是库外符号链接：路由自己会放行到 primitive，由 realpath 层拒绝
-    symlinkSync(w.outside, join(w.data, 'evil'))
+    symlinkSync(w.outside, join(w.data, 'evil'), 'dir')
     before2 = () => snap(w.parent)
     for (const [route, body] of [
       ['delete-topic', { topic: 'evil' }],

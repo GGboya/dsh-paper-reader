@@ -13,12 +13,13 @@ import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t7-home-'))
-const L = await import(dist('library.js'))
-const { registerRoutes } = await import(dist('host.js'))
+const L = await import(pathToFileURL(dist('library.js')).href)
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
 /** 临时工作区：parent/data（文献库，含专题 T 与文献 P）。 */
 function workspace() {
@@ -123,14 +124,14 @@ test('R14：已有丑名字（前导点/控制字符）的文献仍能被改名�
   const { srv, postRaw, postJson } = await boot(w)
   const pdf = Buffer.from('X'.repeat(200))
   try {
-    // 上传两个「丑名字」文献：前导点 + 非 NUL 控制字符
-    const ugly = ['.hidden.pdf', 'a\u0001b.pdf']
+    // 上传两个「丑名字」文献：前导点 + 非 NUL 控制字符（\u0001 在 Windows 路径层不可落盘，unix 专属）
+    const ugly = [...(process.platform === 'win32' ? [] : ['a\u0001b.pdf']), '.hidden.pdf']
     for (const n of ugly) {
       const up = await postRaw('/api/library/upload', pdf, { 'x-dpr-topic': 'T', 'x-dpr-name': encodeURIComponent(n) })
       assert.equal(up.status, 200, `upload ${JSON.stringify(n)} 应 200：${up.status} ${up.txt}`)
     }
     // 逐个改名：from 是丑名字（boundary 放行），to 是正常名字
-    const pairs = [['.hidden', 'HiddenRenamed'], ['a\u0001b', 'CtrlRenamed']]
+    const pairs = [...(process.platform === 'win32' ? [] : [['a\u0001b', 'CtrlRenamed']]), ['.hidden', 'HiddenRenamed']]
     for (const [from, to] of pairs) {
       const r = await postJson('/api/library/rename-paper', { topic: 'T', name: from, to })
       assert.equal(r.status, 200, `rename ${JSON.stringify(from)} → ${to} 应 200：${r.status} ${r.txt}`)

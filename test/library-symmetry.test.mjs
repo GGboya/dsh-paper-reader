@@ -15,12 +15,13 @@ import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t5-home-'))
-const L = await import(dist('library.js'))
-const { registerRoutes } = await import(dist('host.js'))
+const L = await import(pathToFileURL(dist('library.js')).href)
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
 /** 临时工作区：parent/data（文献库，含专题 T 与文献 P）。 */
 function workspace() {
@@ -71,7 +72,9 @@ test('R7：upload 能创建的边界名字（控制字符/前导点/超长/空�
   const { srv, postRaw, postJson } = await boot(w)
   const pdf = Buffer.from('X'.repeat(200))
   const names = [
-    'a\u0001b.pdf',          // 非 NUL 控制字符
+    // Windows 的 Win32 路径层禁止 0x00-0x1F 控制字符出现在文件名里（写盘即 EINVAL），
+    // \u0001 名字只在 unix 上存在 → 平台过滤
+    ...(process.platform === 'win32' ? [] : ['a\u0001b.pdf']), // 非 NUL 控制字符
     '.hidden.pdf',           // 前导点
     'x'.repeat(200) + '.pdf',// 200 字符超长（命名规范类）
     'My Paper-2.0_final.pdf',// 空格/连字符/下划线/点
@@ -123,7 +126,8 @@ test('R7 分层证据：命名规范只在创建/改名强制，边界在创建�
 test('R7 primitive 层：deletePaper 直接删除前导点/超长/控制字符名（不依赖路由）', () => {
   const w = workspace()
   const dir = join(w.data, 'T')
-  const names = ['a\u0001b', '.hidden', 'z'.repeat(200), 'My Paper-2.0_final', '中文文献']
+  // \u0001 在 Windows 的 Win32 路径层不可落盘（同上），unix 专属用例
+  const names = [...(process.platform === 'win32' ? [] : ['a\u0001b']), '.hidden', 'z'.repeat(200), 'My Paper-2.0_final', '中文文献']
   for (const n of names) writeFileSync(join(dir, n + '.pdf'), n)
   for (const n of names) {
     const deleted = L.deletePaper(w.data, 'T', n)

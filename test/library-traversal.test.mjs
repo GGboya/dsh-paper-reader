@@ -16,12 +16,13 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t10-home-')) // 隔离 agent preset 安装，不碰真实 home
-const L = await import(dist('library.js'))
-const { registerRoutes } = await import(dist('host.js'))
+const L = await import(pathToFileURL(dist('library.js')).href)
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
 /** 递归快照：相对路径 → 内容/类型。用于证明「盘上零变化」。 */
 function snap(dir) {
@@ -87,7 +88,7 @@ test('符号链接逃逸被 realpath 层拒绝，库外零变化', () => {
   const { parent, data, sentinel } = workspace()
   writeFileSync(join(sentinel, 'Victim.pdf'), 'V1')
   writeFileSync(join(sentinel, 'Victim.txt'), 'V2')
-  symlinkSync(sentinel, join(data, 'evil')) // data/evil → 库外 sentinel
+  symlinkSync(sentinel, join(data, 'evil'), 'dir') // data/evil → 库外 sentinel
   const before = snap(parent)
   assert.throws(() => L.deleteTopic(data, 'evil'), /路径越界/, 'deleteTopic 对库外符号链接专题应拒')
   assert.throws(() => L.deletePaper(data, 'evil', 'Victim'), /路径越界/, 'deletePaper 对库外符号链接专题应拒')
