@@ -16,7 +16,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import {
-  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync,
+  cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync,
   rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -172,6 +172,10 @@ function ensurePrefixHost() {
     }
     // host.js 启动即读「包根 package.json」的版本号；写最小版本即可（避免符号链接，跨平台）
     writeFileSync(join(PREFIX_HOST_DIR, 'package.json'), JSON.stringify({ version: '0.0.0' }))
+    // 包根还必须有 `presets/`：host 启动会把自带的 agent preset 同步进 $DSH_HOME/.agent-presets/，
+    // 缺了只会打一条「安装失败（回退默认 preset）」warning（CI 日志里 4× ENOENT 正是它）。
+    // 这里既然是「一个真实的包根」的模拟，就把它一并复制过去（纯测试基建，与穿越防护无关）。
+    cpSync(join(REPO, 'presets'), join(PREFIX_HOST_DIR, 'presets'), { recursive: true })
     writeFileSync(join(PREFIX_HOST_DIR, 'tsconfig.json'), JSON.stringify({
       compilerOptions: {
         target: 'es2022', module: 'esnext', moduleResolution: 'bundler',

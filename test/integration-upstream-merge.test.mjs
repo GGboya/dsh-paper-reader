@@ -25,6 +25,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { normalizeEol, extractModuleScript } from './reader-script.mjs' // 行尾无关的 <script> 提取（Windows CRLF 检出）
 import vm from 'node:vm'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -326,8 +327,9 @@ test('P3 历史遗留的不规范专题名仍可删除；`.trash` 是保留名�
 
 /* ═══ R 组 · 翻页模式 × 公式热区（真实阅读器脚本，vm 内可观测） ═══════════════ */
 
-const READER_HTML = readFileSync(join(ROOT, '..', 'reader', 'index.html'), 'utf8')
-const SCRIPT_SRC = READER_HTML.match(/<script>\n([\s\S]*)\n<\/script>/)[1]
+// 行尾归一化后再取脚本（Windows 检出是 CRLF）——见 test/reader-script.mjs 的说明。
+const READER_HTML = normalizeEol(readFileSync(join(ROOT, '..', 'reader', 'index.html'), 'utf8'))
+const SCRIPT_SRC = extractModuleScript(READER_HTML, { where: 'reader/index.html' })
 
 /** DOM stub：让孩子节点真正连起来（paintPage 靠 firstChild/lastChild 取 canvas/textLayer）。 */
 function makeEl(tag = 'div') {

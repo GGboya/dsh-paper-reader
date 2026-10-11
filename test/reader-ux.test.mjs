@@ -20,6 +20,7 @@ import {
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { normalizeEol, extractModuleScript } from './reader-script.mjs' // 行尾无关的 <script> 提取（Windows CRLF 检出）
 import vm from 'node:vm'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -187,8 +188,10 @@ test('A4 公式索引：未知坐标空间（分量 > 1000）→ bboxSpace=page-
 
 // ── B. 阅读器几何与命中（跑 reader/index.html 里的真实脚本） ─────────────────
 
-const READER_HTML = readFileSync(join(ROOT, '..', 'reader', 'index.html'), 'utf8')
-const SCRIPT_SRC = READER_HTML.match(/<script>\n([\s\S]*)\n<\/script>/)[1]
+// 行尾归一化后再取脚本：Windows 的检出是 CRLF（core.autocrlf），按 LF 写死的正则会失配 →
+// 顶层 `.match(...)[1]` 抛 null 读属性、整个文件加载即崩（CI run 38139794817 的红点之一）。
+const READER_HTML = normalizeEol(readFileSync(join(ROOT, '..', 'reader', 'index.html'), 'utf8'))
+const SCRIPT_SRC = extractModuleScript(READER_HTML, { where: 'reader/index.html' })
 
 function makeEl() {
   return {
