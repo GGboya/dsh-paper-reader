@@ -5,9 +5,14 @@
 //      另保留同步 /file_parse 作为集成测试用冒烟入口（不进工具调用路径）。
 //   2. mineru.net v4 云端：POST /file-urls/batch → PUT 预签名 URL（不带 Content-Type）→
 //      轮询 GET /extract-results/batch/{id} → 下载 zip → 解出 full.md + *_content_list.json。
-//      ⚠️ 本机无 mineru.net token，云端序列全程【未实测】，仅按 refs/llm-for-zotero 落地 + mock 单测。
+//      ✅ pipeline 通道已于 2026-10-11 用**真实 token** 端到端实测（19 页真实论文：提交 → 轮询 → 下载 →
+//      投影 → 检索，25 条断言 0 失败、约 19s；18/18 个 equation 的 bbox/LaTeX 与本地产物逐字相同）；
+//      ⚠️ `vlm` 系列模型与配额耗尽 / 429 / zip 重试等异常路径**仍未实测**（只有 mock）。
 //
-// content_list 是 JSON 字符串，必须 JSON.parse（§2.4 实测）；块按 page_idx（0 起）聚页，
+// content_list 的**形态按通道区分**（F-J，t4 实测）：
+//   · 本地 legacy 通道：`content_list` 是 **JSON 字符串**，必须 `JSON.parse`（§2.4 实测）；
+//   · 云端 v4 通道：zip 里是 **`*_content_list.json` 数组文件**（首个非空字符是 `[`），直接 parse 文件内容。
+// 两条路径都归一成 MineruBlock[]，再按 page_idx（0 起）聚页，
 // 投影成与 pdfjs 路径同构的 .txt + .pages.json（page = page_idx + 1，1 起）。
 
 import { inflateRawSync } from 'node:zlib'
@@ -43,7 +48,7 @@ export interface MineruMeta {
 export interface MineruParseResult {
   /** md_content 原样（可为空串；本地服务端产物缺失时为 null → 这里落成空串，由上层判空）。 */
   markdown: string
-  /** JSON.parse(content_list) 的原样数组（不重排、不删字段）。 */
+  /** 归一后的块数组（本地：`JSON.parse(content_list)`；云端：`*_content_list.json` 文件内容）——不重排、不删字段。 */
   blocks: MineruBlock[]
   projection: MineruProjection
   meta: MineruMeta
@@ -653,7 +658,10 @@ export function projectContentList(blocks: MineruBlock[], warnings: string[] = [
   return { text: buf, pages, pageCount: Math.max(1, maxPage), warnings }
 }
 
-/** JSON.parse(content_list)。content_list 是 JSON 字符串（§2.4 实测），必须是数组。 */
+/**
+ * 解析**本地 legacy 通道**的 `content_list`：它是 JSON 字符串（§2.4 实测），`JSON.parse` 后必须是数组。
+ * 云端 v4 不走这里——zip 里的 `*_content_list.json` 本身就是数组文件（见 parseCloudZip）。
+ */
 export function parseContentListString(s: string | null | undefined): MineruBlock[] | null {
   if (s === null || s === undefined) return null
   let v: unknown
@@ -952,7 +960,7 @@ export function extractZipEntries(bytes: Uint8Array): ZipEntry[] {
   return entries
 }
 
-/** 取 full.md（否则任意 .md）与 *_content_list.json（否则 content_list.json）。 */
+/** 取 full.md（否则任意 .md）与 `*_content_list.json`（否则 content_list.json）——云端 v4 的后者是**数组文件**。 */
 export function pickZipMarkdown(entries: ZipEntry[]): ZipEntry | undefined {
   return (
     entries.find((e) => /(^|[\\/])full\.md$/i.test(e.name)) ??
@@ -967,7 +975,7 @@ export function pickZipContentList(entries: ZipEntry[]): ZipEntry | undefined {
   )
 }
 
-// ── mineru.net v4 云端序列（⚠️ 未实测，按 refs/llm-for-zotero 落地）───────
+// ── mineru.net v4 云端序列（✅ pipeline 通道 2026-10-11 真机实测；⚠️ vlm 模型与异常路径仍未实测）──
 
 export interface CloudMineruOptions {
   baseUrl: string
@@ -1211,6 +1219,7 @@ async function downloadCloudZip(url: string, opts: CloudMineruOptions): Promise<
     } catch {
       throw new MineruError('云端 MinerU content_list 文件不是合法 JSON')
     }
+    // 云端 v4：zip 里的 `*_content_list.json` 是**数组文件**（首个非空字符 `[`，与本地的 JSON 字符串形态不同）；
     // 兼容「直接是数组」与「{content_list:[...]}」两种布局
     const arr = Array.isArray(parsed) ? parsed : isRecord(parsed) && Array.isArray(parsed['content_list']) ? parsed['content_list'] : []
     blocks = arr as MineruBlock[]

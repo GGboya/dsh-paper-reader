@@ -723,8 +723,25 @@ test('C2 两份 README：云端三步指引 + 公式/扫描件两类场景各一
     assert.match(t, scanWord, `${f} 缺「扫描版」场景一句`)
     // 不夸大：明确 pdf.js 路径不受影响、云端尚未端到端实测
     assert.match(t, /pdf\.js/, `${f} 必须如实说明不配置时的能力（pdf.js）`)
-    assert.match(t, /(尚未端到端实测|not been end-to-end tested)/, `${f} 必须保留「云端未实测」的诚实声明`)
+    // F-I：云端声明必须说明「测了什么」+「什么仍未验证」，不得笼统写成「云端已验证完毕」
+    assert.match(t, /pipeline/, `${f} 必须点名已实测的是 pipeline 通道`)
+    assert.match(t, /(19 页|19-page)/, `${f} 必须交代实测样本规模`)
+    assert.match(t, /(真实 token|real token)/, `${f} 必须交代用了真实 token`)
+    assert.match(t, /(vlm|VLM)/, `${f} 必须列出仍未验证的 vlm 模型族`)
+    assert.ok(!/(云端已验证完毕|cloud path is fully verified)/i.test(t), `${f} 不得笼统声称云端全部验证完毕`)
   }
+})
+
+test('C4 【F-J】content_list 形态按通道区分：本地 legacy = JSON 字符串；云端 v4 = *_content_list.json 数组文件', () => {
+  const m = readFileSync(join(REPO, 'src', 'mineru.ts'), 'utf8')
+  assert.match(m, /本地 legacy 通道[^\n]*JSON 字符串/, '必须说明本地 legacy 通道的 content_list 是 JSON 字符串')
+  assert.match(m, /\*_content_list\.json[^\n]*数组文件|数组文件[^\n]{0,40}\*_content_list\.json/, '必须说明云端 v4 是数组文件')
+  // 旧的无限定说法（会被读成「两条通道都一样」）不得再出现
+  const unbounded = [...m.matchAll(/content_list 是 JSON 字符串/g)].length
+  assert.equal(unbounded, 0, `不得再出现无限定的「content_list 是 JSON 字符串」（${unbounded} 处）`)
+  // 云端声明也要如实：pipeline 真机实测 + vlm/异常路径未实测
+  assert.match(m, /pipeline 通道[^\n]*真实 token[^\n]*端到端实测|真实 token[^\n]*端到端实测/, 'src 注释也要说明 pipeline 已真机实测')
+  assert.match(m, /vlm[^\n]*未(实测|验证)|未(实测|验证)[^\n]*vlm/, 'src 注释也要列出未验证项')
 })
 
 test('C3 README 版本标签已同步到 1.4.0（不再残留 1.5.0/1.6.0）', () => {
