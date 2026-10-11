@@ -1148,13 +1148,28 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     chmodSync(join(dataRO, 't'), 0o700)
     spec = spec1
     writeProbe('vb3-move-failed.json', JSON.stringify({ status: r.status, body }, null, 2))
-    assert.equal(r.status, 500, `移动失败必须 500：${r.status} ${JSON.stringify(body)}`)
-    assert.equal(body.code, 'trash-move-failed', `必须带机器可读 code（S15）：${JSON.stringify(body)}`)
-    assert.ok(Array.isArray(body.moved) && Array.isArray(body.remaining), '必须回报已移动/未移动清单')
-    assert.ok(String(body.trashDir).length > 0)
-    assert.deepEqual(readdirSync(join(dataRO, 't')).sort(), ['p-zh.pdf', 'p.pdf', 'p.txt'], '失败后三个文件必须都还在（没有任何 unlink）')
-    assert.ok(existsSync(join(dataRO, 't', 'p.pdf')), '`.pdf` 必须仍在（文献仍在库）')
-    assert.ok(!body.moved.includes('p.pdf'), '`.pdf` 必须最后移')
+    // P-1（docs/pr5-review.md）：win32 的 chmod 只映射「只读位」，目录只读属性**不**阻止 rename
+    // ⇒ 本注入在 windows 上不生效（本机与 CI 均未跑过 win32）。win32 只校验**零销毁**不变量：
+    // 三个文件要么仍在专题里、要么在回收站里，一个都不能少（状态码 500/200 都合法）。
+    if (process.platform === 'win32') {
+      const inTopic = readdirSync(join(dataRO, 't')).sort()
+      const rel = typeof body.trashRel === 'string' ? body.trashRel : ''
+      const inTrash = rel && existsSync(join(dataRO, rel)) ? readdirSync(join(dataRO, rel)).filter((n) => n !== 'manifest.json').sort() : []
+      t.diagnostic(`P-1 win32：chmod 注入不生效（status=${r.status}），只校验零销毁不变量`)
+      assert.deepEqual([...new Set([...inTopic, ...inTrash])].sort(), ['p-zh.pdf', 'p.pdf', 'p.txt'],
+        `win32：文件一个都不能被销毁（topic=${inTopic} trash=${inTrash}）`)
+    } else {
+      assert.equal(r.status, 500, `移动失败必须 500：${r.status} ${JSON.stringify(body)}`)
+      assert.equal(body.code, 'trash-move-failed', `必须带机器可读 code（S15）：${JSON.stringify(body)}`)
+      assert.ok(Array.isArray(body.moved) && Array.isArray(body.remaining), '必须回报已移动/未移动清单')
+      // R-2（F-G 之后）：错误响应**不带**绝对 trashDir，只给相对 trashRel
+      assert.ok(!('trashDir' in body), `错误响应不得带绝对 trashDir（F-G/R-2）：${JSON.stringify(body)}`)
+      assert.ok(String(body.trashRel).startsWith('.trash/'), `必须给相对 trashRel（R-2）：${JSON.stringify(body)}`)
+      assert.ok(!JSON.stringify(body).includes(dataRO), '错误响应不得回显服务端绝对路径（S15）')
+      assert.deepEqual(readdirSync(join(dataRO, 't')).sort(), ['p-zh.pdf', 'p.pdf', 'p.txt'], '失败后三个文件必须都还在（没有任何 unlink）')
+      assert.ok(existsSync(join(dataRO, 't', 'p.pdf')), '`.pdf` 必须仍在（文献仍在库）')
+      assert.ok(!body.moved.includes('p.pdf'), '`.pdf` 必须最后移')
+    }
   } finally { chmodSync(join(dataRO, 't'), 0o700); rmSync(dataRO, { recursive: true, force: true }) }
 
   // ③ 路由级（回收站目录本身无法创建）：观察真实响应（⚠️ 见 docs/reader-ux-verification.md 的 F1）
@@ -1163,8 +1178,10 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     mkdirSync(join(dataDir, 't'))
     writeFileSync(join(dataDir, 't', 'p.pdf'), PDF())
     writeFileSync(join(dataDir, 't', 'p.txt'), 'cache')
-    mkdirSync(join(dataDir, '.trash'))
-    chmodSync(join(dataDir, '.trash'), 0o500)
+    // P-1：旧写法用 chmod 0500 让 `.trash` 不可写 —— 在 win32 不生效（只读位不阻止 mkdir）。
+    // 改成**平台中立**的注入：让 `.trash` 是一个普通**文件**，`mkdirSync('.trash/<stamp>')` 在任何平台
+    // 都以 ENOTDIR/EEXIST 失败（与 VB3 ① 用同名目录占位触发 EISDIR 同思路）。
+    writeFileSync(join(dataDir, '.trash'), 'not-a-directory')
     const spec0 = spec
     registerRoutes(makeCtx(), { dataDir })
     const srv = createServer((req, res) => spec.handler(req, res))
@@ -1174,20 +1191,18 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     const body = await r.json().catch(() => ({}))
     const text = JSON.stringify(body)
     writeProbe('vb3-trash-unwritable.json', JSON.stringify({ status: r.status, body }, null, 2))
-    chmodSync(join(dataDir, '.trash'), 0o700)
     // 不变量优先：一个文件都不能少
     assert.ok(existsSync(join(dataDir, 't', 'p.pdf')), 'pdf 必须仍在')
     assert.ok(existsSync(join(dataDir, 't', 'p.txt')), 'txt 必须仍在')
-    assert.equal(r.status, 500, `回收站不可写应 500，实际 ${r.status}`)
-    // ⚠️ 已知偏离 F1（非阻断，已上报）：准备回收站目录失败时走的是外层兜底 500 —— 缺 code，
-    // 且 error 文案里带服务端绝对路径（违反 S15 与本模块自述的「错误文案不含服务端绝对路径」）。
-    // 这里固定「现状」：上游修好后本断言会变红，提醒验证者更新报告。硬断言是「文件一个不少」。
-    if (body.code !== 'trash-move-failed') {
-      assert.ok(body.code === undefined && /EACCES|ENOTDIR|EEXIST|EROFS/.test(String(body.error)), `出现未预期的失败形态，需重新验证：${text}`)
-      t.diagnostic(`F1 复现：status=${r.status} code=${body.code} error=${String(body.error).slice(0, 120)}`)
-      t.diagnostic(`F1 附加问题：响应体泄露服务端绝对路径 = ${text.includes(dataDir)}`)
-    }
-  } finally { chmodSync(join(dataDir, '.trash'), 0o700); rmSync(dataDir, { recursive: true, force: true }) }
+    // 回收站目录无法创建 → newTrashBundle 统一映射成 500 + 机器可读 code（旧报告里的 F1「外层兜底 500 缺 code」
+    // 已被 newTrashBundle 的 ManageError 修掉；这里改成**强断言**，不再保留「观察现状」的弱分支）
+    assert.equal(r.status, 500, `回收站不可建应 500，实际 ${r.status} ${text}`)
+    assert.equal(body.code, 'trash-move-failed', `必须带机器可读 code（S15）：${text}`)
+    assert.ok(!('trashDir' in body), `错误响应不得带绝对 trashDir（F-G/R-2）：${text}`)
+    assert.ok(String(body.trashRel).startsWith('.trash/'), `必须给相对 trashRel（R-2）：${text}`)
+    assert.ok(!text.includes(dataDir), `错误响应不得回显服务端绝对路径（S15）：${text}`)
+    t.diagnostic(`F1 现状：status=${r.status} code=${body.code} 响应含 dataDir = ${text.includes(dataDir)}`)
+  } finally { rmSync(dataDir, { recursive: true, force: true }) }
 })
 
 test('VB4[B6] 路径穿越 ≥8 种 × 全部写路由：一律 4xx + 盘上零变化', async () => {
