@@ -20,6 +20,8 @@ import {
 import {
   ManageError,
   assertInside,
+  clearTopic,
+  planTopicClear,
   deletePaper,
   deleteTopic,
   isManageError,
@@ -680,9 +682,12 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           }
           const plan = planTopicDelete(dataDir, name)     // 全部前提先校验，再动手
           if (plan.entries.length > 0) {
-            throw new ManageError('topic-not-empty', 409, `专题内还有 ${plan.entries.length} 个条目（${plan.papers.length} 篇文献），请先逐篇删除`, {
+            // clearEndpoint：非空专题的「下一步」——UI 据此进入**批量清空**中间态（上游评论第 10 条）
+            throw new ManageError('topic-not-empty', 409, `专题内还有 ${plan.entries.length} 个条目（${plan.papers.length} 篇文献），请用批量清空或先逐篇删除`, {
               entries: plan.entries,
               papers: plan.papers,
+              clearEndpoint: '/api/library/topic/clear',
+              clearPlanEndpoint: '/api/library/topic/clear-plan',
             })
           }
           if (!(await requireTopicSessionsClear(plan.name, res))) return
@@ -733,6 +738,88 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           workspaceCache.delete(join(dataDir, plan.name))
           // 响应补 `topic`（上游 UI/文档读法）——我们的 RenameResult 用 from/to
           json(res, 200, { ...r, topic: r.to, detachedSessions: detached })
+        } catch (err) {
+          if (!libFail(res, err)) throw err
+        }
+      })
+      return
+    }
+
+    // 清空预览（dry-run，只读）：非空专题删除的**中间态**清单（上游评论第 10 条）。
+    // 形状与 /api/library/paper/delete-plan 对齐（files/totalBytes/notDeleted），逐篇额外给
+    // sessions/translation，让 UI 在用户点确认**之前**就能提示「第 7 篇正在翻译」。
+    if (sub === '/api/library/topic/clear-plan' && req.method === 'GET') {
+      const topic = url.searchParams.get('topic') ?? ''
+      if (url.searchParams.get('path')) {
+        json(res, 400, { error: '不接受 path 参数，请用 topic', code: 'escape-rejected' })
+        return
+      }
+      try {
+        const plan = planTopicClear(dataDir, topic)
+        const papers = []
+        for (const p of plan.papers) {
+          const ref = resolveLibraryPaper(plan.topic, p.name)
+          const sessions = await sessionInfo(ref)
+          const zh = zhStatus(ref)
+          papers.push({
+            name: p.name,
+            files: p.files,
+            totalBytes: p.totalBytes,
+            sessions: toWire(sessions),
+            translation: { busy: zh.busy, hasZh: zh.zh, hasDual: zh.dual },
+          })
+        }
+        json(res, 200, {
+          topic: plan.topic,
+          papers,
+          papersCount: plan.papersCount,
+          filesCount: plan.filesCount,
+          totalBytes: plan.totalBytes,
+          hidden: plan.hidden,
+          trashRoot: plan.trashRoot,
+          notDeleted: plan.notDeleted,
+          clearEndpoint: '/api/library/topic/clear',
+        })
+      } catch (err) {
+        if (!libFail(res, err)) throw err
+      }
+      return
+    }
+
+    // 批量清空专题（一次确认、逐篇进回收站、失败即整体回滚）：`confirmName === topic` 是**必需**的
+    // （手输专题名确认保留在清空这一步，不放松）。
+    // 前置：全部校验完（存在性 / 非空 / 逐篇会话 / 逐篇翻译）才动一个字节；
+    // 执行：withInflight（同一专题并发只放一个）+ library-manage.clearTopic（非递归 rmdir）。
+    if (sub === '/api/library/topic/clear' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; confirmName?: string; path?: string }
+      const rawTopic = typeof body.topic === 'string' && body.topic ? body.topic : body.name
+      if (typeof rawTopic !== 'string' || rawTopic.length === 0) { badEntry(res, rawTopic); return }
+      if (badEntryBoundary(res, rawTopic)) return
+      if (rejectWritePath(body, res)) return
+      if (body.confirmName !== rawTopic) {
+        json(res, 400, { error: '需要 confirmName 与专题名完全一致才允许清空', code: 'confirm-mismatch' })
+        return
+      }
+      await withInflight(`topic\u0000${rawTopic}`, res, async () => {
+        try {
+          const plan = planTopicClear(dataDir, rawTopic)   // 存在性 404 / 越界 400 / 符号链接专题 400
+          if (plan.papersCount === 0) {
+            throw new ManageError('bad-request', 400, '专题已为空，请用删除专题', { clearEndpoint: '/api/library/delete-topic' })
+          }
+          let detached = 0
+          const busyTrans: string[] = []
+          for (const p of plan.papers) {
+            const ref = resolveLibraryPaper(plan.topic, p.name)
+            if (!(await requireSessionClear(ref, res))) return   // unknown→503 / running→409（同一套 code）
+            detached += (await sessionInfo(ref)).total
+            if (zhStatus(ref).busy) busyTrans.push(p.name)
+          }
+          if (busyTrans.length > 0) {
+            throw new ManageError('translation-busy', 409, `以下文献正在生成译文，请等待完成后再清空：${busyTrans.join('、')}`, { papers: busyTrans })
+          }
+          const r = clearTopic(dataDir, plan.topic)
+          workspaceCache.delete(join(dataDir, plan.topic))     // 清掉指向已清空目录的工作区缓存
+          json(res, 200, { ...r, detachedSessions: detached, archivedSessionsNote: true })
         } catch (err) {
           if (!libFail(res, err)) throw err
         }
