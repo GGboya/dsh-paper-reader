@@ -151,7 +151,7 @@ spaces are semantic (`\text{...}`) are kept verbatim as a whole group; multi-tok
 > original query is always kept, so no existing hit is ever lost); multi-token forms such as `x_{t-1}` / `x_{ij}`
 > are not normalized and match as written.
 >
-> **Two low-severity items (scheduled for the next round, registered in [docs/embed-plan.md](docs/embed-plan.md) "追加项二")**:
+> **Two low-severity items (scheduled for the next round)**:
 > F-R1 `keepsInnerSpaces` prefix-matches the two-argument `\textcolor` into the "spaces are semantic" guard (the second
 > group of `$\textcolor{red}{hello world}$` gets its spaces compressed); F-R2 the region scanner does not look inside
 > `\text{}` groups (`$\text{costs $5}$` is split at the inner `$` — a sub-case of the documented boundary).
