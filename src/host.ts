@@ -33,7 +33,18 @@ import {
   resolveTopicDir,
   validateName,
 } from './library-manage.ts'
-import { readFormulaIndex } from './formulas.ts'
+import { readFormulaIndex, readTextBlockIndex } from './formulas.ts'
+import {
+  MAX_CHUNKS,
+  MAX_LATEX_CHARS,
+  MAX_TEXT_CHARS,
+  MAX_TOTAL_CHARS,
+  SelectionTranslateError,
+  assembleSource,
+  formulaStatusOf,
+  translateSelection,
+  type TranslateChunk,
+} from './translate-selection.ts'
 import { MineruError, sanitizeDetail } from './mineru.ts'
 import { readTranscript, transcribePaper, ScannedPdfError, ShortTextError, type SourceArg } from './transcribe.ts'
 import { pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
@@ -831,6 +842,93 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     if (sub === '/api/formulas' && req.method === 'GET') {
       const ref = locate(url) // 只读路径，沿用 path/topic/name 三种定位
       json(res, 200, await readFormulaIndex(ref))
+      return
+    }
+
+    /* ── 划词翻译（公式保留，契约 docs/selection-translate-requirements.md §3.9）─────
+       客户端只送「按页 + 按 display 归属切好的 chunk」；行内公式的还原（选区文本 ↔ MinerU
+       text 块对齐）在服务端做，所以请求体里**没有任何矩形/bbox/pageSize**。
+       本接口只读（不写盘）⇒ 定位沿用 /api/formulas 的读路径语义，不做写路径边界。
+       API key 只存在于本进程：请求体只有 model（客户端从 /api/zh 拿到的 apiKeyHint 仅用于展示），
+       响应体与错误文案一律不带 key。 */
+    if (sub === '/api/translate-selection' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: unknown; name?: unknown; path?: unknown; chunks?: unknown }
+      const bad = (msg: string, code = 'bad-request') => json(res, 400, { error: msg, code })
+
+      if (!Array.isArray(body.chunks)) return bad('chunks 必须是数组')
+      if (body.chunks.length < 1 || body.chunks.length > MAX_CHUNKS) {
+        return bad(`chunks 数量必须在 1~${MAX_CHUNKS} 之间（收到 ${body.chunks.length}）`, 'too-large')
+      }
+      const chunks: TranslateChunk[] = []
+      let total = 0
+      for (const raw of body.chunks) {
+        if (typeof raw !== 'object' || raw === null) return bad('chunks 的每一项必须是对象')
+        const c = raw as { page?: unknown; kind?: unknown; text?: unknown; latex?: unknown }
+        const page = c.page
+        if (typeof page !== 'number' || !Number.isInteger(page) || page < 1) return bad('chunk.page 必须是 ≥1 的整数')
+        const text = typeof c.text === 'string' ? c.text : ''
+        const latex = typeof c.latex === 'string' ? c.latex : ''
+        if (c.kind === 'formula') {
+          if (!latex) return bad('formula chunk 的 latex 不能为空')
+          if (latex.length > MAX_LATEX_CHARS) return bad(`latex 超过 ${MAX_LATEX_CHARS} 字符`, 'too-large')
+          total += latex.length
+          chunks.push({ page, kind: 'formula', latex })
+          continue
+        }
+        if (c.kind !== 'text') return bad("chunk.kind 必须为 'text' 或 'formula'")
+        if (text.length > MAX_TEXT_CHARS) return bad(`text 超过 ${MAX_TEXT_CHARS} 字符`, 'too-large')
+        total += text.length
+        chunks.push({ page, kind: 'text', text })
+      }
+      if (total === 0) return bad('选区为空')
+      if (total > MAX_TOTAL_CHARS) return bad(`选区总长超过 ${MAX_TOTAL_CHARS} 字符`, 'too-large')
+
+      let ref: PaperRef
+      try {
+        const args: { path?: string; topic?: string; name?: string } = {}
+        if (typeof body.path === 'string' && body.path) args.path = body.path
+        else {
+          if (typeof body.topic !== 'string' || typeof body.name !== 'string' || !body.topic || !body.name) {
+            return bad('必须提供 topic + name（或 path）')
+          }
+          args.topic = body.topic
+          args.name = body.name
+        }
+        ref = resolvePaper(dataDir, args)
+      } catch {
+        throw notFound('文献不存在（划词翻译需要先能定位到该文献）')
+      }
+
+      const { endpoint, source } = await resolveTranslateEndpoint(config.translate)
+      if (source === 'none') {
+        json(res, 503, { error: '未配置翻译端点：在阅读器里点 ⚙ 填写（OpenAI 兼容端点即可）', code: 'no-endpoint' })
+        return
+      }
+      const index = await readTextBlockIndex(ref)
+      const asm = assembleSource(chunks, index)
+      try {
+        const r = await translateSelection(endpoint, asm.source)
+        json(res, 200, {
+          translation: r.translation,
+          model: r.model,
+          cached: r.cached,
+          formulaTotal: r.formulaTotal,
+          formulaKept: r.formulaKept,
+          formulaLost: r.formulaLost,
+          formulaApplied: asm.applied,
+          formulaSkipped: asm.skipped,
+          formulaStatus: formulaStatusOf(asm),
+          hasBlockIndex: asm.hasBlockIndex,
+          ms: r.ms,
+        })
+      } catch (err) {
+        if (!(err instanceof SelectionTranslateError)) throw err
+        json(res, err.status, {
+          error: err.message,
+          code: err.code,
+          ...(err.upstreamStatus !== null ? { upstreamStatus: err.upstreamStatus } : {}),
+        })
+      }
       return
     }
 

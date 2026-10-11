@@ -24,6 +24,8 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 - 🤖 **Tutor mode**: paper sessions automatically use a dedicated preset — step-by-step reading plans, section-by-section coaching, graded quizzes; progress accumulates across sessions
 - 🀄 **Chinese version**: original ↔ full-Chinese in-place toggle (babeldoc auto-installed, zero preinstall); one-click export (Chinese / bilingual PDF)
 - 🗂️ **Library management**: rename/delete topics and papers (deletion shows a file manifest first, goes to a **recoverable** trash; non-empty topics support batch-clear with one confirmation)
+- 🈯 **Selection translation (formulas preserved)** (v1.5.0): select text in the reader → the ask bubble gains a **"译" (Translate)** button → a **translation-only** bubble opens (there is **no** "insert into chat" and **no** "copy" button, and the plugin never writes to your clipboard on its own). **When the selection overlaps a formula**, the plugin replaces the garbage formula glyphs in the PDF text layer with the LaTeX MinerU recognized and asks the model to **keep formulas verbatim** (nothing inside `$…$` is translated or rewritten). **Costs and prerequisites**: ① you must configure the translation endpoint first (the same config the Chinese-PDF generation uses; with nothing configured, clicking "译" opens the endpoint form and retries automatically after saving); ② **formula preservation requires that paper to have been parsed by MinerU** — without an artifact it **falls back to plain translation**, and since formulas are unreadable in the text layer the bubble **says so honestly** ("translation may be inaccurate"). That is by design, not a defect.
+- 🖥️ **Bilingual split view (two modes, switchable)** (v1.5.0): two new toolbar buttons, **"对照" (Side-by-side page)** and **"分屏" (Split)** — switch any time, click again to go back to the original; the choice is remembered per paper. **Mode A 「对照」** shows babeldoc's `-dual.pdf` (original and translation laid out on the same doubled-width page, auto fit-width); **Mode B 「分屏」** puts the original on the left and `<paper>-zh.pdf` on the right with **synchronised scrolling** (same page + same in-page ratio). **Costs and prerequisites**: mode A needs `-dual.pdf` and mode B needs `-zh.pdf`; both are produced by babeldoc (click "中" in the toolbar — **the first run takes a few minutes** and needs the translation endpoint); **without the artifact the button is greyed out with an explanation**; the split view needs a panel at least 640px wide — narrower than that it explains instead of switching.
 - ➕ **Two optional add-ons** (off by default, see "Advanced"): MinerU parsing — scanned PDFs become readable, formulas become click-citable and searchable; an embeddings endpoint — plain-language semantic search
 
 Installing **does not modify the official UI**: a single "📚 Paper Reading" toggle appears at the bottom of the sidebar; click to enter reading mode, click again to restore.
@@ -68,6 +70,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # always newest
+# dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.5.0  # or pin a version
 grep '"version"' ~/.dsh/profiles/web/node_modules/@ggboy123/dsh-paper-reader/package.json   # check current version
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
@@ -120,6 +123,50 @@ Configure one of three ways (same priority as the translate endpoint): the setti
 - After a rename: transcripts/translations/study profiles move along; past chat sessions are **kept** but no longer listed under the new name (session ids encode the old name); case-only renames work on macOS/Windows
 - Oddly named files placed into `data/` by hand (e.g. `.hidden.pdf`) can still be deleted/renamed — nothing becomes a visible-but-undeletable orphan
 
+## Selection translation and bilingual split view (v1.5.0)
+
+### Selection translation (formulas preserved)
+
+**How to use**: select a passage in the reader → the familiar "select-to-ask" bubble appears (behaviour unchanged) → click **"译" (Translate)** → a **translation bubble** opens containing **only the translation** (plus one honest note line). Re-select to retranslate; click outside or press Esc to dismiss.
+
+That bubble has **no** "insert into chat" and **no** "copy" button (as requested), and the plugin **never** writes to your clipboard automatically. The asking path is untouched: just select again and you are back in the original ask bubble.
+
+**What happens to formulas** (the core of this feature):
+
+- Formulas in the PDF text layer are **unreadable**: `$F_{\theta}$` often degrades to a bare `F` (the subscript is dropped entirely), `\sum` becomes `X`, fractions get flattened into one line, and delimiter pairs can even turn into control characters. Feeding that to a model guarantees wrong formulas in the translation.
+- So: **each formula inside the selection is replaced by the LaTeX MinerU recognized**, and the model is explicitly told to **keep `$…$` verbatim** (no translation, no rewriting, no omissions, no added symbols). When the reply comes back, every formula token is **checked** to still be present, and the bubble tells you honestly if any went missing.
+- Both kinds are covered: **display formulas** (located exactly with the MinerU `equation` block bbox) and **inline formulas embedded in prose** (e.g. `π(a|s)`, `Q(s,a)`, `x_t`). Inline formulas have **no bbox of their own** in MinerU's output (they live inside a text block), so the plugin recovers them by fuzzy-aligning the selection text against the MinerU block text.
+
+**Prerequisites and costs (please read first)**:
+
+| # | Prerequisite | What happens without it |
+| --- | --- | --- |
+| 1 | **A configured translation endpoint** (Settings → Paper Reader, or ⚙ in the reader toolbar; the same config used for Chinese-PDF generation) | Clicking "译" **opens the endpoint form automatically**, and **retries this translation** after you save (no wasted click). If the endpoint is incomplete the server refuses and the UI opens that form |
+| 2 | **Formula preservation requires the paper to have been parsed by MinerU** (a `<paper>.mineru.json` artifact) | **Falls back to plain translation**: prose is translated normally, but formulas are unreadable in the text layer, so the bubble honestly says "this paper was not parsed with MinerU: the translation may be inaccurate". **By design, not a defect** |
+| 3 | An artifact exists but one passage could not be aligned | Only the alignable parts are restored; the bubble says "some formulas could not be restored" |
+| 4 | A very short selection (fewer than 4 effective characters, e.g. the lone `F`) | No restoration (not enough signal); the bubble says "selection too short, formula not restored" |
+
+**Known limitations (stated plainly, not glossed over)**:
+
+- **No request has ever been sent to a real LLM endpoint**: all development verification used a fake upstream (to avoid spending money and to avoid using your key). "Does the model really keep formulas verbatim" is backed by two decidable assertions — a **byte-level prompt contract** and a **per-formula check on the reply** — but there is no end-to-end run against a real provider key.
+- MinerU occasionally splits **one formula into two `$…$` fragments** (the first ending in `=`). In that shape only half a formula may be restored (e.g. `action $\hat{a}_t\sim\pi_\theta(\cdot\ |$`); the `$`-pairing check cannot catch it. Not observed in the local corpus; left for follow-up.
+- A **literal `$`** inside the selection (a real dollar sign printed in the text) can, in an extreme shape, produce a false "N formulas were not preserved" note. Recorded; it does not affect the translation itself.
+- **No formula replacement in the Chinese / dual views** (the bbox only holds for original pages), which is why the "译" button only appears in the original view.
+
+### Bilingual split view (two modes)
+
+Two new toolbar buttons; switch any time and **click again to return to the original**. Each paper remembers its last view (and the memory follows the paper across renames):
+
+| Button | Mode | What you are looking at | Prerequisite |
+| --- | --- | --- | --- |
+| **对照** | A: side-by-side page | babeldoc's `-dual.pdf` (original + translation on one doubled-width page) | needs `-dual.pdf` |
+| **分屏** | B: two panes | left: original `<paper>.pdf`; right: `<paper>-zh.pdf` | needs `-zh.pdf` |
+
+- **Both artifacts come from babeldoc**: click "中" in the toolbar (**the first run installs the engine and translates — a few minutes**, and needs the translation endpoint). If the artifact is missing the button is **greyed out with the reason stated** — never a dead click.
+- **Synchronised scrolling**: scrolling either pane moves the other to the **same page + same in-page ratio**; whichever pane you are scrolling leads, so the two never fight each other. In paged mode (`▣`) both panes show the same page. **If the Chinese PDF has a different page count, the panes are mapped proportionally** and a one-off notice appears in the status bar.
+- **Width**: the split view needs a panel at least **640px** wide; narrower, clicking "分屏" only explains and does **not** switch. Shrinking below 640px while split falls back to the original automatically.
+- **Interaction with existing features**: while split, the left pane is the ordinary original view — **formula hotspots stay clickable** (the right pane neither participates in hit-testing nor gets a hotspot layer), the formula panel keeps working, and the "中" toggle is disabled during split (to avoid conflicting semantics). Switching to the Chinese / dual view still disables hotspots, exactly as before (the bbox only holds for original pages).
+
 ## Contributing
 
 ```bash
@@ -154,6 +201,7 @@ src/
   study.ts      pure functions: study profile (plan + quiz scores) I/O
   translate.ts  pure functions: babeldoc invocation (Chinese / bilingual PDF generation)
   babeldoc-install.ts pure functions: auto-install babeldoc without a Python env (uv → managed Python → venv)
+  translate-selection.ts pure functions: selection translation with formula preservation (aligns inline formulas against MinerU block text, prompt/request-body contract, per-formula preservation check, in-memory LRU cache)
   rerank.ts     pure functions: search_paper semantic rerank (TypeSafe/Jev; falls back to keyword ranking)
   preset.ts     pure functions: installs the bundled agent preset into $DSH_HOME/.agent-presets/
 presets/paper-reader/  the "Paper Tutor" agent preset (full persona prompt + compaction)
