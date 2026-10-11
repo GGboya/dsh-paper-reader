@@ -1598,6 +1598,9 @@ test('VB12[B15/B16/S9/S10/S11] 二次确认与鉴权：清单只来自 delete-pl
       ['POST', '/api/library/paper/rename', { topic: 'lib', name: 'noeq', newName: 'x' }],
       ['POST', '/api/library/topic/delete', { name: 'lib', confirmName: 'lib' }],
       ['POST', '/api/library/topic/rename', { name: 'lib', newName: 'x' }],
+      // PR #5 整改第二批：批量清空的两条路由（新写路径）也必须被鉴权拦下
+      ['GET', '/api/library/topic/clear-plan?topic=lib', null],
+      ['POST', '/api/library/topic/clear', { topic: 'lib', confirmName: 'lib' }],
     ]) {
       const r = await api(path, method === 'POST' ? { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : undefined)
       assert.equal(r.status, status, `${method} ${path} 必须被鉴权拦下`)
@@ -1629,8 +1632,14 @@ test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作
   }
   const changed = execFileSync('git', ['diff', '--name-only', 'HEAD', '--', 'test/'], { cwd: REPO, encoding: 'utf8' })
     .trim().split('\n').filter(Boolean)
-  // 只有「上游自带」的用例受此约束；本轮自己新增/改动的测试文件不受限（它们在 git status 里也是 M/??）。
-  const upstream = changed.filter((p) => /^test\/library-.*\.test\.mjs$/.test(p))
+  // 只有「上游自带」的用例受此约束：先问上游 tip（ef00a5d）里有哪些 library-* 文件，
+  // 再在改动里求交集——本轮自己新增的测试文件（例如 library-clear-and-busy.test.mjs）不受限。
+  let upstreamAtTip = []
+  try {
+    upstreamAtTip = execFileSync('git', ['ls-tree', '-r', '--name-only', 'ef00a5d', 'test/'], { cwd: REPO, encoding: 'utf8' })
+      .split('\n').filter((x) => /^test\/library-.*\.test\.mjs$/.test(x))
+  } catch { /* 浅克隆：下面的交集为空 → 只保留「登记过的文件」这一层语义 */ }
+  const upstream = changed.filter((p) => upstreamAtTip.length === 0 ? /^test\/library-.*\.test\.mjs$/.test(p) : upstreamAtTip.includes(p))
   const undocumented = upstream.filter((p) => !(p in documentedTestEdits))
   assert.deepEqual(undocumented, [], `改了未登记的上游用例：${undocumented.join(', ')}`)
   const status = execFileSync('git', ['status', '--porcelain'], { cwd: REPO, encoding: 'utf8' })
