@@ -144,10 +144,18 @@ test('R1：errno 错误（ENAMETOOLONG/EACCES）不回显绝对路径，业务�
   console.log = (...a) => { logs.push(a.map(String).join(' ')) } // 静音留档，查日志泄露
   let lockedDir = null
   try {
-    // ① ENAMETOOLONG：to 为 86 个中文（258 字节 > 255，字符数 86 ≤ 120）
-    const r1 = await postJson('/api/library/rename-topic', { topic: 'T', to: '名'.repeat(86) })
-    assert.equal(r1.status, 400, `ENAMETOOLONG 应 400：${r1.status} ${r1.txt}`)
-    assert.equal(r1.body.error, '系统错误，请稍后重试', 'errno 错误只回固定中文文案')
+    // ① ENAMETOOLONG：to 为 86 个中文（258 字节 > 255，字符数 86 ≤ 120）。
+    //    平台差异：Linux ext4 按 255 字节限长 → errno → 固定文案；macOS APFS 限 255 个 UTF-16
+    //    字符（86 个汉字合法）→ 改名成功 200。两平台都不泄露 dataDir。用一次性专题 TL，
+    //    macOS 上改名成功也不影响后续用例（③ 依赖 T 还在）。
+    mkdirSync(join(w.data, 'TL'), { recursive: true })
+    const r1 = await postJson('/api/library/rename-topic', { topic: 'TL', to: '名'.repeat(86) })
+    if (process.platform === 'linux') {
+      assert.equal(r1.status, 400, `ENAMETOOLONG 应 400：${r1.status} ${r1.txt}`)
+      assert.equal(r1.body.error, '系统错误，请稍后重试', 'errno 错误只回固定中文文案')
+    } else {
+      assert.equal(r1.status, 200, `APFS 上 86 个汉字是合法目录名，应成功：${r1.status} ${r1.txt}`)
+    }
     assert.ok(!r1.txt.includes(w.data), 'ENAMETOOLONG 不得泄露 dataDir')
 
     // ② EACCES：嵌套目录 chmod 0500 后 delete-topic

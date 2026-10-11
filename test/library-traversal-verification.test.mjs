@@ -489,7 +489,9 @@ test('V8 符号链接文件 / 硬链接：只动链接本身，库外目标逐�
     assert.deepEqual(readdirSync(join(w.data, 'T')), [], '链接本身被移除')
     rmSync(w.parent, { recursive: true, force: true })
   }
-  // ② 边车是「指向库外目录」的符号链接
+  // ② 边车是「指向库外目录」的符号链接。
+  //    平台差异：Linux 的 rmSync 干净地只删链接本身；macOS 的 rmSync 对「指向目录的符号链接」
+  //    抛 ERR_FS_EISDIR —— 删除中止（失败方向安全），链接残留、库外目标分毫不动。
   {
     const w = tmpParent()
     mkdirSync(join(w.outside, 'odir'), { recursive: true })
@@ -497,10 +499,16 @@ test('V8 符号链接文件 / 硬链接：只动链接本身，库外目标逐�
     rmSync(join(w.data, 'T', 'P.txt'))
     symlinkSync(join(w.outside, 'odir'), join(w.data, 'T', 'P.txt'))
     const before = snap(w.parent)
-    const deleted = L.deletePaper(w.data, 'T', 'P')
-    assert.ok(deleted.includes('P.txt'))
-    assert.deepEqual(diff(before, snap(w.parent)).filter((x) => x.startsWith('data/T/')).sort(),
-      [`data/T/P.pdf: P-PDF → ∅`, 'data/T/P.txt: symlink->' + join(w.outside, 'odir') + ' → ∅'].sort(), '只删了这篇文献本体与其符号链接边车')
+    const changed = () => diff(before, snap(w.parent)).filter((x) => x.startsWith('data/T/')).sort()
+    if (process.platform === 'darwin') {
+      assert.throws(() => L.deletePaper(w.data, 'T', 'P'), (e) => e?.code === 'ERR_FS_EISDIR' || e?.code === 'EISDIR', 'macOS：EISDIR 中止删除')
+      assert.deepEqual(changed(), ['data/T/P.pdf: P-PDF → ∅'], 'P.pdf 已删、符号链接边车残留（删除中止）')
+    } else {
+      const deleted = L.deletePaper(w.data, 'T', 'P')
+      assert.ok(deleted.includes('P.txt'))
+      assert.deepEqual(changed(),
+        [`data/T/P.pdf: P-PDF → ∅`, 'data/T/P.txt: symlink->' + join(w.outside, 'odir') + ' → ∅'].sort(), '只删了这篇文献本体与其符号链接边车')
+    }
     assert.equal(readFileSync(join(w.outside, 'odir', 'x.txt'), 'utf8'), 'ODIR-X', '库外目录与其内容必须完好')
     rmSync(w.parent, { recursive: true, force: true })
   }
@@ -648,10 +656,15 @@ test('V11 正常功能：多变体产物删除 / 精确 stem / 中文专题 / �
   const ren = L.renamePaper(w.data, 'T', 'My Paper-2.0_final', 'Renamed 3.1_beta')
   assert.deepEqual(ren.sort(), ['My Paper-2.0_final.pdf', 'My Paper-2.0_final.txt'])
   assert.ok(existsSync(join(dir2, 'Renamed 3.1_beta.pdf')) && existsSync(join(dir2, 'Renamed 3.1_beta.txt')))
-  // ⑤ 大小写改名（Linux 大小写敏感）
+  // ⑤ 大小写改名：Linux 大小写敏感 → 成功；macOS/Windows 大小写不敏感 FS → 按「已存在同名」
+  //    拒绝（renamePaper 的已知设计局限，见 src/library.ts 注释——不做临时名两跳绕过）
   writeFileSync(join(dir2, 'CaseA.pdf'), 'c')
-  assert.deepEqual(L.renamePaper(w.data, 'T', 'CaseA', 'casea'), ['CaseA.pdf'])
-  assert.ok(existsSync(join(dir2, 'casea.pdf')))
+  if (process.platform === 'linux') {
+    assert.deepEqual(L.renamePaper(w.data, 'T', 'CaseA', 'casea'), ['CaseA.pdf'])
+    assert.ok(existsSync(join(dir2, 'casea.pdf')))
+  } else {
+    assert.throws(() => L.renamePaper(w.data, 'T', 'CaseA', 'casea'), /已存在同名/)
+  }
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
