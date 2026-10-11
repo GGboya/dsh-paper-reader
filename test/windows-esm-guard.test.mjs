@@ -15,7 +15,9 @@
 // 现在的覆盖：
 //   C1 动态 import() 必须走 pathToFileURL（递归扫 test/、lib/，含 reader/*.html；注释与字符串先「代码化」）
 //   C2 symlinkSync 必须显式传 type（Windows 需要 file/dir）
-//   C3 平台期望值不得硬编码 darwin（大小写敏感性等必须实测）
+//   C3 平台期望值不得硬编码 darwin（大小写敏感性等必须实测）——**注意**：t12 把 C3 改成在
+//      「抹掉字符串内容」的 codeOnly 上匹配 `'darwin'` 字面量之后，C3 静默变成了空转
+//      （实测：注入 process.platform === 'darwin' 仍绿）。t13 用 scanSource().kinds 修好并覆盖三种引号。
 //   C4 `reader/index.html` 的 <script> 提取必须与行尾无关（LF/CRLF/CR 三种都给同一份脚本）
 //   C5 测试文件不得再手写按 LF 写死的 `<script>` 提取（必须走 test/reader-script.mjs）
 
@@ -48,31 +50,41 @@ const LIB_JS = () => listFiles('lib', (n) => n.endsWith('.js'))
 const READER_HTML = () => listFiles('reader', (n) => n.endsWith('.html'))
 
 /**
- * 长度保持的「代码化」：把注释与字符串/模板字面量的**内容**抹成空格（保留引号），
- *   · 索引与原文 1:1 对齐（可安全地把匹配位置映射回原文取实参）；
- *   · 注释里的示例代码、以及守卫自己提示文案里的 `await import(...)` 都不会再算成真命中
- *     ⇒ 守卫**不必再排除自己**，扫描范围也不会被「写个注释就能绕过」。
+ * 长度保持的扫描：返回 `{ code, kinds }`。
+ *   · `code`：注释与字符串/模板字面量的**内容**被抹成空格（保留引号与长度）⇒ 索引与原文 1:1 对齐；
+ *   · `kinds[i]`：第 i 个字符属于 `'code'` / `'comment'` / `'string'`（字符串**含两端引号**）。
+ *
+ * 为什么要 `kinds`：`code` 把字符串内容抹掉了，所以「想知道某个**带引号的字面量**是不是真代码」
+ * 不能用 `code` 去匹配（会永远匹配不到）——C3 就踩过这个坑：它要看 `'darwin'` 这个字面量，
+ * 却拿着被抹空的 `code` 去匹配 ⇒ 规则静默变成空转（本轮 t13 实测：注入
+ * `process.platform === 'darwin'` 时 C3 竟然仍是绿的）。现在 C3 用原文匹配 + `kinds` 过滤。
  */
-export function codeOnly(src) {
+export function scanSource(src) {
   const out = [...src]
-  const blank = (from, to) => { for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' ' }
+  const kinds = new Array(src.length).fill('code')
+  const blank = (from, to, kind) => {
+    for (let k = from; k < to; k++) {
+      if (src[k] !== '\n') out[k] = ' '
+      if (k < kinds.length) kinds[k] = kind
+    }
+  }
   let i = 0
   while (i < src.length) {
     // HTML 注释（reader/*.html 里有 `<!-- … import() … -->` 的说明文字）也要抹掉
     if (src[i] === '<' && src.slice(i, i + 4) === '<!--') {
       const close = src.indexOf('-->', i + 4)
       const end = close === -1 ? src.length : close + 3
-      blank(i, end); i = end; continue
+      blank(i, end, 'comment'); i = end; continue
     }
     if (src[i] === '/' && src[i + 1] === '/') {
       const nl = src.indexOf('\n', i)
       const end = nl === -1 ? src.length : nl
-      blank(i, end); i = end; continue
+      blank(i, end, 'comment'); i = end; continue
     }
     if (src[i] === '/' && src[i + 1] === '*') {
       const close = src.indexOf('*/', i + 2)
       const end = close === -1 ? src.length : close + 2
-      blank(i, end); i = end; continue
+      blank(i, end, 'comment'); i = end; continue
     }
     const q = src[i]
     if (q === "'" || q === '"' || q === '`') {
@@ -83,13 +95,17 @@ export function codeOnly(src) {
         if (src[j] === '\n' && q !== '`') break
         j++
       }
-      blank(i + 1, j - 1) // 保留两端的引号本身
+      // 引号本身也算「字符串」：C3 用 kinds 判断 `process.platform` 是否落在字符串/注释里
+      blank(i, j, 'string')
       i = j; continue
     }
     i++
   }
-  return out.join('')
+  return { code: out.join(''), kinds }
 }
+
+/** 只要「代码化」后的文本（C1/C2/C5 用）。 */
+export const codeOnly = (src) => scanSource(src).code
 
 /** 取 `(` 起点的平衡括号内文本（用**原文**，因为要检查实参是不是 pathToFileURL/字面量）。 */
 function balanced(src, openIdx) {
@@ -149,10 +165,16 @@ test('C2 symlinkSync 必须显式传第三个参数 type（Windows 需要 file/d
 
 test('C3 平台期望值不许硬编码 darwin（大小写敏感性等必须实测）', () => {
   const offenders = []
+  // 三种引号形态都算（t11 点名的收窄项：旧写法只认单引号）。
+  // 匹配**原文**（`'darwin'` 是字符串字面量，在 codeOnly 里已被抹空 ⇒ 用它会永远匹配不到，
+  // 规则会静默空转），再用 `kinds[m.index]` 排除「注释/字符串里提到 darwin」的假阳性
+  // （例如本守卫自己的提示文案、以及别的测试里示意性写法）。
   for (const rel of TEST_MJS()) {
     const src = readFileSync(join(REPO, rel), 'utf8')
-    for (const m of codeOnly(src).matchAll(/process\.platform\s*===?\s*'darwin'/g)) {
-      offenders.push(`${rel}:${src.slice(0, m.index).split('\n').length}`)
+    const { kinds } = scanSource(src)
+    for (const m of src.matchAll(/process\.platform\s*===?\s*(['"`])darwin\1/g)) {
+      if (kinds[m.index] !== 'code') continue
+      offenders.push(`${rel}:${src.slice(0, m.index).split('\n').length}: ${m[0]}`)
     }
   }
   assert.deepEqual(offenders, [], `平台期望值请用实测探针（test/fs-probe.mjs 的 caseInsensitiveFs）而不是硬编码 darwin：\n${offenders.join('\n')}`)
