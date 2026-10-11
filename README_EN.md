@@ -120,7 +120,8 @@ Two reasons to bother (one line each):
 **What still works without it** (matches the implementation — no overclaiming): transcription uses local pdf.js, which is plenty for text-layer PDFs (transcription, search, select-to-ask and translation export are unaffected); only **scanned PDFs and formula citing** need MinerU. Once configured and saved, the reader's formula panel gains a "Re-parse with MinerU" button (with mode "Off" that button is not rendered at all, so pdf.js can never overwrite existing MinerU artifacts by accident).
 
 The parse sequence is: request a batch upload URL → PUT the file → poll → download and unzip.
-⚠️ **The cloud path has not been end-to-end tested yet** (only mock-HTTP unit coverage) — treat it as experimental, and verify with step 3's "Test connection" plus a small paper.
+✅ **The cloud `pipeline` channel has been tested end-to-end** (2026-10-11, real token + one **real 19-page paper**: submit → poll → download zip → project → search; **25 assertions, 0 failures, ~19s**; all **18/18** equation bboxes + LaTeX **byte-identical** to the local artifacts).
+⚠️ **Still unverified** (treat as experimental): the `vlm` model family (`vlm-engine`/`vlm-http-client`) and failure paths such as quota exhaustion / HTTP 429 / zip retries — those are covered by mocks only.
 The token is stored only in `~/.dsh/.dsh-paper-reader/mineru.json` (0600); read APIs return a mask only, and logs / errors / responses never contain the plaintext.
 
 **Config file / environment variables** (per-field priority: file > profile YAML `config.mineru` > env > defaults):
@@ -188,8 +189,10 @@ plus `POST /api/mineru/test` and `GET /api/mineru/health` for connectivity check
 | Parse times out | A single paper is capped at 30 minutes by default (`jobTimeoutMs`); raise it in the config file |
 | Cloud says the token is invalid | The token expired, or you pasted the `Bearer ` prefix too (enter the token body only) |
 
-> **Known limitations**: the cloud path (mineru.net v4) follows the official API but is covered by mock tests only —
-> it has never been exercised with a real token, so treat it as experimental. The local path is verified end-to-end
+> **What exactly was verified (do not read this as "the whole cloud path is proven")**: mineru.net v4's **`pipeline`
+> channel has been exercised with a real token** (one real 19-page paper; 25 assertions, 0 failures, ~19s; all 18/18
+> equation bboxes/LaTeX byte-identical to the local artifacts). The **`vlm` model family, quota exhaustion / 429 /
+> zip retries** remain **unverified** (mocks only). The local path is verified end-to-end
 > against MinerU 3.4.5. A few low-severity items remain (non-transactional multi-file writes and a non-increasing
 > poll interval on the cloud path, leftover dead code in the ZIP reader). None of them affect the default path:
 > `mode` defaults to `off`, and behaviour is identical to before when MinerU is not configured.
