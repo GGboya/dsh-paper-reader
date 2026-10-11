@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import {
   existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  symlinkSync, writeFileSync, rmSync,
+  symlinkSync, unlinkSync, writeFileSync, rmSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -23,6 +23,15 @@ import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
+
+/** 删除路径（清理用）：Node 22 只删符号链接本身，Node 24 起 `rmSync(symlink→dir)` 抛 ERR_FS_EISDIR → 退 unlink。 */
+const removePath = (p) => {
+  try {
+    rmSync(p, { recursive: true, force: true })
+    return
+  } catch { /* Node 24：symlink→dir 可能 ERR_FS_EISDIR */ }
+  try { unlinkSync(p) } catch (e) { if (e?.code !== 'ENOENT') throw e }
+}
 const dist = (m) => join(ROOT, '..', 'dist', m)
 
 // $DSH_HOME 必须在 registerRoutes 之前指向临时目录（会写 agent preset / mineru.json）
@@ -577,7 +586,7 @@ test('C7 符号链接：只移动链接本身，链接目标（库外）内容�
     const bad = await postJson('/api/library/paper/delete', { topic: 'evil-topic', name: 'secret' })
     assert.equal(bad.status, 400)
     assert.equal(bad.body.code, 'escape-rejected')
-    rmSync(linkTopic)
+    removePath(linkTopic)
   } finally {
     rmSync(outside, { recursive: true, force: true })
   }

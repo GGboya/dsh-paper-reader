@@ -18,13 +18,22 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
+
+/** 删除路径（清理用）：Node 22 只删符号链接本身，Node 24 起 `rmSync(symlink→dir)` 抛 ERR_FS_EISDIR → 退 unlink。 */
+const removePath = (p) => {
+  try {
+    rmSync(p, { recursive: true, force: true })
+    return
+  } catch { /* Node 24：symlink→dir 可能 ERR_FS_EISDIR */ }
+  try { unlinkSync(p) } catch (e) { if (e?.code !== 'ENOENT') throw e }
+}
 const dist = (m) => join(ROOT, '..', 'dist', m)
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-repair-home-'))
 process.env.DSH_HOME = HOME
@@ -385,7 +394,7 @@ test('T9 不变式未回退：穿越输入全 4xx、`.pdf` 最后移、回收站
   const symRes = await postJson('/api/library/paper/delete', { topic: 't9-link', name: 'x' })
   assert.equal(symRes.status, 400)
   assert.equal(symRes.body.code, 'escape-rejected')
-  rmSync(symTopic, { force: true })
+  removePath(symTopic)
   // 真删除：`.pdf` 最后移 + 回收站可恢复
   const del = await postJson('/api/library/paper/delete', { topic: 't9', name: 'Victim' })
   assert.equal(del.status, 200, del.text)

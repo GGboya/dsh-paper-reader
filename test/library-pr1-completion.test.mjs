@@ -159,12 +159,15 @@ test('R1：errno 错误（ENAMETOOLONG/EACCES）不回显绝对路径，业务�
     }
     assert.ok(!r1.txt.includes(w.data), 'ENAMETOOLONG 不得泄露 dataDir')
 
-    // ② EACCES：嵌套目录 chmod 0500 后 delete-topic。
+    // ② EACCES：把**文献库根目录** chmod 0500 后 delete-topic（空专题）。
+    //    场景修正（PR #5 rebase）：我们这条分支的契约是「非空专题一律 409 topic-not-empty」，
+    //    且该判断在碰文件系统**之前**完成（比上游递归删更保守，评审认可）——所以「T2/locked/f.txt
+    //    非空 + 只读」这个旧场景永远走不到 rmdir，改用「空专题 + 只读父目录」保持本用例的原意
+    //    （errno → 固定文案、不泄露绝对路径）。
     //    平台差异：Windows 的 chmod 只映射「只读位」，目录只读属性不阻止删除 → 200 成功；
-    //    unix 上删除被拒 → errno → 固定文案 400。两平台都不泄露 dataDir。
-    mkdirSync(join(w.data, 'T2', 'locked'), { recursive: true })
-    writeFileSync(join(w.data, 'T2', 'locked', 'f.txt'), 'F')
-    lockedDir = join(w.data, 'T2', 'locked')
+    //    unix 上 rmdir 被拒 → errno → 固定文案 400。两平台都不泄露 dataDir。
+    mkdirSync(join(w.data, 'T2'), { recursive: true })
+    lockedDir = w.data
     chmodSync(lockedDir, 0o500)
     const r2 = await postJson('/api/library/delete-topic', { topic: 'T2' })
     if (process.platform === 'win32') {
@@ -176,15 +179,17 @@ test('R1：errno 错误（ENAMETOOLONG/EACCES）不回显绝对路径，业务�
     assert.ok(!r2.txt.includes(w.data), 'EACCES 不得泄露 dataDir')
 
     // ③ 业务错误必须原样可读（非 errno、无 .code）
+    // 状态码按本分支的契约：不存在的条目 → 404 not-found（带机器码，原 400 是上游 primitive
+    // 抛普通 Error 的副作用）；词法拒绝 → 400。文案都必须可读、不含绝对路径。
     const biz = [
-      ['/api/library/delete-topic', { topic: 'NoSuch' }, /专题不存在/],
-      ['/api/library/delete-paper', { topic: 'T', name: 'NoSuch' }, /文献库中找不到/],
-      ['/api/library/rename-topic', { topic: 'T', to: 'a/../b' }, /名字不能包含/],
-      ['/api/library/rename-paper', { topic: 'T', name: 'P', to: 'Q\u0000' }, /名字不能包含控制字符/],
+      ['/api/library/delete-topic', { topic: 'NoSuch' }, 404, /专题不存在/],
+      ['/api/library/delete-paper', { topic: 'T', name: 'NoSuch' }, 404, /文献不存在|文献库中找不到/],
+      ['/api/library/rename-topic', { topic: 'T', to: 'a/../b' }, 400, /名字不能包含/],
+      ['/api/library/rename-paper', { topic: 'T', name: 'P', to: 'Q\u0000' }, 400, /名字不能包含控制字符/],
     ]
-    for (const [p, body, re] of biz) {
+    for (const [p, body, status, re] of biz) {
       const r = await postJson(p, body)
-      assert.equal(r.status, 400, `${p} ${JSON.stringify(body)} 应 400：${r.status} ${r.txt}`)
+      assert.equal(r.status, status, `${p} ${JSON.stringify(body)} 应 ${status}：${r.status} ${r.txt}`)
       assert.match(r.body.error, re, `${p} 业务文案应可读：${r.body.error}`)
     }
   } finally {
