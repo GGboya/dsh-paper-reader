@@ -24,7 +24,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -32,8 +32,8 @@ const dist = (m) => join(ROOT, '..', 'dist', m)
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-merge-home-'))
 process.env.DSH_HOME = HOME
 
-const { registerRoutes } = await import(dist('host.js'))
-const { resolveExistingTopicDir, validateEntryBoundary, validateName } = await import(dist('library-manage.js'))
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
+const { resolveExistingTopicDir, validateEntryBoundary, validateName } = await import(pathToFileURL(dist('library-manage.js')).href)
 
 /* ── fixture ─────────────────────────────────────────────────────────────── */
 const PDF = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Size 1 /Root 1 0 R >>\n%%EOF\n', 'latin1')
@@ -237,8 +237,8 @@ test('S1 五条入口 × 越界输入一律 4xx 带 code；库外哨兵目录字
 })
 
 test('S2 符号链接逃逸：专题 → 库外目录、文件名 → 库外文件，全部拒绝且链接目标无损', async () => {
-  try { symlinkSync(OUTSIDE, join(DATA, 'evil-topic')) } catch { /* 已存在 */ }
-  try { symlinkSync(join(OUTSIDE, 'sentinel.txt'), join(DATA, 's1', 'linked.pdf')) } catch { /* 已存在 */ }
+  try { symlinkSync(OUTSIDE, join(DATA, 'evil-topic'), 'dir') } catch { /* 已存在 */ }
+  try { symlinkSync(join(OUTSIDE, 'sentinel.txt'), join(DATA, 's1', 'linked.pdf'), 'file') } catch { /* 已存在 */ }
   const outsideSnap = snap(OUTSIDE)
   const cases = [
     ['delete-topic', { topic: 'evil-topic', confirmName: 'evil-topic' }],
@@ -296,24 +296,30 @@ test('P2 畸形 JSON 体 / 非对象体 → 可读 4xx（不是外层兜底的 5
   }
 })
 
-test('P3 历史遗留的不规范专题名仍可删除；`.trash` 是保留名（不能当专题删/改名）', async () => {
+test('P3 历史遗留的不规范专题名仍可删除；`.trash` 是保留名（不能当专题删/改名）', async (t) => {
   // 直接落盘造两个「写入路径造不出来」的专题目录（前导点 / 控制字符）
   mkdirSync(join(DATA, '.legacy'), { recursive: true })
-  mkdirSync(join(DATA, 'weird\u0001name'), { recursive: true })
+  // Win32 路径层禁止 0x00-0x1F 控制字符出现在文件名里（落盘即 EINVAL）→ 控制字符那半段是 unix 专属。
+  // Windows 上只跳过这半段（显式记一条 diagnostic），其余断言照跑 —— 上游 905dc59 的同款口径。
+  const ctrlTopic = process.platform === 'win32' ? null : 'weird\u0001name'
+  if (ctrlTopic) mkdirSync(join(DATA, ctrlTopic), { recursive: true })
+  else t.diagnostic('win32：Win32 路径层不允许 0x01 控制字符落盘，跳过「控制字符专题名」半段')
   const d1 = await postJson('/api/library/delete-topic', { topic: '.legacy', confirmName: '.legacy' })
   assert.equal(d1.status, 200, `历史遗留的 .legacy 专题必须能删：${d1.text}`)
   assert.ok(!existsSync(join(DATA, '.legacy')))
-  const d2 = await postJson('/api/library/delete-topic', { topic: 'weird\u0001name', confirmName: 'weird\u0001name' })
-  assert.equal(d2.status, 200, `含控制字符的历史专题也必须能删：${d2.text}`)
+  if (ctrlTopic) {
+    const d2 = await postJson('/api/library/delete-topic', { topic: ctrlTopic, confirmName: ctrlTopic })
+    assert.equal(d2.status, 200, `含控制字符的历史专题也必须能删：${d2.text}`)
+  }
   // 边界类校验仍要挡住会逃逸的名字（不因放开命名规范而放开安全边界）
   for (const x of ['..', 'a/../b', '/abs', 'x\u0000y', '.', '']) {
     assert.throws(() => validateEntryBoundary(x, 'topic'), (e) => e?.code === 'bad-name', `边界类必须拒绝 ${JSON.stringify(x)}`)
   }
   assert.throws(() => resolveExistingTopicDir(DATA, '.trash'), (e) => e?.code === 'bad-name', '.trash 是保留名')
   mkdirSync(join(DATA, '.trash'), { recursive: true })
-  const t = await postJson('/api/library/delete-topic', { topic: '.trash', confirmName: '.trash' })
-  assert.equal(t.status, 400)
-  assert.equal(t.body.code, 'bad-name')
+  const trashRes = await postJson('/api/library/delete-topic', { topic: '.trash', confirmName: '.trash' })
+  assert.equal(trashRes.status, 400)
+  assert.equal(trashRes.body.code, 'bad-name')
   assert.ok(existsSync(join(DATA, '.trash')), '回收站目录本身绝不能被「当专题删掉」')
   rmSync(join(DATA, '.trash'), { recursive: true, force: true })
 })

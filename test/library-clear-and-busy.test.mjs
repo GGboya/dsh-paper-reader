@@ -14,12 +14,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
+import { caseInsensitiveFs as caseInsensitiveFsIn, isTrashRelPath, isBusyErrno, renameOntoNonEmptyDirErrno } from './fs-probe.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO = join(ROOT, '..')
@@ -143,8 +144,16 @@ test('A4 真实的部分失败（不注入）：第 1 个已移动的文件被�
   writeFileSync(join(bundle.abs, files[1].name, 'blocker'), 'x')
   const err = catchErr(() => moveToTrash(bundle, topicDir, files))
   assert.ok(err instanceof ManageError)
-  assert.equal(err.status, 500)
-  assert.equal(err.code, 'trash-move-failed')
+  // 期望值按**本机实测**的 errno 分支（不猜平台）：同样的注入在 unix 上是 EISDIR/ENOTEMPTY（→ 500
+  // trash-move-failed），在 Windows 上是 EPERM（→ 契约的占用语义 409 file-busy）。见 test/fs-probe.mjs。
+  const injErrno = renameOntoNonEmptyDirErrno()
+  if (isBusyErrno(injErrno)) {
+    assert.equal(err.status, 409, `本机注入 errno=${injErrno} 属占用语义 → 409`)
+    assert.equal(err.code, 'file-busy')
+  } else {
+    assert.equal(err.status, 500, `本机注入 errno=${injErrno} → 500 trash-move-failed`)
+    assert.equal(err.code, 'trash-move-failed')
+  }
   assert.deepEqual(err.extra.rolledBack, [files[0].name], '旧行为：第 1 个文件留在回收站（散落状态）')
   assert.deepEqual(err.extra.moved, [], '新行为：回滚后回收站里没有本次移动的文件')
   assert.deepEqual(snap(data), before, '库内逐字节不变')
@@ -298,7 +307,7 @@ test('B1 clear-plan：形状与 delete-plan 对齐（逐篇 files/totalBytes + s
     const missing = await get('/api/library/topic/clear-plan?topic=nope')
     assert.equal(missing.status, 404)
     assert.equal(missing.body.code, 'not-found')
-    symlinkSync(w.root, join(w.data, 'evil'))
+    symlinkSync(w.root, join(w.data, 'evil'), 'dir')
     const link = await get('/api/library/topic/clear-plan?topic=evil')
     assert.equal(link.status, 400)
     assert.equal(link.body.code, 'escape-rejected')
@@ -319,7 +328,9 @@ test('B2 clear：一次确认批量清空 → 逐篇进回收站、专题目录�
     assert.equal(r.body.detachedSessions, 0)
     assert.ok(!existsSync(join(w.data, w.topic)), '清空后专题目录必须删除（非递归 rmdir）')
     const bundle = String(r.body.trashDir)
-    assert.ok(bundle.startsWith(join(w.data, '.trash')), `回收站必须在库内：${bundle}`)
+    // 用 realpath 比较：macOS 上 tmpdir() 给的是 /var/... 而服务端解析成 /private/var/...（同一目录），
+    // 直接做字符串前缀比较会在 macOS 上假红（Linux 上两者相同，断言不变强不变弱）。
+    assert.ok(realpathSync(bundle).startsWith(join(realpathSync(w.data), '.trash')), `回收站必须在库内：${bundle}`)
     assert.ok(existsSync(join(bundle, 'manifest.json')), 'bundle 根必须有总清单')
     for (const n of w.names) {
       assert.ok(existsSync(join(bundle, n, n + '.pdf')), `${n}.pdf 必须在该篇子目录里（可恢复）`)
@@ -476,7 +487,8 @@ test('B8 clear 部分失败：整体回滚（含已完成篇）+ 如实报 clear
   let forwards = 0
   const P2 = w.names[1]
   const inj = (from, to) => {
-    if (from.includes(`${P2}${'/'}`) || to.includes(`${P2}${'/'}`)) {
+    // 用 sep 而不是硬编码 '/'：Windows 上路径里是反斜杠，硬编码会让注入永不触发（CI 实测过）
+    if (from.includes(`${P2}${sep}`) || to.includes(`${P2}${sep}`)) {
       forwards++
       if (forwards === 2) throw Object.assign(new Error('EBUSY: injected'), { code: 'EBUSY' })
     }
@@ -492,7 +504,7 @@ test('B8 clear 部分失败：整体回滚（含已完成篇）+ 如实报 clear
   assert.equal(err.extra.cleared, 0, '整体回滚后没有一篇处于「已清空」状态')
   assert.deepEqual(err.extra.rollbackFailed, [], '本次回滚干净')
   assert.deepEqual(err.extra.moved, [], '回收站里不应残留本次移动的文件')
-  assert.ok(typeof err.extra.trashRel === 'string' && err.extra.trashRel.startsWith('.trash/'), `恢复线索必须是相对路径：${err.extra.trashRel}`)
+  assert.ok(isTrashRelPath(err.extra.trashRel), `恢复线索必须是相对路径（跨平台判定）：${err.extra.trashRel}`)
   assert.ok(!('trashDir' in err.extra), '错误 extra 不得带绝对 trashDir（F-G）')
   assert.deepEqual(snap(w.data), before, '失败 = 库内逐字节零变化（含已回滚的第 1 篇）')
 })
@@ -501,7 +513,7 @@ test('B9 clear 的写路径加固不回退：符号链接专题拒删、别名�
   const w = clearWorkspace()
   const { srv, post } = await boot(w.data)
   try {
-    symlinkSync(w.root, join(w.data, 'evil-topic'))
+    symlinkSync(w.root, join(w.data, 'evil-topic'), 'dir')
     const r = await post('/api/library/topic/clear', { topic: 'evil-topic', confirmName: 'evil-topic' })
     assert.equal(r.status, 400)
     assert.equal(r.body.code, 'escape-rejected')
@@ -600,7 +612,7 @@ test('B12 【F-A 靶子】clear 回滚失败不静默：rollbackFailed/moved/pap
     assert.ok(err.message.includes('P2/P2.pdf'), '文案要点名未回滚的文件')
     // ④ F-G：错误 extra 只给相对路径，绝不带绝对值
     assert.ok(!('trashDir' in e), '错误响应不得带绝对 trashDir（F-G）')
-    assert.ok(String(e.trashRel).startsWith('.trash/'), `trashRel 必须是相对路径：${e.trashRel}`)
+    assert.ok(isTrashRelPath(e.trashRel), `trashRel 必须是相对路径（跨平台判定）：${e.trashRel}`)
     assert.ok(!JSON.stringify(e).includes(data), '错误 extra 任何字段都不许出现 dataDir 绝对路径（F-G）')
     // ⑤ 线索可恢复 + 条目守恒
     const trashRoot = join(data, e.trashRel)
@@ -635,7 +647,7 @@ test('B13 【F-G】错误响应绝不含服务端绝对路径：真实 rmdir 失
     assert.equal(r.body.code, 'topic-not-empty')
     assert.ok(!r.txt.includes(data), `错误响应不得含 dataDir 绝对路径（F-G）：${r.txt}`)
     assert.ok(!('trashDir' in r.body), `错误响应不得带绝对 trashDir 字段（F-G）：${r.txt}`)
-    assert.ok(String(r.body.trashRel).startsWith('.trash/'), `只回相对 trashRel：${r.txt}`)
+    assert.ok(isTrashRelPath(r.body.trashRel), `只回相对 trashRel（跨平台判定）：${r.txt}`)
     assert.deepEqual(snap(topicDir), before, '被拒后库内逐字节零变化')
     assert.equal(readFileSync(join(topicDir, 'P.txt', 'inner'), 'utf8'), 'inner-data', '同名目录内容不得被销毁')
   } finally { srv.close(); rmSync(root, { recursive: true, force: true }) }

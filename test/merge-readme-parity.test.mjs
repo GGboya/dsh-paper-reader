@@ -27,7 +27,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const readmes = ['README.md', 'README_EN.md']
@@ -53,9 +53,7 @@ function trackedDocs() {
 }
 
 test('README 产物清单与代码同步：必须存在**一条 bullet**完整列出全部派生产物与译文变体', async () => {
-  const { PAPER_STEM_SUFFIXES, PDF2ZH_VARIANT_SUFFIXES } = await import(
-    join(REPO, 'dist', 'library-manage.js')
-  )
+  const { PAPER_STEM_SUFFIXES, PDF2ZH_VARIANT_SUFFIXES } = await import(pathToFileURL(join(REPO, 'dist', 'library-manage.js')).href)
   const wanted = [...PAPER_STEM_SUFFIXES, ...PDF2ZH_VARIANT_SUFFIXES]
   for (const file of readmes) {
     const text = readFileSync(join(REPO, file), 'utf8')

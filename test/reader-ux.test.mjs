@@ -17,9 +17,9 @@ import {
   existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   symlinkSync, unlinkSync, writeFileSync, rmSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -38,10 +38,10 @@ const dist = (m) => join(ROOT, '..', 'dist', m)
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-ux-home-'))
 process.env.DSH_HOME = HOME
 
-const { registerRoutes } = await import(dist('host.js'))
-const { buildFormulaIndex, resetFormulaCache } = await import(dist('formulas.js'))
-const { compressMathSpaces, normalizeMathBraces } = await import(dist('mineru.js'))
-const { compactLatex } = await import(dist('formulas.js'))
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
+const { buildFormulaIndex, resetFormulaCache } = await import(pathToFileURL(dist('formulas.js')).href)
+const { compressMathSpaces, normalizeMathBraces } = await import(pathToFileURL(dist('mineru.js')).href)
+const { compactLatex } = await import(pathToFileURL(dist('formulas.js')).href)
 /** 既有投影两步（.txt 形态）：只用于「不变语义」的对照断言。 */
 const compact = (rawLatex) => normalizeMathBraces(compressMathSpaces(rawLatex))
 /** 走完整索引路径取回某条公式的 LaTeX（即接口返回值）。 */
@@ -54,7 +54,7 @@ function latexOf(rawLatex) {
 const {
   ManageError, matchArtifactName, validateName, listArtifacts, planPaperDelete,
   deletePaper, deleteTopic, renamePaper, planTopicDelete,
-} = await import(dist('library-manage.js'))
+} = await import(pathToFileURL(dist('library-manage.js')).href)
 
 // ── 夹具 ─────────────────────────────────────────────────────────────────────
 
@@ -574,7 +574,7 @@ test('C7 符号链接：只移动链接本身，链接目标（库外）内容�
   writeFileSync(secret, 'precious')
   try {
     writeFileSync(join(DATA, 'demo', 'link.pdf'), buildPdf([[[12, 'link paper body text']]]))
-    symlinkSync(secret, join(DATA, 'demo', 'link.txt'))
+    symlinkSync(secret, join(DATA, 'demo', 'link.txt'), 'file')
     const r = await postJson('/api/library/paper/delete', { topic: 'demo', name: 'link' })
     assert.equal(r.status, 200)
     assert.ok(r.body.moved.includes('link.txt'), '链接本身应被移入回收站')
@@ -582,7 +582,7 @@ test('C7 符号链接：只移动链接本身，链接目标（库外）内容�
     assert.ok(!existsSync(join(DATA, 'demo', 'link.txt')))
     // 专题目录本身是符号链接 → 一律拒绝
     const linkTopic = join(DATA, 'evil-topic')
-    symlinkSync(outside, linkTopic)
+    symlinkSync(outside, linkTopic, 'dir')
     const bad = await postJson('/api/library/paper/delete', { topic: 'evil-topic', name: 'secret' })
     assert.equal(bad.status, 400)
     assert.equal(bad.body.code, 'escape-rejected')
@@ -933,7 +933,8 @@ test('F3 二次确认的服务端前提：清单只来自 delete-plan，且不�
 })
 
 test('F4 真实 MinerU 产物（用户库样本，缺失则跳过）：equation 的 bbox/latex 端到端可用', (t2) => {
-  const realDir = join(process.env.HOME || '', '.dsh-paper-reader', 'data')
+  // homedir() 跨平台（Windows 上没有 HOME，用 USERPROFILE）；真实库缺失时本用例自然跳过
+  const realDir = join(homedir(), '.dsh-paper-reader', 'data')
   let hit = null
   if (existsSync(realDir)) {
     for (const d of readdirSync(realDir, { withFileTypes: true })) {

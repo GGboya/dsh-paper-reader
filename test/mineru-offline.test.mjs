@@ -9,17 +9,17 @@ import { createServer } from 'node:http'
 import { deflateRawSync } from 'node:zlib'
 import { mkdtempSync, writeFileSync, readFileSync, statSync, rmSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 
-const mineru = await import(dist('mineru.js'))
-const mcfg = await import(dist('mineru-config.js'))
-const tscribe = await import(dist('transcribe.js'))
-const library = await import(dist('library.js'))
-const search = await import(dist('search.js'))
+const mineru = await import(pathToFileURL(dist('mineru.js')).href)
+const mcfg = await import(pathToFileURL(dist('mineru-config.js')).href)
+const tscribe = await import(pathToFileURL(dist('transcribe.js')).href)
+const library = await import(pathToFileURL(dist('library.js')).href)
+const search = await import(pathToFileURL(dist('search.js')).href)
 
 const { projectContentList, parseContentListString, stripHtmlTags, extractZipEntries, pickZipMarkdown, pickZipContentList, asciiSanitize, parseLocalMineru, parseCloudMineru, MineruError } = mineru
 const { resolveMineruConfig, readMineruConfig, writeMineruConfig, clearMineruConfig, mineruConfigPath, normalizeLocalBaseUrl, maskApiKey, mergeMineruBody, testMineruLocal, testMineruCloud, MINERU_DEFAULTS } = mcfg
@@ -283,8 +283,12 @@ test('resolveMineruConfig：file > profile > env > 默认，逐字段；source �
 test('写配置权限 0600；maskApiKey 只露头 3 尾 4；apiKey 留空沿用', async () => {
   const home = tempDir()
   await writeMineruConfig({ ...MINERU_DEFAULTS, mode: 'local' }, home)
-  const mode = statSync(mineruConfigPath(home)).mode & 0o777
-  assert.equal(mode, 0o600)
+  // 同 embed：0600 是 POSIX 概念，Windows 上 statSync().mode 不承载它 → 分平台断言。
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(mineruConfigPath(home)).mode & 0o777, 0o600)
+  } else {
+    assert.ok(existsSync(mineruConfigPath(home)), 'mineru.json 必须落盘')
+  }
 
   assert.equal(maskApiKey('short'), '••••')
   assert.equal(maskApiKey('sk-1234567890abcd'), 'sk-…abcd')

@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 
@@ -26,17 +26,17 @@ const HOME = mkdtempSync(join(tmpdir(), 'dpr-t6-home-'))
 process.env.DSH_HOME = HOME
 delete process.env.DSH_EMBED_API_KEY
 
-const embed = await import(dist('embed.js'))
-const search = await import(dist('search.js'))
-const mineru = await import(dist('mineru.js'))
-const { registerTools } = await import(dist('tools.js'))
+const embed = await import(pathToFileURL(dist('embed.js')).href)
+const search = await import(pathToFileURL(dist('search.js')).href)
+const mineru = await import(pathToFileURL(dist('mineru.js')).href)
+const { registerTools } = await import(pathToFileURL(dist('tools.js')).href)
 const {
   embeddingsPathFor, embeddingRecallFor, chunkSetHash, clearEmbedQueryMemo, readEmbedCache,
 } = embed
 const { chunkText, searchChunks, searchChunksMulti, queryVariants, queryVariantsFor, compactQuery } = search
-const { resolvePaper } = await import(dist('library.js'))
-const { transcribePaper } = await import(dist('transcribe.js'))
-const { MINERU_DEFAULTS } = await import(dist('mineru-config.js'))
+const { resolvePaper } = await import(pathToFileURL(dist('library.js')).href)
+const { transcribePaper } = await import(pathToFileURL(dist('transcribe.js')).href)
+const { MINERU_DEFAULTS } = await import(pathToFileURL(dist('mineru-config.js')).href)
 const { chunkText: _ct } = search
 const { compressMathSpaces, normalizeMathBraces, normalizeMathTokens, projectContentList } = mineru
 
@@ -136,7 +136,7 @@ test('1.1 默认关闭：hits 与改造前逐字节一致（散文/紧凑/反例
     if (baseOk) {
       // 更强的对照：真跑 HEAD 基线 dist 的同一工具，逐字节比 hits
       const baseTools = {}
-      const { registerTools: regBase } = await import(join(BASE_DIST, 'tools.js'))
+      const { registerTools: regBase } = await import(pathToFileURL(join(BASE_DIST, 'tools.js')).href)
       const dir2 = tempDir()
       const p2 = seedPaper(dir2, DOC, 'mineru-local')
       regBase({ tools: { register: (t) => { baseTools[t.name] = t } }, logger: { info: () => {}, warn: () => {} } }, { dataDir: dir2 })
@@ -574,7 +574,7 @@ test('10.2 隐私提示与实测一致性：分块文本与**查询文本**都�
 // ── 11. 服务端预检（README 声明「保存前真打一发 /embeddings」）─────────────
 
 test('11.1 预检：testEmbedEndpoint 真打端点，坏端点 ok=false 且错误可读', async () => {
-  const { testEmbedEndpoint } = await import(dist('embed-config.js'))
+  const { testEmbedEndpoint } = await import(pathToFileURL(dist('embed-config.js')).href)
   const good = await startMock(() => ({}), 4)
   const bad = await startMock(() => ({ status: 500, body: '{"error":"nope"}' }), 4)
   try {

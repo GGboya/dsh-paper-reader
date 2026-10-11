@@ -13,17 +13,17 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 
-const mcfg = await import(dist('mineru-config.js'))
-const tscribe = await import(dist('transcribe.js'))
-const library = await import(dist('library.js'))
-const search = await import(dist('search.js'))
+const mcfg = await import(pathToFileURL(dist('mineru-config.js')).href)
+const tscribe = await import(pathToFileURL(dist('transcribe.js')).href)
+const library = await import(pathToFileURL(dist('library.js')).href)
+const search = await import(pathToFileURL(dist('search.js')).href)
 const { MINERU_DEFAULTS } = mcfg
 const { transcribePaper, readTranscript } = tscribe
 const { resolvePaper } = library
@@ -231,7 +231,7 @@ const realSkip = guAvailable ? false : '未设置 DPR_SAMPLE_PDF（或该文件�
 
 test('端到端（真实 PDF）：单页 MinerU /file_parse → 投影 → chunkText/searchChunks 命中公式', { skip: realSkip }, async () => {
   try {
-    const { parseLocalMineruSync } = await import(dist('mineru.js'))
+    const { parseLocalMineruSync } = await import(pathToFileURL(dist('mineru.js')).href)
     const buf = readFileSync(GU_PDF)
     const r = await parseLocalMineruSync({
       baseUrl: 'http://127.0.0.1:8000', apiKey: '', backend: 'pipeline', effort: 'medium', parseMethod: 'auto',

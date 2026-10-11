@@ -10,13 +10,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 
-const { testTranslateEndpoint, maskApiKey } = await import(dist('translate-config.js'))
+const { testTranslateEndpoint, maskApiKey } = await import(pathToFileURL(dist('translate-config.js')).href)
 
 /** 起一个本地 mock 端点，返回 { server, url }。 */
 function startServer(handler) {
