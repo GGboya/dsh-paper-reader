@@ -7,15 +7,9 @@
 
 **中文**: [README.md](README.md)
 
-A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin that turns your agent workspace into a **paper reading workbench**: PDF transcription & search, native chat-based companion reading, and a built-in PDF reader — with answers that cite page numbers and **jump back to the exact highlighted passage in the PDF**.
-
-> **👉 Just want to use it?** Jump to [Install → Option 1](#install): get the official DeepSeek desktop app and add the plugin — no dev environment needed. This repository is for people who want to install the plugin themselves or hack on the code.
+A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin: a **paper reading workbench** — paper library + PDF reader + AI companion. Every answer cites page numbers, and clicking a page jumps back to the exact highlighted passage. Current version: **v1.4.0**.
 
 > 💬 **QQ group: 1127244508** — questions, feature requests, and bug reports are all welcome.
-
-The agent loop, model layer, and session persistence are all handled by the dsh framework; this plugin is a thin shell composing transcription + retrieval + reader UI.
-
-**Does not modify the official UI on install** — a single "📚 Paper Reading" toggle appears at the bottom of the sidebar. Click it to enter reading mode (sidebar becomes a paper library tree), click again to restore the official workspace list:
 
 ![Demo: select-to-ask, answers cite page numbers, click a page to jump back to the highlighted passage](docs/demo.gif)
 
@@ -23,316 +17,123 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 
 ![Reading mode: paper library + PDF reader + native chat](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/screenshot-reading.png)
 
-## Features
+## Core capabilities
 
-- 📚 **Sidebar paper library**: when reading mode is on, the workspace sidebar shows Topics → Papers; create topics and upload PDFs (off by default — the official UI is never overwritten)
-- 💬 **Native chat companion**: clicking a paper opens its own native dsh conversation (streaming / tool cards / usage bars are all official UI); the 🕐 dropdown in the chat header replays **conversation history** with real titles and dates; ＋ starts a new conversation
-- 🔗 **Sessions bound to papers**: the session id encodes the paper's identity, so tool calls auto-locate the current paper — just ask questions in the input box without naming the paper; every answer cites page numbers
-- 🤖 **Dedicated agent preset "Paper Tutor"**: paper sessions automatically use a tutor-style preset — like a teacher guiding your reading: builds a step-by-step reading plan (each step with page numbers and reflection questions) → guides section by section, comments on your answers → quizzes you and grades each answer → scores and weak points are recorded in a `<paper>.study.json` study profile that accumulates across sessions; quick Q&A (select-to-ask) gets a direct answer, no lecture
-- 📖 **Centered PDF reader**: the paper sits in the middle (PDF.js zoom / Retina rendering / text-layer selection / fit-width mode / **scroll ↔ single-page paged mode** — `‹ ›` page buttons, jump by typing a page number, ← → / PageUp / PageDown / Space / Home / End keyboard paging), its native chat on the right — implemented via visual swapping, so column dragging/collapsing stays native dsh behavior; closing the PDF tab restores the official layout; the status bar shows the paper's full PDF path (click to copy)
-- 💬 **Select-to-ask**: select text in the reader → a question box pops up → injects into the current session, answered live in the native chat
-- 📍 **Citation jumping**: "Page N" in an answer is clickable — smooth-scrolls back to that PDF page and flashes the cited passage
-- 🀄 **Chinese/English toggle + export**: the "中" button in the top bar switches original ↔ full Chinese; if no translation exists, one click generates it in the background (babeldoc) — **no Python preinstall required**: first use auto-downloads uv + managed Python + babeldoc (macOS / Linux / Windows, a few minutes), everything stays in the user directory; the ⤓ button in the top bar **downloads the version you are looking at** (original / full Chinese / bilingual PDF)
-- 🔍 **PDF transcription + search**: local extraction (pdf.js, pure Node, no Python), header/footer stripping / ligature / hyphenation repair / paragraph reflow, with a page-offset table; compatible with pdfqa's `data/` cache layout
-- 🧲 **Optional MinerU parsing backend**: for scanned PDFs / complex layouts / tables and formulas you can switch to MinerU (local API or mineru.net v4 cloud); output is the same page-indexed cache. Off by default — with no configuration the behavior is identical to previous versions (see "MinerU parsing backend" below)
-- 🧮 **Click-to-cite formulas** (v1.4.0): formulas in the PDF text layer come out as garbage (`𝑧𝑧1 𝑥𝑥𝑡𝑡`-style duplicated glyphs), so selecting them is useless; now you **click a formula in the PDF** and cite the **LaTeX** MinerU recognized (e.g. `$$\pi(\mathbf{s}_t)$$`), which enters the session through the existing select-to-ask path. **Requires the paper to have been parsed by MinerU first** (see "Formula citing and library management" below)
-- 🗂️ **Library management: delete & rename** (v1.4.0): topic rows and paper rows in the sidebar tree gained hover `✎` (rename) / `🗑` (delete) buttons — rename topic/paper, delete paper/topic, both in in-page portal dialogs (Electron has no window.prompt/confirm). Deletion is **destructive**: **a single click on `🗑`** opens a confirmation dialog whose file list **comes from the server** (`/api/library/paper/delete-plan` — the front end never assembles it); artifacts are moved into a trash folder inside the library (`data/.trash/`, recoverable), behind server-side preconditions (read "What deletion does" below)
+- 📚 **Three-pane workbench**: Topics → Papers library, centered PDF reader (zoom / fit-width / scroll ↔ single-page paged mode / keyboard paging), native chat on the right
+- 💬 **Page-cited companion**: every answer cites page numbers; click one to jump back and flash the passage; select-to-ask on any text; 🕐 conversation history, ＋ new chat
+- 🤖 **Tutor mode**: paper sessions automatically use a dedicated preset — step-by-step reading plans, section-by-section coaching, graded quizzes; progress accumulates across sessions
+- 🀄 **Chinese version**: original ↔ full-Chinese in-place toggle (babeldoc auto-installed, zero preinstall); one-click export (Chinese / bilingual PDF)
+- 🗂️ **Library management**: rename/delete topics and papers (deletion shows a file manifest first, goes to a **recoverable** trash; non-empty topics support batch-clear with one confirmation)
+- ➕ **Two optional add-ons** (off by default, see "Advanced"): MinerU parsing — scanned PDFs become readable, formulas become click-citable and searchable; an embeddings endpoint — plain-language semantic search
 
-## Formula citing and library management (v1.4.0)
-
-### Click to cite a formula
-
-The reader toolbar has a new **"∑ 公式" (Formulas)** button. Two entry points:
-
-1. **Click a formula in the PDF** → the ask popup opens with that formula's LaTeX filled in (the bubble shows "p.N · formula k" plus a LaTeX preview); type your question and press Enter. A **"复制 LaTeX" (Copy LaTeX)** button is provided — the plugin **never** writes to your clipboard automatically.
-2. **The "∑ 公式" panel** lists every formula of the paper by page with its LaTeX; clicking an item cites it too (fallback when a hotspot is hard to hit, and handy for copying LaTeX).
-
-- **Requires the paper to have been parsed with MinerU** (Settings → Paper Reader → MinerU parser, or use the panel's "Re-parse with MinerU" button). Formula blocks (`equation` `bbox` + LaTeX) only exist in MinerU's `<paper>.mineru.json`; the pdf.js text layer cannot provide usable formulas.
-- **No artifact? Nothing breaks**: the entry is greyed out with an explanation and a "Re-parse with MinerU" button; select-to-ask and everything else keeps working.
-- Corrupt artifact / no formula blocks: you simply get "no formulas available" — reading and asking still work.
-- **No formula hotspots in the translated view** (Chinese / bilingual): the bbox only applies to the original page layout; switch back to the original to click.
-- Formula citing and text selection **never fight**: an existing text selection wins, and the hotspot layer does not intercept mouse events (drag-selection keeps working).
-
-### Delete and rename
-
-Both **topic rows** and **paper rows** in the sidebar library tree show `✎` (rename) and `🗑` (delete) buttons on hover:
-
-| Action | Behaviour |
-| --- | --- |
-| Rename topic / paper | Renames all same-stem artifacts and translation variants together. **Note**: companion session ids embed "topic/paper", so past conversations are kept but no longer listed under the renamed paper (the dialog says so) |
-| Delete paper | **One click on `🗑`** → a confirmation dialog lists every file **returned by the server** and its size → on confirm the files are **moved to the trash** |
-| Delete topic | **Empty topic**: click `🗑` → type the topic name to confirm. **Non-empty topic**: click `🗑` to open the **bulk clear** step (server-side clear list, typed topic name, one confirmation) |
-
-**Bulk-clearing a non-empty topic (one confirmation)**: a 30-paper topic no longer means 30 confirmations. The dialog after clicking `🗑` lists **every paper** that will be moved to the trash (name + file count + size, from the server-side dry-run `/api/library/topic/clear-plan` — the front end never assembles it); type the topic name and confirm once:
-
-- each paper still goes through **the same trash** (`data/.trash/<bundle>/<paper>/`, one `manifest.json` per paper plus a bundle-level manifest — all recoverable), still moving **exact-stem** artifacts only, `.pdf` last;
-- the same **preconditions** apply (running companion session / translation in progress are refused; the dialog flags the papers that will be blocked, and the server finishes every check before moving a single byte);
-- any failure **rolls back every file moved by that request** (rename back, never `unlink`); files that could not be rolled back are reported truthfully (`rollbackFailed` + `trashDir` for manual recovery) — no half-deleted leftovers;
-- only after everything is moved is the topic folder removed, **non-recursively** (never `rm -rf`); hidden entries (`.DS_Store` …) go to the trash instead of being destroyed.
-
-**What deletion does (important)**:
-
-- Files handled = the paper's **same-stem artifacts** under `data/`: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json` (the learning archive: reading plan + quiz scores), plus translation variants `<paper>-zh.pdf` / `-dual.pdf` / `-en.pdf` and leftover `.tmp-*` files.
-- **Recoverable**: files are `rename`d into `data/.trash/<timestamp>-<random>/` (same filesystem, never `unlink`) with a `manifest.json` listing them. Move what you need back into the topic folder to restore (this version does **not** auto-purge, and ships no one-click restore UI). A successful delete response carries the absolute path of that trash folder as `trashDir` (a contract field, so scripts/users can go restore directly; **error** responses never contain server-side absolute paths).
-- **Never deleted**: companion chat history (kept by dsh — note the **learning archive file** `<paper>.study.json` is one of the same-stem artifacts above and does move to the trash with the paper, where it can be restored), the shared translation venv `data/.venv-pdf2zh/`, the scratch dir `data/.pdf2zh-tmp/`, other papers and topics, and the topic folder itself.
-- **Non-conforming paper names (placed by hand)**: every write path (new topic / upload / rename) enforces the naming rules, so the plugin never creates a non-conforming name itself. But if you drop a dot-prefixed PDF (e.g. `.hidden.pdf`) into `data/` by hand, it is listed in the tree and **can be deleted / renamed normally** — deletion, and the **source** name of a rename, only get **boundary checks** (rejecting path separators, `..`, NUL and reserved names), while the naming rules are enforced only when **creating** or **renaming to** a new name. That way no entry already on disk becomes a "visible but undeletable" orphan.
-- **Safety boundary**: every delete/rename operates **only inside the library directory** (`data/`, from `DSH_PAPER_READER_DATA`, default `~/.dsh-paper-reader/data`). Path traversal (`..`, absolute paths, symlink escapes) is rejected; write routes accept **only** "topic + paper name" and no arbitrary path parameter; a symlinked topic is refused outright, and a symlinked file has only the link moved (its target is untouched).
-- **Preconditions**: if a paper has a **running companion session** or a **translation in progress**, delete/rename is refused (so a running session's working directory is never pulled out, and a finished translation cannot write files back).
-- Two more refusals, both deliberate: if the **session state cannot be determined**, the operation is refused (retry later) instead of assuming "no sessions"; and if **another delete/rename for the same paper is already in flight**, the second request is refused (so two operations never interleave over the same files).
-
-## MinerU parsing backend (optional)
-
-By default text is extracted locally with pdf.js (pure Node, no Python, milliseconds for text PDFs). Optionally you can
-use **MinerU** as the parsing backend for scanned PDFs / complex layouts / tables and formulas — the output is still the
-same page-indexed cache (`.txt` + `.pages.json`), and search / page jumping / old caches behave exactly as before.
-
-Pick a mode in **Settings → Paper Reader → "MinerU parser"** (or set it in the config file):
-
-| Mode | Meaning |
-| --- | --- |
-| `off` (default) | Disabled; behavior is identical to previous versions |
-| `local` | Local MinerU API (default `http://127.0.0.1:8000`) |
-| `cloud` | mineru.net v4 cloud; requires a token |
-
-**Local MinerU** (the official API server; this repo was tested against 3.4.5):
-
-```bash
-pip install -U "mineru[core]"
-mineru-api --host 127.0.0.1 --port 8000        # or: uvicorn mineru.cli.fast_api:app
-curl -s http://127.0.0.1:8000/health           # {"status":"healthy","version":"3.4.5",...}
-```
-
-The default backend is `pipeline` (general purpose, no VLM model needed); with a GPU you can switch to `hybrid-engine`
-(needs the VLM model ready — a 2-page synthetic PDF took ~5s here). For scanned PDFs keep the parse method on `auto`
-and let MinerU decide on OCR.
-
-**Cloud MinerU (three steps, about a minute)**:
-
-1. Sign up at [mineru.net](https://mineru.net);
-2. Create a token under "API management" and copy it;
-3. Open dsh **Settings → Paper Reader → MinerU parser**: set mode to "Cloud", paste the token into "Cloud token", click **Test connection**, then save.
-
-Two reasons to bother (one line each):
-
-- **Formula citing**: formulas in the PDF text layer come out as garbage (`𝑧𝑧1 𝑥𝑥𝑡𝑡`-style duplicated glyphs) — only the LaTeX MinerU recognizes can be clicked and cited;
-- **Scanned PDFs / complex layouts**: those have no text layer, so pdf.js gets nothing; MinerU (OCR) can read them.
-
-**What still works without it** (matches the implementation — no overclaiming): transcription uses local pdf.js, which is plenty for text-layer PDFs (transcription, search, select-to-ask and translation export are unaffected); only **scanned PDFs and formula citing** need MinerU. Once configured and saved, the reader's formula panel gains a "Re-parse with MinerU" button (with mode "Off" that button is not rendered at all, so pdf.js can never overwrite existing MinerU artifacts by accident).
-
-The parse sequence is: request a batch upload URL → PUT the file → poll → download and unzip.
-✅ **The cloud `pipeline` channel has been tested end-to-end** (2026-10-11, real token + one **real 19-page paper**: submit → poll → download zip → project → search; **25 assertions, 0 failures, ~19s**; all **18/18** equation bboxes + LaTeX **byte-identical** to the local artifacts).
-⚠️ **Still unverified** (treat as experimental): the `vlm` model family (`vlm-engine`/`vlm-http-client`) and failure paths such as quota exhaustion / HTTP 429 / zip retries — those are covered by mocks only.
-The token is stored only in `~/.dsh/.dsh-paper-reader/mineru.json` (0600); read APIs return a mask only, and logs / errors / responses never contain the plaintext.
-
-**Config file / environment variables** (per-field priority: file > profile YAML `config.mineru` > env > defaults):
-
-```yaml
-- id: dsh-paper-reader
-  config:
-    mineru:
-      mode: local
-      local:
-        baseUrl: http://127.0.0.1:8000
-        backend: pipeline
-        parseMethod: auto
-      # cloud:
-      #   apiKey: ''          # usually unnecessary — fill it in the UI
-```
-
-| Environment variable | Field |
-| --- | --- |
-| `DSH_MINERU_LOCAL_URL` | `local.baseUrl` |
-| `MINERU_API_KEY` | `cloud.apiKey` |
-
-**Cache and provenance**: MinerU still writes `.txt` + `.pages.json` (`page` starts at 1, used to map search hits back to
-pages), plus `.transcript.json` (origin marker: `pdfjs` / `mineru-local` / `mineru-cloud`) and the MinerU rich artifacts
-`.mineru.md` / `.mineru.json` (Markdown + content_list for manual inspection). An old cache without an origin marker is
-treated as pdfjs, and **upgrading never triggers a re-parse**; to switch origins, ask explicitly for one paper
-(agent-side: the `source` parameter of `transcribe_pdf`; HTTP-side: `source` in `POST /api/transcribe`, values
-`auto|pdfjs|mineru-local|mineru-cloud`). When MinerU fails, the existing cache is left **untouched** and the error carries
-the HTTP status plus a sanitized server message.
-
-**Searchable formulas (since v1.3.4)**: MinerU emits LaTeX with a space between *every* token (`x _ { t - 1 }`), so
-previously `search_paper` only matched when that spaced form was copied verbatim. Projecting into `.txt` now strips the
-whitespace inside math regions (`$...$` / `$$...$$`) and then normalizes the braces of *single-token* sub/superscripts
-(`Q_{t}` → `Q_t`, `^{2}` → `^2`). Normal-looking queries such as `x_{t-1}`, `\mathbb{R}`, `Q_t` and `q(x_t|x_{t-1})`
-therefore match directly (measured on a real paper: 0 hits before → hits on the matching page after). Commands whose
-spaces are semantic (`\text{...}`) are kept verbatim as a whole group; multi-token arguments (`x_{t-1}`, `x_{ij}`,
-`^{K \times K}`) keep their braces; `.mineru.md` / `.mineru.json` remain exactly as MinerU produced them.
-
-> **Upgrade note**: existing `.txt` caches on disk are **not rewritten** (they stay in the old format, so formula
-> queries still miss). To make a given paper's formulas searchable, re-transcribe that paper explicitly: pass
-> `source: mineru-local` (or `force: true`) to `transcribe_pdf`, or the same `source` to `POST /api/transcribe`.
->
-> **Notation convention**: the `.txt` stores the **compact form** (`Q_t`). On the query side the *same rule* is
-> applied first and matched **alongside your original query**, so both `Q_t` and `Q_{t}` hit the same page (the
-> original query is always kept, so no existing hit is ever lost); multi-token forms such as `x_{t-1}` / `x_{ij}`
-> are not normalized and match as written.
->
-> **Two low-severity items (scheduled for the next round)**:
-> F-R1 `keepsInnerSpaces` prefix-matches the two-argument `\textcolor` into the "spaces are semantic" guard (the second
-> group of `$\textcolor{red}{hello world}$` gets its spaces compressed); F-R2 the region scanner does not look inside
-> `\text{}` groups (`$\text{costs $5}$` is split at the inner `$` — a sub-case of the documented boundary).
-
-**API** (used by the settings panel, behind the usual `/paper-reader` prefix and auth): `GET|POST|DELETE /api/mineru/config`
-(GET returns masked values only; POST persists only after a successful pre-check; DELETE falls back to profile/env),
-plus `POST /api/mineru/test` and `GET /api/mineru/health` for connectivity checks (they never persist anything).
-
-**Common errors**:
-
-| Symptom | Cause / fix |
-| --- | --- |
-| Save fails with "local MinerU connection test failed: HTTP 404 …" | The URL points at another service, or MinerU is too old (2.x has no `/health`); check with `curl {baseUrl}/health` |
-| "not a recognized MinerU API server" | `/health` lacks `status`/`version` — not MinerU |
-| Parse fails with "local MinerU parse failed (HTTP 409)" | The server-side task failed; read the `error` field. On MinerU 3.4.5 a 409 means **parse failure**, not "server busy" |
-| "result is empty / no content" | The server produced no md/content_list (models not ready, etc.); validate the service itself with `curl -F files=@x.pdf http://127.0.0.1:8000/file_parse` |
-| Parse times out | A single paper is capped at 30 minutes by default (`jobTimeoutMs`); raise it in the config file |
-| Cloud says the token is invalid | The token expired, or you pasted the `Bearer ` prefix too (enter the token body only) |
-
-> **What exactly was verified (do not read this as "the whole cloud path is proven")**: mineru.net v4's **`pipeline`
-> channel has been exercised with a real token** (one real 19-page paper; 25 assertions, 0 failures, ~19s; all 18/18
-> equation bboxes/LaTeX byte-identical to the local artifacts). The **`vlm` model family, quota exhaustion / 429 /
-> zip retries** remain **unverified** (mocks only). The local path is verified end-to-end
-> against MinerU 3.4.5. A few low-severity items remain (non-transactional multi-file writes and a non-increasing
-> poll interval on the cloud path, leftover dead code in the ZIP reader). None of them affect the default path:
-> `mode` defaults to `off`, and behaviour is identical to before when MinerU is not configured.
-
-
-## Embedding search (optional, off by default)
-
-Besides keyword substring matching, `search_paper` can use an **OpenAI-compatible `/embeddings` endpoint** for
-semantic recall: passages that are semantically close but share **no keyword** with the query still enter the
-candidate set (fused with keyword hits, never replacing them). This helps a lot with paraphrased questions,
-cross-language phrasings, or "the passage with the diffusion formula" style queries.
-
-**How to configure** (same precedence as the translate/rerank endpoints: settings panel > profile YAML > env var):
-
-| Way | How |
-| --- | --- |
-| Settings panel (recommended) | Settings → Paper Reader → **"Embedding search (optional)"** card; fill endpoint URL / model / API key. A real `/embeddings` call is made as a pre-check before saving |
-| profile YAML | `config.embed: { baseUrl, apiKey, model }` |
-| Env var | `DSH_EMBED_API_KEY` (key only; baseUrl/model still need to be configured) |
-
-Stored at `$DSH_HOME/.dsh-paper-reader/embed.json` (**0600**, same convention as `translate.json`/`typesafe.json`);
-the read API returns only `hasApiKey` plus a masked `apiKeyHint` — never the plaintext key.
-
-> ⚠️ **Privacy notice**: once enabled, **two kinds of text are sent to the endpoint you configure** — ① the paper's
-> **chunk texts** (to compute chunk vectors; a mock capture confirms the bodies themselves are what gets sent), and
-> ② **the query text of every search** (it is embedded first to get a query vector). Only point it at a service you
-> trust; **with nothing configured, not a single request is made**. Neither the cache file nor any error message
-> contains the API key (query vectors live only in an in-process memo and are never written to disk).
-
-**Behaviour and degradation**: unconfigured (or partially configured) = **off by default** — `search_paper` behaves
-**exactly as before** (pure keyword ranking, zero extra requests). When configured: keyword candidates ∪ embedding
-candidates → RRF fusion → existing Jev/TypeSafe rerank if configured → top-k.
-**Fusion behaviour, stated plainly**: keyword and semantic candidates are fused by **rank** (RRF, k=60) — ranks only, **score magnitude is ignored** — so the two lists **alternate occupying the final top-k slots** (a top-ranked semantic hit can land ahead of a second-ranked keyword hit); "keyword wins" applies only to **exact ties**. Embedding is a **recall** step, not a replacement (keyword search always runs and keeps contributing candidates), but semantic candidates really can take some of the top-k slots — that is intentional (no real embedding endpoint is available to tune against, so score-interpolation or reserved-slot strategies are deliberately not introduced). **With no endpoint configured nothing changes at all**: no requests are made and ranking is byte-identical to before. If the endpoint
-is unreachable / times out / errors / returns invalid dimensions or non-numeric values, the keyword results are still
-returned and the degradation reason is stated verbatim at the end of the result
-(`（嵌入检索不可用，已降级为纯关键词：…）`) — never a silent failure, never a broken search.
-
-**Cache and invalidation**: `<topic>/<paper>.embeddings.json`, keyed by `{baseUrl, model, dimensions, content hash}`.
-**Changed endpoint (baseUrl) / changed model / changed `.txt` (re-transcribed) / changed chunk size / returned
-dimensions that disagree with the cache** → the cache is invalidated and recomputed; **on a cache hit no chunk-embedding request is made** (query vectors
-have an in-process memo, so repeating the same query makes zero requests). Chunks are submitted in batches
-(`batchSize`, default 32); **if any batch fails the whole recall degrades and nothing is written** — no half-written cache.
-
-Lazy by design: embeddings are computed **on the first search of that paper**; transcription (`transcribe_pdf`) never
-touches embeddings, so transcription speed and failure surface are unaffected.
-
-> **Non-goals (future work)**: local ONNX / transformers.js embedding models, precomputing the whole library,
-> vector databases — this round is API endpoints only.
+Installing **does not modify the official UI**: a single "📚 Paper Reading" toggle appears at the bottom of the sidebar; click to enter reading mode, click again to restore.
 
 ## Install
 
-### Option 1: Official desktop app + plugin (recommended)
+### Everyday users: official desktop app (recommended)
 
-**DeepSeek official desktop** (download from [deepseek.com/download](https://www.deepseek.com/download/) — the DeepSeek Harness desktop app):
+**Two steps**: install the official DeepSeek desktop app → add the plugin inside it.
 
-1. Install, launch, and sign in
-2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@latest`
-3. Newly installed plugins start **disabled**: open the plugin's detail and flip the **Enable** switch
-4. **Restart the desktop app** (with the plugin enabled live, opening papers silently fails until a restart brings it into the boot composition — tested)
+1. Install [the official DeepSeek desktop app](https://www.deepseek.com/download/) (the DeepSeek Harness desktop) and sign in
+2. Sidebar → **Plugins** → **Add plugin**, enter `@ggboy123/dsh-paper-reader@latest`, open the plugin's detail page and flip the **Enable** switch, then **restart the app**
 
-> Verified on official desktop V0.2.0-rc.2 (bundled dsh 0.2.0-rc.2, macOS arm64): library tree, new topic, PDF upload, PDF reader, native companion chat, history/new-chat buttons all work.
-> Requires >= 1.2.0 — older versions are denied by the 0.2.x runtime's peer-compatibility check (shown as an error in the plugin list).
+Done. Click "📚 Paper Reading" at the bottom of the sidebar, upload a PDF, and start reading.
 
-**Gotchas (all hit in practice)**:
+Full walkthrough (add plugin → enable → restart → open a paper and ask):
 
-- **An upgrade resets the plugin toggle to disabled**: Sidebar → Plugins → flip **Enable** → restart. The symptom is misleading — the library tree is still there but clicking a paper does nothing (the browser-side cache is alive while the host side is offline). It is not an install problem, it is the toggle.
-- **Always add with `@latest`**: a bare `add` without a version is a no-op for an already-installed plugin (dsh's plugin manager resolves from the version recorded at first install, so it never follows new releases)
-- The former PaperReader desktop app (a preinstalled bundle built on the community DSH Desktop) is **no longer maintained**; migrate to the official desktop + plugin path above
+![Install and use the paper-reading plugin on the official desktop app](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/desktop-official-use.gif)
 
-### Option 2: CLI dsh (developers)
+> Verified on official desktop V0.2.0-rc.2 (bundled dsh 0.2.0-rc.2, macOS arm64).
+> Requires ≥1.2.0 — older versions are rejected by the 0.2.x runtime's peer-compatibility check.
+
+> To browse a plugin marketplace inside the client (4000+ plugins, categories, one-click install), also install the community plugin [`dshmarket`](https://github.com/dsh-market/dsh-market); this plugin is listed there.
+
+**Pitfalls (all hit in real testing)**:
+
+- **After upgrading, the plugin's enable switch resets to off**: sidebar → Plugins → flip **Enable** → restart. The symptom is misleading — the library tree is still there but clicking papers does nothing
+- **Always add with `@latest`**: a bare add on an already-installed plugin is a no-op (dsh's plugin manager keeps the first-recorded version)
+- If pnpm's `minimumReleaseAge` supply-chain policy is on (desktop default): wait out the window, or add `minimum-release-age-exclude[]=@ggboy123/dsh-paper-reader` to `~/.dsh/profiles/web/.npmrc`; the desktop's exclusion list lives in `~/.dsh/profiles/desktop/pnpm-workspace.yaml` (`minimumReleaseAgeExclude`)
+- The old PaperReader desktop bundle (community DSH Desktop) is **no longer maintained** — migrate to this path
+
+### Developers: CLI dsh
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest
 ```
 
-> The package lives under the `@ggboy123` scope: the bare name `dsh-paper-reader` is taken by a different plugin (a one-shot "feed a paper, get a report" analyzer — different positioning from this plugin's "reader + conversational companion").
-> Do NOT install via `github:GGboya/dsh-paper-reader` — dist is not committed to git, so a git install leaves the profile unable to start (build artifacts ship only with the npm package).
+> The package lives under the `@ggboy123` scope: the bare name is taken by a different plugin.
+> Do NOT install via `github:GGboya/dsh-paper-reader` — dist is not committed, so a git install leaves the profile unable to start.
 
-### Upgrading
-
-**Use `@latest` (or an explicit version) to upgrade** — a bare `add` without any version/tag is a no-op for an already-installed dependency (dsh's plugin manager resolves from the version recorded at first install, verified), so either pin the version or use the tag:
+**Upgrades** also use `@latest` (or an explicit version) — a bare `add` on an installed dependency is a no-op:
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # always newest
-# dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.4.0  # or pin a version
+grep '"version"' ~/.dsh/profiles/web/node_modules/@ggboy123/dsh-paper-reader/package.json   # check current version
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 
-Check which version you currently have:
+## How to use
 
-```bash
-grep '"version"' ~/.dsh/profiles/web/node_modules/@ggboy123/dsh-paper-reader/package.json
-```
+1. **Enter**: click "📚 Paper Reading" at the bottom of the sidebar — it becomes the library tree (click again to restore the official workspace list)
+2. **Add papers**: ＋ create a topic → ⬆ upload PDFs (with an empty library, "Upload PDF" auto-creates a default topic)
+3. **Read + ask**: click a paper — reader in the middle, chat on the right. Ask in the input box (no need to name the paper; answers cite pages), or **select text** in the reader for a pop-up question box; click "page N" in an answer to jump back
+4. **Chinese version**: the "中" button — one click generates a translation if none exists (first use auto-installs the engine; fill in an OpenAI-compatible endpoint once — DeepSeek/GLM/Kimi keys all work); ⤓ downloads the version you're viewing; ▣ toggles single-page mode
+5. **Manage**: hover a row for ✎ rename / 🗑 delete. Deletion lists the files first, then moves them to a **recoverable trash** (`data/.trash/`); deleting a non-empty topic = batch-clear with one confirmation
+6. **Chats**: 🕐 in the chat header shows that paper's history; ＋ starts a new conversation
 
-> If pnpm has the supply-chain policy `minimumReleaseAge` enabled (rejects packages published within N hours): either wait out the window, or add `minimum-release-age-exclude[]=@ggboy123/dsh-paper-reader` to `~/.dsh/profiles/web/.npmrc` (exempts only this plugin).
+## Advanced (optional, off by default)
 
-Local development:
+### MinerU parsing: scanned PDFs & click-to-cite formulas
+
+By default text is extracted locally with pdf.js — **plain text-native PDFs need no configuration at all**. Two scenarios need MinerU:
+
+- **Scanned PDFs** (old papers, book chapters, scanned handouts): no text layer, pdf.js can't read them; MinerU (OCR) can
+- **Formulas**: formulas in PDFs are graphical garbage — unselectable and unsearchable. Once MinerU recovers them as LaTeX, **click a formula and its LaTeX is cited straight into the chat**; formula queries like `QK^T` hit search; the "∑ 公式" panel lists every formula by page
+
+**You need to set this up yourself (pick one)**, configured under **Settings → Paper Reader → "MinerU parser"**:
+
+| Option | Setup | For |
+| --- | --- | --- |
+| Cloud (easiest) | Register at [mineru.net](https://mineru.net) → create a token under "API Management" → in settings pick mode "Cloud", paste the token, "Test connection" → save. ~1 minute, free quota | Most people |
+| Self-hosted (no signup) | `pip install -U "mineru[core]"` → `mineru-api --host 127.0.0.1 --port 8000` → pick mode "Local" in settings | Heavy/privacy-minded users; free, unlimited, papers never leave your machine |
+
+Once configured: newly uploaded scanned PDFs go through MinerU automatically; for papers already in the library, open the "∑" panel and click "Re-parse with MinerU" (**old caches are not re-parsed automatically** — re-parse a paper explicitly if you want its formulas searchable).
+
+> Notes: the cloud `pipeline` channel is verified end-to-end with a real token (19-page paper, 18/18 formulas identical to local output); `vlm`-series models are unverified. The token is stored 0600 and only ever shown masked. See [docs/reader-ux-requirements.md](docs/reader-ux-requirements.md) for troubleshooting.
+
+### Embedding semantic search
+
+Point `search_paper` at an OpenAI-compatible `/embeddings` endpoint (Settings → Paper Reader → "Embedding search (optional)" card: URL / model / key — a real request is fired as a precheck before saving): semantically close passages that share **zero keywords** with your query still enter the candidate set — plain-language questions ("how is the learning rate scheduled") hit terminology passages, fused with keyword hits, never replacing them. Unconfigured (or half-configured) = off by default: not a single request is sent, and search behaves exactly as before.
+
+> ⚠️ **Privacy notice**: once enabled, two kinds of text are sent to the endpoint you configure — ① the paper's chunk texts (body passages, for chunk vectors); ② the query text of every search (your input at each retrieval, for the query vector). The endpoint must be one you trust; if unconfigured, not a single request is sent.
+
+Configure one of three ways (same priority as the translate endpoint): the settings panel (recommended) > profile YAML `config.embed` > the environment variable `DSH_EMBED_API_KEY` (key only). Vectors are cached in `<topic>/<paper>.embeddings.json` (vectors only — no plaintext key, no query text), invalidated automatically by endpoint/model/content hash — switching endpoint or model, or re-transcribing, triggers recomputation; chunks are submitted in `batchSize` batches (default 32) — any failed batch degrades the whole retrieval and writes nothing. If the endpoint is unreachable during a search, keyword results return as usual with the degradation reason noted — no silent failures.
+
+> **Non-goals** (for later): local ONNX / transformers.js models, whole-library precomputation, vector databases — this round is API endpoints only.
+
+## Library management details
+
+- Deletion = **moved to trash** `data/.trash/<timestamp>/` (with a manifest); move files back into the topic folder to recover. No auto-cleanup or one-click restore UI in this version
+- Files moved to trash = the paper's same-named artifacts: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is **not** deleted (it lives in dsh's session store)
+- **Preconditions**: deletion/rename is refused while the paper has a running session, a translation in progress, or another delete/rename in flight
+- **Safety boundary**: deletes/renames only ever touch the library directory; path traversal (`..`, absolute paths, symlink escapes) is rejected; a mid-way failure rolls back already-moved files
+- After a rename: transcripts/translations/study profiles move along; past chat sessions are **kept** but no longer listed under the new name (session ids encode the old name); case-only renames work on macOS/Windows
+- Oddly named files placed into `data/` by hand (e.g. `.hidden.pdf`) can still be deleted/renamed — nothing becomes a visible-but-undeletable orphan
+
+## Contributing
 
 ```bash
 git clone https://github.com/GGboya/dsh-paper-reader
 cd dsh-paper-reader && pnpm install && pnpm run build
 dsh plugin --profile web add ./dsh-paper-reader   # run from the parent dir, or use an absolute path
-dsh --profile web
+dsh --profile web                                  # sidebar becomes the library tree
 ```
 
-The library directory defaults to `~/.dsh-paper-reader/data`; override it in the profile's `cordis.patch.yml`:
+![Contributing: clone → pnpm install → build → local install](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/dev-workflow.gif)
 
-```yaml
-- id: dsh-paper-reader
-  config:
-    dataDir: /path/to/pdfqa/data   # point at a pdfqa library to reuse all caches
-    # translate:                    # optional: OpenAI-compatible endpoint for Chinese
-    #   baseUrl: https://api.deepseek.com/v1   # translation via babeldoc. Usually you
-    #   apiKey: sk-...                          # don't need it here — click "中" or ⚙
-    #   model: deepseek-chat                    # in the reader to fill it in; saved to
-    #                                           # ~/.dsh/.dsh-paper-reader/translate.json
-    #                                           # (mode 0600).
-```
-
-> Translation endpoint: **prefer filling it in the reader UI** (click "中" — a form pops up if unset — or ⚙). The connection is tested before saving; takes effect without a restart.
-> The `translate` config above falls back to a **deployer-side default**, effective only when the UI is unset. babeldoc only speaks the OpenAI protocol — Anthropic-protocol endpoints (e.g. `api.kimi.com/coding/`) can't be used directly.
-
-> Translation engine **zero preinstall**: when babeldoc is missing, it auto-installs via the uv chain — standalone uv binary (GitHub Releases API download + sha256 verification) → uv-managed Python 3.12 → `uv pip install babeldoc`, landing in `~/.dsh/.dsh-paper-reader/bin/` and a sibling `.venv-pdf2zh/`, never touching system Python. Existing uv / babeldoc installs (including pdfqa's `.venv-pdf2zh`) are reused. macOS / Linux / **Windows** all support auto-install (Windows gets uv's zip archive, unpacked with the `tar` that ships with Win10 1803+).
-
-> Reading mode is **opt-in**: by default `sidebar.workspaces` is not registered (official workspace/session list untouched); the "📚 Paper Reading" toggle at the bottom of the sidebar takes over only when clicked, and restores on second click; the mode choice is remembered in localStorage. Open PDF tabs and companion sessions are unaffected when leaving the mode.
-
-### Translation-engine smoke test (Windows dependency integrity)
-
-The most common Windows failure is the translation engine not installing (antivirus blocking uv, a truncated download, a broken venv). The install logic in `src/babeldoc-install.ts` is a pure Node module (no Cordis/Electron dependency), and a GitHub Actions workflow runs the smoke test on a **pristine machine**, so no local Windows box is needed:
-
-```bash
-pnpm build
-pnpm smoke:engine clean          # full first-time install
-pnpm smoke:engine managed-uv     # force the plugin-managed uv download (sha256 path)
-pnpm smoke:engine pip-fallback   # force pip + domestic mirror fallback channel
-pnpm smoke:engine repair         # break the venv (drop pymupdf), verify self-check → auto-repair
-pnpm smoke:engine translate      # start a local mock OpenAI endpoint and run the real babeldoc pipeline
-```
-
-CI (`.github/workflows/engine-smoke.yml`): `windows-latest` runs all four scenarios plus translate-e2e; `macos-latest`/`ubuntu-latest` run `clean` as a regression guard. Triggered by pushes that touch install/translate code, plus a weekly schedule (uv/PyPI change even when our code does not). Two test hooks: `DSH_PR_MANAGED_UV_ONLY=1` (skip the system uv lookup) and `DSH_PR_FORCE_PIP_CHANNEL=1` (skip the uv package channel).
+- After changes, `pnpm run build` and restart the profile; `npm test` runs the full suite (354 cases; CI runs on ubuntu/macos/windows)
+- Library directory defaults to `~/.dsh-paper-reader/data`, override in the profile's `cordis.patch.yml` (can point straight at pdfqa's `data/` to reuse caches); translation/MinerU/embedding endpoints are best filled in the settings UI (stored under `$DSH_HOME/.dsh-paper-reader/`, 0600) — YAML `config.translate` / `config.mineru` / `config.embed` fall back to deployer defaults
+- Translation-engine smoke tests (Windows dependency integrity, no local Windows needed): `pnpm smoke:engine clean|managed-uv|pip-fallback|repair|translate`; CI runs them on fresh machines weekly
 
 ## Architecture
 
@@ -342,17 +143,18 @@ src/
   tools.ts      5 agent tools: list_papers / transcribe_pdf / search_paper / study_progress / study_update
   host.ts       webServer routes (/paper-reader/*), connection.requestRejection auth;
                 sessionController.create/prompt (agentPreset=paper-reader) + follow SSE bridge
-  library.ts    pure functions: library directory conventions & parsing (.txt/.pages.json/.transcript.json/.mineru.*)
-  transcribe.ts pure functions: pdf.js extraction + page-offset table + MinerU backend selection & cache provenance
-  mineru.ts     pure functions: MinerU client (local legacy /tasks polling + /file_parse; mineru.net v4 cloud + minimal ZIP reader)
-  mineru-config.ts pure functions: MinerU config I/O (0600) + masking + connectivity pre-check
-  search.ts     pure functions: chunking + keyword scoring (fast search) + page mapping
+  library.ts    pure functions: library directory conventions & parsing (.txt/.pages.json/.transcript.json/.mineru.* paths)
+  library-manage.ts pure functions: delete/rename (trash, exact-stem matching, path-traversal guards, batch clear)
+  transcribe.ts pure functions: pdf.js extraction + page offsets + MinerU backend selection & cache-source semantics
+  mineru.ts     pure functions: MinerU client (local /tasks polling; mineru.net v4 cloud + minimal ZIP reader)
+  mineru-config.ts / embed-config.ts / translate-config.ts / typesafe-config.ts pure functions: endpoint config I/O (0600) + prechecks
+  search.ts     pure functions: chunking + keyword scoring + formula-query normalization + hybrid embedding recall
+  embed.ts      pure functions: /embeddings client + chunk-vector cache
+  formulas.ts   pure functions: MinerU formula index (LaTeX + bbox → reader hot zones/panel)
   study.ts      pure functions: study profile (plan + quiz scores) I/O
   translate.ts  pure functions: babeldoc invocation (Chinese / bilingual PDF generation)
-  babeldoc-install.ts  pure functions: auto-install babeldoc without a Python env (uv → managed Python → venv)
-  translate-config.ts  pure functions: translation endpoint config I/O (0600) + pre-save connection check
-  rerank.ts     pure functions: search_paper semantic rerank (TypeSafe/Jev; falls back to keyword ranking without credentials)
-  typesafe-config.ts  pure functions: TypeSafe endpoint config I/O (same conventions as the translate config)
+  babeldoc-install.ts pure functions: auto-install babeldoc without a Python env (uv → managed Python → venv)
+  rerank.ts     pure functions: search_paper semantic rerank (TypeSafe/Jev; falls back to keyword ranking)
   preset.ts     pure functions: installs the bundled agent preset into $DSH_HOME/.agent-presets/
 presets/paper-reader/  the "Paper Tutor" agent preset (full persona prompt + compaction)
 reader/index.html      the reader page (pdf.js, independent of the React host, iframe-carried)
