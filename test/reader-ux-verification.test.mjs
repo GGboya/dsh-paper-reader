@@ -1645,6 +1645,20 @@ test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作
   //   「先 commit 让路径从 git status 消失」绕过：那只会让这条守卫变瞎，而不是修正它。
   const allowed = /^(\.probe\/|src\/|lib\/|reader\/|test\/|docs\/|\.gitignore$|package-lock\.json$|pnpm-lock\.yaml$|README\.md$|README_EN\.md$|package\.json$)/
   for (const p of touched) assert.ok(allowed.test(p), `本轮不应改动：${p}`)
+  // 强守卫：把「上游自带的 6 个 library 用例」相对**上游 tip**（ef00a5d = 本分支的 rebase 基点）的差异
+  // 与登记清单逐一核对——rebase 轮里「零改动」已不成立（方案 §2.6 类 8 是本轮契约的一部分），
+  // 但「改了哪些上游用例」必须**完全等于**上面那份清单，不允许悄悄多改一个文件让自己变绿。
+  // 浅克隆取不到该 commit 时跳过（守卫不能把 CI 弄红）。
+  let haveTip = true
+  try { execFileSync('git', ['cat-file', '-e', 'ef00a5d^{commit}'], { cwd: REPO, stdio: 'ignore' }) } catch { haveTip = false }
+  if (haveTip) {
+    const upstreamFiles = execFileSync('git', ['ls-tree', '-r', '--name-only', 'ef00a5d', 'test/'], { cwd: REPO, encoding: 'utf8' })
+      .split('\n').filter((x) => /^test\/library-.*\.test\.mjs$/.test(x))
+    const diffVsTip = execFileSync('git', ['diff', '--name-only', 'ef00a5d', 'HEAD', '--', ...upstreamFiles], { cwd: REPO, encoding: 'utf8' })
+      .split('\n').filter(Boolean).sort()
+    assert.deepEqual(diffVsTip, Object.keys(documentedTestEdits).sort(),
+      `上游用例的差异必须与登记清单一致（多改/少改都要同步这份清单）：${JSON.stringify(diffVsTip)}`)
+  }
   writeProbe('vc1-git-status.txt', status)
 })
 
