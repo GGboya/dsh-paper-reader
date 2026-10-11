@@ -1,0 +1,45 @@
+# 单元 + 对抗测试（npm test：库管理安全用例 / MinerU 离线 mock / 公式检索 / 阅读器交互契约）。
+# 与 engine-smoke.yml（翻译引擎安装链路）互补 —— PR #4 引入测试时没有任何 CI 跑它们，
+# .probe/ 缺目录这类「干净克隆必崩」的问题就是这么漏网的。
+# 触发：push 到 main + 所有 PR（pull_request 用 merge ref，本文件随 base 生效，
+# 外部贡献者 rebase/push 后自动跑，无需授权）。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          # Windows 用户是大头，但测试套件还有 / 分隔符硬编码等 Windows 债
+          # （join() 在 win32 产 \）；先非阻断观察，债清后删掉 allow-fail 转正。
+          - os: windows-latest
+            allow-fail: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    continue-on-error: ${{ matrix.allow-fail == true }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # traversal-verification 的 V1/V2 用例 pin 基线 commit（a574288）构建
+          # 「修复前」对照产物；浅克隆取不到时自动 skip，拉全历史让它们真正跑起来。
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: npm test
