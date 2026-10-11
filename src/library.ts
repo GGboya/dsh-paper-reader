@@ -7,9 +7,12 @@
 // pdf2zh 的产物（-en / -zh / -dual）不算用户文献。
 // （问答不落盘存档——会话持久化交给 dsh 自己；pdfqa 时代的 -qa/ 目录不再读写。）
 
-import { readdirSync, existsSync, mkdirSync, statSync, renameSync, rmSync, realpathSync, lstatSync } from 'node:fs'
+import { readdirSync, existsSync, mkdirSync, statSync, realpathSync, lstatSync } from 'node:fs'
 import { join, resolve, extname, basename, sep } from 'node:path'
 import { homedir } from 'node:os'
+// 破坏性原语与回收站实现（我们的加固层）：适配器只做「复用 #4 边界层 + 翻译签名/返回形状」，
+// 真正的删除/改名永远只有 library-manage 一份实现。
+import * as manage from './library-manage.ts'
 
 export interface PaperRef {
   /** 专题名（dataDir 下一级目录）；path 直指时为其所在目录名 */
@@ -131,7 +134,18 @@ export function transcriptCached(ref: PaperRef): boolean {
   }
 }
 
-// ================= 库管理：改名/删除（纯文件系统操作，供 host 路由调用） =================
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 边界校验层（词法 + realpath 子路径双层）—— **逐字复用上游 #4**
+// （d8f24ec《fix(security)：路径穿越修复》）的实现，作为唯一实现：
+//   · library-manage.ts 的破坏性原语消费它（命名规范 / 边界规范 / realpath 断言）；
+//   · host.ts 的路由层消费它（badEntry 词法门 + upload 的 resolveUploadTopic）。
+// PR #5 整合时我们曾用自己那套「整段替换」掉这一层，代价是丢掉 #4 的两处覆盖
+// （悬空符号链接的写路径、trim 语义）与上游 35 个用例中的 29 个。按上游评审 A.1 的
+// 要求「复用 #4 的边界校验层，在其上加回收站与交互层」，此处恢复为单一实现；
+// 我们的加严（符号链接专题一律拒、`target === root` 拒绝、产物逐个 realpath 二次包含）
+// 全部加在这一层**之上**（见 library-manage.ts），不替换、不旁路。
+// ═══════════════════════════════════════════════════════════════════════════
 
 /** 名字校验（专题/文献共用）。合法返回 null，否则返回中文错误文案。 */
 export function validateEntryName(raw: string): string | null {
@@ -166,14 +180,14 @@ export function validateEntryBoundary(raw: string): string | null {
 // 层（目标目录的 real 路径必须落在 dataDir 的 real 路径之内，挡住 `..` 之外的符号链接逃逸）。
 
 /** dataDir 的 real 绝对路径（resolve + realpath，去符号链接与 `..`）。目录缺失时给无路径文案。 */
-function realDataDir(dataDir: string): string {
+export function realDataDir(dataDir: string): string {
   const abs = resolve(dataDir)
   if (!existsSync(abs)) throw new Error('文献库数据目录不存在')
   return realpathSync(abs)
 }
 
 /** target 必须落在 root 之内（严格子路径，不含 root 本身），否则视为越界。 */
-function assertInside(root: string, target: string): void {
+export function assertInside(root: string, target: string): void {
   const r = root.endsWith(sep) ? root : root + sep
   if (target !== root && !target.startsWith(r)) throw new Error('路径越界，已拒绝')
 }
@@ -233,74 +247,78 @@ export function resolveUploadTopic(dataDir: string, topic: string): string {
 export function paperRefFor(dataDir: string, topic: string, name: string): PaperRef {
   const pdfPath = join(dataDir, topic, name + '.pdf')
   const base = pdfPath.slice(0, -'.pdf'.length)
-  return { topic, name, pdfPath, txtPath: base + '.txt', pagesPath: base + '.pages.json' }
-}
-
-/** 文献的全部关联文件后缀（含本体 .pdf）：转录缓存 + 页码索引 + babeldoc 译文 + 学习档案。
- *  命名与 translate.ts（-zh/-dual）和 study.ts（.study.json）的产物规则一致。 */
-const PAPER_SIDECARS = ['.pdf', '.txt', '.pages.json', '-zh.pdf', '-dual.pdf', '.study.json']
-
-/** 某文献的全部关联文件路径（存在与否由调用方自查）。 */
-export function derivedFilesFor(pdfPath: string): string[] {
-  const stem = pdfPath.slice(0, -'.pdf'.length)
-  return PAPER_SIDECARS.map((s) => stem + s)
-}
-
-/** 改名专题（目录 rename）。from/to 非法（含越界）→ throw；from 不存在 / to 已存在 → throw 中文 Error。
- *  已知局限：大小写不敏感文件系统（macOS/Windows）上纯大小写改名会被「目标已存在」
- *  拒绝——不做临时名两跳绕过，保持简单。 */
-export function renameTopic(dataDir: string, from: string, to: string): void {
-  const err = validateEntryName(to)
-  if (err) throw new Error(err)
-  if (to.trim() === from.trim()) return
-  const src = resolveSafeTopic(dataDir, from)          // 词法 + realpath 子路径校验 from
-  const dst = join(realDataDir(dataDir), to.trim())
-  if (existsSync(dst)) throw new Error(`已存在同名专题: ${to.trim()}`)
-  renameSync(src, dst)
-}
-
-/** 改名文献：连带派生文件（转录/页码索引/译文/学习档案）逐个跟随，不存在的跳过。
- *  返回实际改名的文件名清单（含 .pdf 本体）。topic/from/to 非法（含越界）→ throw。 */
-export function renamePaper(dataDir: string, topic: string, from: string, to: string): string[] {
-  const errTo = validateEntryName(to)
-  if (errTo) throw new Error(errTo)
-  const errFrom = validateEntryBoundary(from)
-  if (errFrom) throw new Error(errFrom)
-  const toTrim = to.trim()
-  const fromTrim = from.trim()
-  if (toTrim === fromTrim) return []
-  const dir = resolveSafeTopic(dataDir, topic)          // 词法 + realpath 子路径校验 topic
-  if (!existsSync(join(dir, fromTrim + '.pdf'))) throw new Error(`文献不存在: ${topic.trim()}/${fromTrim}`)
-  if (existsSync(join(dir, toTrim + '.pdf'))) throw new Error(`已存在同名文献: ${toTrim}`)
-  const renamed: string[] = []
-  for (const suf of PAPER_SIDECARS) {
-    const src = join(dir, fromTrim + suf)
-    if (!existsSync(src)) continue
-    renameSync(src, join(dir, toTrim + suf))
-    renamed.push(fromTrim + suf)
+  return {
+    topic,
+    name,
+    pdfPath,
+    txtPath: base + '.txt',
+    pagesPath: base + '.pages.json',
+    transcriptPath: base + '.transcript.json',
+    mineruMdPath: base + '.mineru.md',
+    mineruJsonPath: base + '.mineru.json',
   }
-  return renamed
 }
 
-/** 删除文献及其全部派生文件。返回实际删除的文件名清单。topic/name 非法（含越界）→ throw。 */
+// ═══════════════════════════════════════════════════════════════════════════
+// 兼容适配器（薄壳）：只为上游 6 个 `library-*.test.mjs` 与老调用方保留上游的
+// 函数签名 / 返回形状；底层永远是 library-manage 的加固实现
+// （回收站可恢复 + 精确 stem + 非递归 rmdir；会话/翻译/在途 409 在路由层）。
+// 每个适配器都**先过上面那一层**（词法 validateEntryName/validateEntryBoundary →
+// realpath resolveSafeTopic），再交给加固层——顺序固定，两层的语义不互相替代。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 边界层错误 → 带机器码的普通 Error（保留上游用例断言的 `e.message`）。 */
+function boundaryError(message: string): Error {
+  const err = new Error(message)
+  ;(err as Error & { code?: string }).code = message.includes('路径越界') ? 'escape-rejected' : 'bad-name'
+  return err
+}
+
+/** 删除文献（上游签名）：词法-边界层 + realpath 层 → 加固层移入 `.trash/`；返回被移动的文件名清单。 */
 export function deletePaper(dataDir: string, topic: string, name: string): string[] {
   const errName = validateEntryBoundary(name)
-  if (errName) throw new Error(errName)
-  const dir = resolveSafeTopic(dataDir, topic)          // 词法 + realpath 子路径校验 topic
-  const nameTrim = name.trim()
-  const pdfPath = join(dir, nameTrim + '.pdf')
-  if (!existsSync(pdfPath)) throw new Error(`文献不存在: ${topic.trim()}/${nameTrim}`)
-  const deleted: string[] = []
-  for (const f of derivedFilesFor(pdfPath)) {
-    if (!existsSync(f)) continue
-    rmSync(f)
-    deleted.push(basename(f))
-  }
-  return deleted
+  if (errName) throw boundaryError(errName)
+  const topicName = topic.trim()
+  resolveSafeTopic(dataDir, topicName)          // realpath 第二层：专题必须落在 dataDir 内
+  return manage.deletePaper(dataDir, topicName, name).moved
 }
 
-/** 删除专题（递归，含其下全部文献与派生文件）。topic 非法（含越界）→ throw（不触碰库外）。 */
+/** 删除专题（上游签名）：仅空专题；隐藏条目进回收站；非递归 rmdir（绝无 rm -rf）。 */
 export function deleteTopic(dataDir: string, topic: string): void {
-  const dir = resolveSafeTopic(dataDir, topic)
-  rmSync(dir, { recursive: true, force: true })
+  const err = validateEntryName(topic)
+  if (err) throw boundaryError(err)
+  const topicName = topic.trim()
+  resolveSafeTopic(dataDir, topicName)
+  manage.deleteTopic(dataDir, topicName)        // 非空 → 抛 409 topic-not-empty（我们的产品决策）
+}
+
+/** 重命名专题（上游签名）：`to` 走命名规范层，`from` 走 realpath 层。 */
+export function renameTopic(dataDir: string, from: string, to: string): void {
+  const err = validateEntryName(to)
+  if (err) throw boundaryError(err)
+  const fromName = from.trim()
+  const toName = to.trim()
+  if (fromName === toName) return
+  resolveSafeTopic(dataDir, fromName)
+  manage.renameTopic(dataDir, fromName, toName)
+}
+
+/**
+ * 重命名文献（上游签名）：返回**改名前的**文件名清单（上游用例据此断言，如 `['CaseA.pdf']`）。
+ * `from` 走边界层（历史丑名也能改），`to` 走命名规范层；产物清单由加固层的精确 stem 匹配给出。
+ */
+export function renamePaper(dataDir: string, topic: string, from: string, to: string): string[] {
+  const errTo = validateEntryName(to)
+  if (errTo) throw boundaryError(errTo)
+  const errFrom = validateEntryBoundary(from)
+  if (errFrom) throw boundaryError(errFrom)
+  const topicName = topic.trim()
+  const fromName = from.trim()
+  const toName = to.trim()
+  if (fromName === toName) return []
+  resolveSafeTopic(dataDir, topicName)
+  const topicDir = manage.resolveExistingTopicDir(dataDir, topicName)
+  const before = manage.listArtifacts(topicDir, fromName).map((f) => f.name)
+  manage.renamePaper(dataDir, topicName, fromName, toName)
+  return before
 }

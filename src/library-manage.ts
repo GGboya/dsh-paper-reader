@@ -10,6 +10,14 @@
 // 本模块不依赖 Cordis，可直接被测试 import（dist/library-manage.js）。
 
 import { lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmdirSync, writeFileSync, existsSync } from 'node:fs'
+// 共享边界校验层（上游 #4 的路径穿越修复，逐字保留在 library.ts，唯一实现）。
+// 本模块**消费**它，不再自己重复一套词法/realpath 校验；我们的加严叠在其上（见下）。
+import {
+  assertInside as assertInsideShared,
+  realDataDir as realDataDirShared,
+  validateEntryBoundary as validateBoundaryShared,
+  validateEntryName,
+} from './library.ts'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { randomBytes } from 'node:crypto'
 
@@ -54,39 +62,41 @@ export function isManageError(e: unknown): e is ManageError {
 /** 回收站目录名（保留名；`listTopics` 因隐藏而跳过它，因此不会显示成专题）。 */
 export const TRASH_DIR = '.trash'
 
-/** 与 host 的「新建专题」校验保持同一口径：拒绝 `/`、`\`、`..`；另加隐藏名与长度上限。 */
+/**
+ * 命名规范类校验（创建 / 改名-to 用）——**复用上游 #4 的 `validateEntryName`**，
+ * 只把 `string | null` 的形状映射成我们的 `ManageError('bad-name', 400, 文案)`；
+ * 文案沿用 #4 原句（上游用例按正则断言：/名字过长/、/名字不能包含控制字符/…）。
+ * 语义与 #4 完全一致：trim 后使用（`'  T  '` 落到 `T`）、长度 ≤ 120、拒绝全部 C0 控制字符
+ * 与 DEL、拒绝前导点、拒绝 `/ \ ..`。
+ */
 export function validateName(raw: unknown, label: 'topic' | 'paper'): string {
   const what = label === 'topic' ? '专题名' : '文献名'
-  if (typeof raw !== 'string' || raw.length === 0) throw new ManageError('bad-name', 400, `${what}不能为空`)
-  if (raw.length > 255) throw new ManageError('bad-name', 400, `${what}过长（>255）`)
-  if (raw.trim().length === 0) throw new ManageError('bad-name', 400, `${what}不能只有空白`)
-  if (raw === '.' || raw === '..') throw new ManageError('bad-name', 400, `${what}非法`)
-  if (/[/\\\u0000]/.test(raw)) throw new ManageError('bad-name', 400, `${what}不能包含 / \\ 或空字符`)
-  if (raw.includes('..')) throw new ManageError('bad-name', 400, `${what}不能包含 ..`)
-  if (raw.startsWith('.')) throw new ManageError('bad-name', 400, `${what}不能以 . 开头`)
-  if (basename(raw) !== raw) throw new ManageError('bad-name', 400, `${what}非法`)
-  return raw
+  if (typeof raw !== 'string') throw new ManageError('bad-name', 400, `${what}不能为空`)
+  const err = validateEntryName(raw)
+  if (err) throw new ManageError('bad-name', 400, err)
+  return raw.trim()
 }
 
 /**
- * 边界类校验（删除 / 改名-from / 已存在条目用）：只挡**安全边界**——空、路径分隔符、`..`、NUL。
+ * 边界类校验（删除 / 改名-from / 已存在条目用）——**复用上游 #4 的 `validateEntryBoundary`**
+ * （空、`/ \`、`..`、NUL），并叠上我们的两条加严：`.trash` 是保留名、`basename` 必须一致。
  *
- * 与 `validateName`（命名规范类：长度、前导点、控制字符）的分工是 PR-1 的分层原则：
+ * 与 `validateName`（命名规范类：长度、前导点、非 NUL 控制字符）的分工是 PR-1 的分层原则：
  * 命名规范只在**创建/改名**时强制（那是用户在新起一个名字）；删除/改名-from 作用于
  * **已存在**的条目，若也按命名规范卡，「创建时宽松、事后规范收紧」或历史遗留的名字
- * （前导点、超长、`\x01`）就会变成删不掉的孤儿。反之，凡是能通过写入路径（upload /
- * 新建专题，都走 `validateName`）落到盘上的名字，都能被这里放行 → 创建/删除对称。
+ * （前导点、超长、`\x01`）就会变成删不掉的孤儿。反之，upload 能落盘的名字都必须能删。
  *
- * 原样返回 raw（**不 trim**），与 `validateName` 一致：保证按字面名匹配磁盘条目。
+ * 原样返回 raw（**不 trim**），与创建侧的 trim 语义分开：按字面名匹配磁盘条目。
  */
 export function validateEntryBoundary(raw: unknown, label: 'topic' | 'paper'): string {
   const what = label === 'topic' ? '专题名' : '文献名'
   if (typeof raw !== 'string' || raw.length === 0) throw new ManageError('bad-name', 400, `${what}不能为空`)
-  if (raw.trim().length === 0) throw new ManageError('bad-name', 400, `${what}不能只有空白`)
-  if (/[/\\\u0000]/.test(raw)) throw new ManageError('bad-name', 400, `${what}不能包含 / \\ 或空字符`)
-  if (raw.includes('..')) throw new ManageError('bad-name', 400, `${what}不能包含 ..`)
-  if (raw === '.') throw new ManageError('bad-name', 400, `${what}非法`)
+  const err = validateBoundaryShared(raw)
+  if (err) throw new ManageError('bad-name', 400, err)
   if (basename(raw) !== raw) throw new ManageError('bad-name', 400, `${what}非法`)
+  // `.` / `..` 不是任何条目的名字（上游边界类只挡 `..`，`basename` 归一后是 `.` 的形态也一并挡掉；
+  // 这是我们的加严——realpath 层随后还会拒 target === root，两道都在）。
+  if (basename(raw) === '.' || basename(raw) === '..') throw new ManageError('bad-name', 400, `${what}非法`)
   // 回收站是插件自己的保留目录（listTopics 因隐藏而跳过它，用户也创建不了）：
   // 不允许把它当专题删掉/改名，否则回收站里的可恢复文件会被误销毁。
   if (raw === TRASH_DIR) throw new ManageError('bad-name', 400, `${what}是保留名，不能操作`)
@@ -105,18 +115,27 @@ export function validateNewPaperName(raw: unknown, current: string): string {
 
 // ── 路径解析与穿越防护 ───────────────────────────────────────────────────────
 
-/** target 必须落在 root 内（严格子路径），否则视为越界。 */
+/**
+ * target 必须落在 root 内（严格子路径），否则视为越界。
+ * **复用上游 #4 的 `assertInside`**（带 sep 边界的严格前缀比较），并在其上叠我们的一条加严：
+ * 上游允许 `target === root`（`target !== root && !startsWith`），我们**拒绝**——对
+ * deleteTopic/rename 这类破坏性操作，把「库根目录本身」当专题名操作必须挡掉
+ * （既有用例钉住：reader-ux-verification 的 VB5 ⑤）。
+ */
 export function assertInside(root: string, target: string): void {
-  const r = root.endsWith(sep) ? root : root + sep
-  if (target === root || !target.startsWith(r)) {
-    throw new ManageError('escape-rejected', 400, '路径越出文献库根目录，已拒绝')
+  try {
+    assertInsideShared(root, target)                     // 上游 #4 的严格子路径包含
+  } catch {
+    // 上游抛的是不带 .code 的普通 Error → 统一映射成带机器码的 ManageError（host 的错误通道认 code）
+    throw new ManageError('escape-rejected', 400, '路径越界，已拒绝')
   }
+  if (target === root) throw new ManageError('escape-rejected', 400, '路径越界，已拒绝')
 }
 
-/** 文献库根目录的真实路径（必须存在）。 */
+/** 文献库根目录的真实路径（必须存在）——复用 #4 的 realpath 规范化，错误映射成我们的 404。 */
 export function realDataDir(dataDir: string): string {
   try {
-    return realpathSync(dataDir)
+    return realDataDirShared(dataDir)
   } catch {
     throw new ManageError('not-found', 404, '文献库目录不存在')
   }
@@ -133,10 +152,10 @@ function resolveTopicDirChecked(dataDir: string, topic: unknown, boundaryOnly: b
   } catch {
     throw new ManageError('not-found', 404, `专题不存在：${name}`)
   }
-  if (st.isSymbolicLink()) throw new ManageError('escape-rejected', 400, `专题目录是符号链接，拒绝操作：${name}`)
+  if (st.isSymbolicLink()) throw new ManageError('escape-rejected', 400, `路径越界：专题目录是符号链接，已拒绝：${name}`)
   if (!st.isDirectory()) throw new ManageError('not-found', 404, `专题不存在：${name}`)
   const real = realpathSync(dir)
-  if (real !== dir) throw new ManageError('escape-rejected', 400, `专题目录真实路径异常，拒绝操作：${name}`)
+  if (real !== dir) throw new ManageError('escape-rejected', 400, `路径越界：专题目录真实路径异常，已拒绝：${name}`)
   assertInside(root, real)
   return real
 }
@@ -469,6 +488,10 @@ export function deleteTopic(dataDir: string, name: unknown): TopicDeleteResult {
   try {
     rmdirSync(topicDir) // 非递归：非空即失败，绝不 rm -rf
   } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    // 只有「目录非空」才是 topic-not-empty；EACCES/EBUSY 等 errno 如实上交，
+    // 由 host 的错误通道给固定文案（上游 R1 ②：errno 不回显绝对路径、不谎报原因）。
+    if (typeof code === 'string' && code !== 'ENOTEMPTY' && code !== 'EEXIST') throw err
     throw new ManageError('topic-not-empty', 409, '专题目录仍非空，未删除', {
       entries: readdirSync(topicDir),
       movedHidden,
@@ -537,6 +560,9 @@ export function renamePaper(dataDir: string, topic: unknown, name: unknown, newN
       for (const m of moved.reverse()) {
         try { renameSync(m.to, m.from) } catch { /* 回滚失败：如实报告 */ }
       }
+      const code = (err as NodeJS.ErrnoException).code
+      // 同 renameTopic：errno 原始上报（host → 固定文案 400 / EBUSY 409），非 errno 才 rename-partial。
+      if (typeof code === 'string' && code) throw err
       throw new ManageError('rename-partial', 500, '重命名中途失败，已尝试回滚；请检查文献库', {
         moved: moved.map((m) => basename(m.to)),
         remaining: files.filter((f2) => !moved.some((m) => basename(m.to) === renamedName(f2.name, paperName, newName))).map((f2) => f2.name),
@@ -561,7 +587,11 @@ export function renameTopic(dataDir: string, name: unknown, newNameRaw: unknown)
   try {
     renameSync(dir, target)
   } catch (err) {
-    throw new ManageError('rename-partial', 500, '重命名专题失败', { cause: (err as NodeJS.ErrnoException).code ?? 'unknown' })
+    const code = (err as NodeJS.ErrnoException).code
+    // errno（ENAMETOOLONG/EACCES/EBUSY…）带上原始 .code 上交：host 的 fsError 给固定中文文案 400
+    // （EBUSY/EPERM 给 409 占用），绝不把绝对路径回显给客户端。非 errno 才归为 rename-partial。
+    if (typeof code === 'string' && code) throw err
+    throw new ManageError('rename-partial', 500, '重命名专题失败', {})
   }
   return { ok: true, moved: [], from: topic, to: newTopic }
 }
