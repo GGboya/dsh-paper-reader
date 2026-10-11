@@ -124,16 +124,12 @@ test('正常功能零回归：中文专题、空格与 .-_ 名、大小写改名
   assert.ok(r1.length >= 1)
   assert.ok(existsSync(join(data, '默认专题 2', 'Renamed-2.0_new.pdf')))
 
-  // 大小写改名：Linux 大小写敏感 → 成功；macOS/Windows 大小写不敏感 FS → 按「已存在同名」
-  // 拒绝（renamePaper 的已知设计局限，见 src/library.ts 注释——不做临时名两跳绕过）
+  // 大小写改名：目标与源是「同一个文件」（大小写不敏感 FS）时放行 —— 评审 §B 认可本次顺带修好
+  // 上游在 macOS 上会误报「已存在同名」的问题；三平台行为一致（成功）。
   writeFileSync(join(data, '默认专题 2', 'CaseA.pdf'), 'case')
-  if (process.platform === 'linux') {
-    const r2 = L.renamePaper(data, '默认专题 2', 'CaseA', 'casea')
-    assert.ok(r2.includes('CaseA.pdf'))
-    assert.ok(existsSync(join(data, '默认专题 2', 'casea.pdf')))
-  } else {
-    assert.throws(() => L.renamePaper(data, '默认专题 2', 'CaseA', 'casea'), /已存在同名/)
-  }
+  const r2 = L.renamePaper(data, '默认专题 2', 'CaseA', 'casea')
+  assert.ok(r2.includes('CaseA.pdf'))
+  assert.ok(existsSync(join(data, '默认专题 2', 'casea.pdf')))
 })
 
 test('路由层：越界 topic 返回 400 可读文案，且不泄露 dataDir 绝对路径', async () => {

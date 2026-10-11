@@ -399,14 +399,21 @@ test('V5 空白别名（trim 语义）：越界输入被拒；纯空白是「合
     assert.deepEqual(diff(before, snap(w.parent)), [])
     rmSync(w.parent, { recursive: true, force: true })
   }
-  // ② 'T\n' 被 trim 成合法专题名 T → 会真的删掉库里的 T（库外纹丝不动）
+  // ② 'T\n' 被 trim 成合法专题名 T → 打到的是库内真实的 T，而不是一个叫 "T\n" 的新条目。
+  //    我们这条分支的契约：非空专题**不**递归删（409 topic-not-empty）——先验证它确实打到了 T；
+  //    清空 T 后再来一次，就该像上游一样干净删除（trim 语义本身不变）。
   const w = tmpParent()
   const outsideBefore = snap(w.sentinel)
-  const r = (() => { try { return { ok: true, v: L.deleteTopic(w.data, 'T\n') } } catch (e) { return { ok: false, msg: String(e.message) } } })()
+  const r = (() => { try { return { ok: true, v: L.deleteTopic(w.data, 'T\n') } } catch (e) { return { ok: false, msg: String(e.message), code: e.code } } })()
   t.diagnostic(`deleteTopic('T\\n') → ${JSON.stringify(r)}；库内 data = ${JSON.stringify(readdirSync(w.data))}；库外 sentinel 未变 = ${JSON.stringify(diff(outsideBefore, snap(w.sentinel))) === '[]'}`)
   assert.deepEqual(diff(outsideBefore, snap(w.sentinel)), [], '库外必须不受影响')
-  assert.equal(existsSync(join(w.data, 'T')), false, '前后空白被 trim：目标等价于合法专题 T（这就是它被删除的原因）')
-  assert.deepEqual(r, { ok: true, v: undefined })
+  assert.equal(r.ok, false, 'T 非空 → 我们的契约拒绝（绝不递归删）')
+  assert.equal(r.code, 'topic-not-empty', '而且必须证明它打到的就是真实的 T')
+  assert.equal(existsSync(join(w.data, 'T')), true, '被拒时 T 原封不动')
+  rmSync(join(w.data, 'T', 'P.pdf')); rmSync(join(w.data, 'T', 'P.txt'))
+  const r2 = (() => { try { return { ok: true, v: L.deleteTopic(w.data, 'T\n') } } catch (e) { return { ok: false, msg: String(e.message) } } })()
+  assert.deepEqual(r2, { ok: true, v: undefined })
+  assert.equal(existsSync(join(w.data, 'T')), false, '前后空白被 trim：目标等价于合法专题 T（这就是空 T 被删除的原因）')
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -461,15 +468,17 @@ test('V7 符号链接专题的其它形状：多跳链 / 前缀同形兄弟目�
     assert.throws(() => L.deleteTopic(w.data, 'dangling'), (e) => /不存在/.test(e.message))
     rmSync(w.parent, { recursive: true, force: true })
   }
-  // ④ 指向库内另一个专题的符号链接：realpath 在库内 ⇒ 允许；但必须只删链接本身
+  // ④ 指向库内另一个专题的符号链接：上游 realpath 层放行（real 在库内）；
+  //    **我们一律拒绝**（评审 §B 点名认可「符号链接专题一律拒绝」的加固，这是有意差异）。
+  //    安全不变量不变：只拒绝、不销毁，链接本身与目标内容都完好。
   {
     const w = tmpParent()
     mkdirSync(join(w.data, 'realTopic'), { recursive: true })
     writeFileSync(join(w.data, 'realTopic', 'R.pdf'), 'R-PDF')
     symlinkSync(join(w.data, 'realTopic'), join(w.data, 'alias'), 'dir')
-    L.deleteTopic(w.data, 'alias')
-    t.diagnostic(`库内 alias → realTopic：deleteTopic(alias) 后 realTopic 内容 = ${JSON.stringify(readdirSync(join(w.data, 'realTopic')))}（rmSync 不跟随顶层符号链接）`)
-    assert.ok(!existsSync(join(w.data, 'alias')), '链接本身被删')
+    assert.throws(() => L.deleteTopic(w.data, 'alias'), (e) => e.code === 'escape-rejected' && /路径越界|符号链接/.test(e.message), '库内符号链接专题也一律拒（我们的加严）')
+    t.diagnostic(`库内 alias → realTopic：deleteTopic(alias) 被我们的加固层拒绝；realTopic 内容 = ${JSON.stringify(readdirSync(join(w.data, 'realTopic')))}`)
+    assert.ok(existsSync(join(w.data, 'alias')), '链接本身必须还在（只拒绝、不销毁）')
     assert.equal(readFileSync(join(w.data, 'realTopic', 'R.pdf'), 'utf8'), 'R-PDF', '指向的库内专题内容必须完好')
     rmSync(w.parent, { recursive: true, force: true })
   }
@@ -483,11 +492,13 @@ test('V8 符号链接文件 / 硬链接：只动链接本身，库外目标逐�
     symlinkSync(join(w.outside, 'Victim.pdf'), join(w.data, 'T', 'P.pdf'), 'file')
     symlinkSync(join(w.outside, 'Victim.txt'), join(w.data, 'T', 'P.txt'), 'file')
     const outsideBefore = snap(w.sideName ?? w.outside)
-    const deleted = L.deletePaper(w.data, 'T', 'P')
-    assert.deepEqual(deleted.sort(), ['P.pdf', 'P.txt'], '只列被删的链接名')
+    // 我们这条分支的契约：`.pdf` 是符号链接 → **不算文献**（listPapers 用 isFile() 过滤，符号链接
+    // 不在库视图里），删除一律 404 not-found（reader-ux-repair T3 的已知偏离 F3，比上游更保守：
+    // 不跟随、不销毁）。安全不变量与上游一致：库外目标逐字节不变，链接本身也不动。
+    assert.throws(() => L.deletePaper(w.data, 'T', 'P'), (e) => e.code === 'not-found', '符号链接 .pdf 不是文献 → 404')
     assert.deepEqual(diff(outsideBefore, snap(w.outside)), [], '库外目标必须逐字节不变')
     assert.equal(readFileSync(join(w.outside, 'Victim.pdf'), 'utf8'), 'VICTIM-PDF')
-    assert.deepEqual(readdirSync(join(w.data, 'T')), [], '链接本身被移除')
+    assert.deepEqual(readdirSync(join(w.data, 'T')).sort(), ['P.pdf', 'P.txt'], '拒绝时链接本身原封不动')
     rmSync(w.parent, { recursive: true, force: true })
   }
   // ② 边车是「指向库外目录」的符号链接。
@@ -527,8 +538,11 @@ test('V8 符号链接文件 / 硬链接：只动链接本身，库外目标逐�
     assert.equal(statSync(join(w.outside, 'H.pdf')).nlink, 2)
     L.deletePaper(w.data, 'T', 'H')
     assert.equal(readFileSync(join(w.outside, 'H.pdf'), 'utf8'), 'HARDLINK', '硬链接目标必须存活')
-    assert.equal(statSync(join(w.outside, 'H.pdf')).nlink, 1)
-    t.diagnostic('硬链接实测：unlink 库内链接后，库外目标存活且 nlink 由 2 → 1')
+    // 我们的删除是 **rename 进回收站**（契约：绝不回退 unlink）→ 同一 inode 的链接数**不变**（2）：
+    // 库内路径消失，那份在 .trash/ 里（可恢复）。上游用 rmSync(unlink) 才会把 nlink 减到 1。
+    assert.equal(statSync(join(w.outside, 'H.pdf')).nlink, 2, 'rename 不改链接数')
+    assert.ok(!existsSync(join(w.data, 'T', 'H.pdf')), '库内路径必须消失')
+    t.diagnostic('硬链接实测：rename 进回收站 → 库外目标存活且内容完好；inode 链接数保持 2（另一份在 .trash/）')
     rmSync(w.parent, { recursive: true, force: true })
   }
 })
@@ -618,6 +632,13 @@ test('V10 路由层：合法请求仍然可用（4 条路由各跑一次成功�
     const rtp = await post('/api/library/rename-topic', { topic: 'T', to: 'T2' })
     assert.equal(rtp.status, 200, rtp.txt)
     assert.ok(existsSync(join(w.data, 'T2', 'Q2.pdf')))
+    // 非空专题：我们的契约先 409（比上游递归删保守），清空后再删 → 200
+    const dtpBusy = await post('/api/library/delete-topic', { topic: 'T2' })
+    assert.equal(dtpBusy.status, 409, dtpBusy.txt)
+    assert.equal(dtpBusy.body.code, 'topic-not-empty')
+    assert.ok(existsSync(join(w.data, 'T2', 'Q2.pdf')), '被拒时一个文件都不能动')
+    const delPaper = await post('/api/library/delete-paper', { topic: 'T2', name: 'Q2' })
+    assert.equal(delPaper.status, 200, delPaper.txt)
     const dtp = await post('/api/library/delete-topic', { topic: 'T2' })
     assert.equal(dtp.status, 200, dtp.txt)
     assert.ok(!existsSync(join(w.data, 'T2')))
@@ -638,22 +659,24 @@ test('V11 正常功能：多变体产物删除 / 精确 stem / 中文专题 / �
   for (const name of ['Attention', 'Attention Is All You Need']) {
     for (const s of sidecars) writeFileSync(join(dir, name + s), `${name}${s}`)
   }
-  // ① 多类派生文件：定义内的 6 类全删
+  // ① 多类派生文件：定义内的 6 类 + pdf2zh 变体（-en/-zh/-dual 都属该文献）全删
   const deleted = L.deletePaper(w.data, topic, 'Attention').sort()
-  assert.deepEqual(deleted, ['Attention-dual.pdf', 'Attention-zh.pdf', 'Attention.pages.json', 'Attention.pdf', 'Attention.study.json', 'Attention.txt'].sort())
-  for (const s of ['.pdf', '.txt', '.pages.json', '-zh.pdf', '-dual.pdf', '.study.json']) assert.ok(!existsSync(join(dir, 'Attention' + s)), `应删除 Attention${s}`)
-  // ② 精确 stem：兄弟文献逐字节完好；且 -en 不在派生集合里（见报告 F3）
+  assert.deepEqual(deleted, ['Attention-dual.pdf', 'Attention-en.pdf', 'Attention-zh.pdf', 'Attention.pages.json', 'Attention.pdf', 'Attention.study.json', 'Attention.txt'].sort())
+  for (const s of ['.pdf', '.txt', '.pages.json', '-en.pdf', '-zh.pdf', '-dual.pdf', '.study.json']) assert.ok(!existsSync(join(dir, 'Attention' + s)), `应删除 Attention${s}`)
+  // ② 精确 stem：兄弟文献逐字节完好（-en 也属该文献，故 Attention 的 -en 一并删掉——上游报告 F3 已修复）
   for (const s of sidecars) {
     const p = join(dir, 'Attention Is All You Need' + s)
     assert.ok(existsSync(p), `兄弟文献 ${s} 必须完好`)
     assert.equal(readFileSync(p, 'utf8'), `Attention Is All You Need${s}`, '内容必须逐字节一致')
   }
-  const enLeft = existsSync(join(dir, 'Attention-en.pdf'))
-  t.diagnostic(`精确 stem：Attention 的 6 类派生文件已删；兄弟文献 7 个文件逐字节完好；Attention-en.pdf 是否残留 = ${enLeft}（见报告 F3：PAPER_SIDECARS 不含 -en）`)
-  // ③ 中文专题改名 + 删除
+  assert.ok(!existsSync(join(dir, 'Attention-en.pdf')), '-en.pdf 属该文献的产物，不残留孤儿')
+  t.diagnostic('精确 stem：Attention 的 7 个产物（含 -en 变体）已删；兄弟文献 7 个文件逐字节完好')
+  // ③ 中文专题改名 + 删除（非空专题先逐篇删空：我们的契约不递归删）
   L.renameTopic(w.data, topic, '默认专题 2')
   assert.ok(existsSync(join(w.data, '默认专题 2', 'Attention Is All You Need.pdf')))
   assert.ok(!existsSync(join(w.data, topic)))
+  assert.throws(() => L.deleteTopic(w.data, '默认专题 2'), (e) => e.code === 'topic-not-empty', '非空专题不递归删')
+  L.deletePaper(w.data, '默认专题 2', 'Attention Is All You Need')
   L.deleteTopic(w.data, '默认专题 2')
   assert.ok(!existsSync(join(w.data, '默认专题 2')))
   // ④ 含空格 / - / _ / . 的合法名字
@@ -663,15 +686,11 @@ test('V11 正常功能：多变体产物删除 / 精确 stem / 中文专题 / �
   const ren = L.renamePaper(w.data, 'T', 'My Paper-2.0_final', 'Renamed 3.1_beta')
   assert.deepEqual(ren.sort(), ['My Paper-2.0_final.pdf', 'My Paper-2.0_final.txt'])
   assert.ok(existsSync(join(dir2, 'Renamed 3.1_beta.pdf')) && existsSync(join(dir2, 'Renamed 3.1_beta.txt')))
-  // ⑤ 大小写改名：Linux 大小写敏感 → 成功；macOS/Windows 大小写不敏感 FS → 按「已存在同名」
-  //    拒绝（renamePaper 的已知设计局限，见 src/library.ts 注释——不做临时名两跳绕过）
+  // ⑤ 大小写改名：上游在 macOS 上会误报「已存在同名」（其自述的设计局限）；我们给「目标与源
+  //    是同一个文件」放行（评审 §B 认可本次顺带修好）→ 三平台都成功。
   writeFileSync(join(dir2, 'CaseA.pdf'), 'c')
-  if (process.platform === 'linux') {
-    assert.deepEqual(L.renamePaper(w.data, 'T', 'CaseA', 'casea'), ['CaseA.pdf'])
-    assert.ok(existsSync(join(dir2, 'casea.pdf')))
-  } else {
-    assert.throws(() => L.renamePaper(w.data, 'T', 'CaseA', 'casea'), /已存在同名/)
-  }
+  assert.deepEqual(L.renamePaper(w.data, 'T', 'CaseA', 'casea'), ['CaseA.pdf'])
+  assert.ok(existsSync(join(dir2, 'casea.pdf')))
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -755,13 +774,15 @@ test('V14(已知偏离固定) F1 NUL→路径泄露 / F2 类型混淆 500 / F3 -
       assert.equal(r.status, 500, 'F2：当前实现是 500')
     }
     t.diagnostic('F2 现状：' + f2rows.join(' | '))
-    // F3：删除文献后 -en.pdf 残留（PAPER_SIDECARS 不含 -en）
+    // F3：删除文献后 -en.pdf 是否残留。上游的 PAPER_SIDECARS 不含 -en（它自述的已知偏离）；
+    // 我们的产物清单把 -en/-zh/-dual 三个 pdf2zh 变体都算作该文献的产物 → 一并移入回收站，
+    // 不留删不掉的孤儿。断言随之更新为「F3 已修复」。
     writeFileSync(join(w.data, 'T', 'R.pdf'), 'R'); writeFileSync(join(w.data, 'T', 'R-en.pdf'), 'REN')
     const deleted = L.deletePaper(w.data, 'T', 'R')
     const enLeft = existsSync(join(w.data, 'T', 'R-en.pdf'))
     t.diagnostic(`F3 现状：deleted=${JSON.stringify(deleted)} remaining=${JSON.stringify(readdirSync(join(w.data, 'T')))}`)
-    if (!enLeft) t.diagnostic('F3 已修复（-en.pdf 也被删除）——请更新报告与断言')
-    assert.equal(enLeft, true, 'F3：当前 -en.pdf 不在 PAPER_SIDECARS 内，会残留')
+    assert.ok(deleted.includes('R-en.pdf'), 'F3 已修复：-en.pdf 属该文献产物，一并进回收站')
+    assert.equal(enLeft, false, 'F3：-en.pdf 不得残留')
     // 硬不变量：三条发现都不构成穿越（库外零变化）
     assert.equal(readFileSync(join(w.outside, 'Victim.pdf'), 'utf8'), 'VICTIM-PDF')
     assert.equal(readFileSync(join(w.outside, 'other.pdf'), 'utf8'), 'OTHER-PDF')

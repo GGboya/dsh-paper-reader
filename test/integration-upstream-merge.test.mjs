@@ -173,10 +173,12 @@ test('G3 上游 rename-topic/delete-topic：confirmName 必需、非空专题 40
   assert.equal(ren.status, 200, ren.text)
   assert.equal(ren.body.topic, 'g3-again')
 
-  // 删除专题：缺 confirmName / 对不上 → 400（上游 UI 的「两段式确认」接到我们的删除计划上）
-  const noConfirm = await postJson('/api/library/delete-topic', { topic: 'g3-again' })
-  assert.equal(noConfirm.status, 400)
-  assert.equal(noConfirm.body.code, 'confirm-mismatch')
+  // 删除专题：confirmName 是**可选**栅栏——给了就必须完全一致（400 confirm-mismatch）；
+  // 没给也照走全部前置：空专题免确认（上游 delete-topic {topic} 的契约：无数据可毁），非空一律 409。
+  mkdirSync(join(DATA, 'g3-noconfirm'), { recursive: true })
+  const noConfirm = await postJson('/api/library/delete-topic', { topic: 'g3-noconfirm' })
+  assert.equal(noConfirm.status, 200, `空专题免确认（上游契约）：${noConfirm.text}`)
+  assert.ok(!existsSync(join(DATA, 'g3-noconfirm')), '空专题按上游契约被删除')
   const mismatch = await postJson('/api/library/delete-topic', { topic: 'g3-again', confirmName: 'nope' })
   assert.equal(mismatch.status, 400)
   assert.equal(mismatch.body.code, 'confirm-mismatch')
