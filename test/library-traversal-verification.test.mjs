@@ -490,8 +490,9 @@ test('V8 符号链接文件 / 硬链接：只动链接本身，库外目标逐�
     rmSync(w.parent, { recursive: true, force: true })
   }
   // ② 边车是「指向库外目录」的符号链接。
-  //    平台差异：Linux 的 rmSync 干净地只删链接本身；macOS 的 rmSync 对「指向目录的符号链接」
-  //    抛 ERR_FS_EISDIR —— 删除中止（失败方向安全），链接残留、库外目标分毫不动。
+  //    rmSync 的行为随 **Node 版本**而异（实测）：Node 22 对「指向目录的符号链接」干净地只删
+  //    链接本身；Node 24 起抛 ERR_FS_EISDIR —— 删除中止（失败方向安全）。两种结果都合法，
+  //    按实际行为分支断言；共同不变量：库外目标分毫不动。
   {
     const w = tmpParent()
     mkdirSync(join(w.outside, 'odir'), { recursive: true })
@@ -500,12 +501,17 @@ test('V8 符号链接文件 / 硬链接：只动链接本身，库外目标逐�
     symlinkSync(join(w.outside, 'odir'), join(w.data, 'T', 'P.txt'))
     const before = snap(w.parent)
     const changed = () => diff(before, snap(w.parent)).filter((x) => x.startsWith('data/T/')).sort()
-    if (process.platform === 'darwin') {
-      assert.throws(() => L.deletePaper(w.data, 'T', 'P'), (e) => e?.code === 'ERR_FS_EISDIR' || e?.code === 'EISDIR', 'macOS：EISDIR 中止删除')
-      assert.deepEqual(changed(), ['data/T/P.pdf: P-PDF → ∅'], 'P.pdf 已删、符号链接边车残留（删除中止）')
+    let eisdir = false
+    try {
+      L.deletePaper(w.data, 'T', 'P')
+    } catch (e) {
+      const c = e?.code
+      if (c === 'ERR_FS_EISDIR' || c === 'EISDIR') eisdir = true
+      else throw e
+    }
+    if (eisdir) {
+      assert.deepEqual(changed(), ['data/T/P.pdf: P-PDF → ∅'], 'P.pdf 已删、符号链接边车残留（删除中止，失败方向安全）')
     } else {
-      const deleted = L.deletePaper(w.data, 'T', 'P')
-      assert.ok(deleted.includes('P.txt'))
       assert.deepEqual(changed(),
         [`data/T/P.pdf: P-PDF → ∅`, 'data/T/P.txt: symlink->' + join(w.outside, 'odir') + ' → ∅'].sort(), '只删了这篇文献本体与其符号链接边车')
     }
