@@ -1413,6 +1413,13 @@ test('VB7[B9] 运行中会话 → 409 session-running（删/改名/专题两级�
 
 test('VB8[B10] 翻译进行中 → 409 translation-busy（用假 babeldoc 造真实 busy 状态，不触发任何真实翻译）', async (t) => {
   if (process.getuid && process.getuid() === 0) return t.skip('root 环境下不可写目录用例不适用')
+  // F-D：win32 上这套「假 babeldoc」造不出来 —— src/translate.ts 在 win32 找的是
+  // `.venv-pdf2zh/Scripts/babeldoc.exe`，而本用例只能写一个 `#!/bin/sh` 的 `bin/babeldoc`
+  // （Windows 既认不到这个路径、也没有 sh）。于是 zhStatus().busy 不会置上、409 断言必红。
+  // 显式 skip 并注明「本机与 CI 均未跑过 win32」——按未验证登记，不做永真断言。
+  if (process.platform === 'win32') {
+    return t.skip('win32：假 babeldoc 的路径/解释器与 src/translate.ts 的 win32 候选不一致，本机与 CI 均未跑过 win32 —— 未验证')
+  }
   const TDATA = mkdtempSync(join(tmpdir(), 'dpr-ver-tx-'))
   const dataDir = join(TDATA, 'data')
   const pidFile = join(TDATA, 'pid')
@@ -1623,12 +1630,25 @@ test('VB12[B15/B16/S9/S10/S11] 二次确认与鉴权：清单只来自 delete-pl
 })
 
 test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作区未出现越界改动', () => {
-  // PR #5 rebase 轮：上游 6 个 library-*.test.mjs 本来就与本分支契约有若干处冲突（方案 §2.6 类 8），
-  // 逐条改过后**逐个登记**在这里（改回「零改动」这种断言只会让它变瞎）。新增改动必须同步这份清单。
-  const documentedTestEdits = {
-    'test/library-pr1-completion.test.mjs': 'R1 ②EACCES 场景改成可达的空专题 + 只读父目录；③不存在条目 404 not-found',
-    'test/library-traversal-verification.test.mjs': 'V5②/V7④/V8①③/V10/V11/V14：见 docs/pr5-fix-plan.md §2.6 类 8',
-    'test/library-traversal.test.mjs': '大小写改名三平台一致（我们的实现在不敏感 FS 上也成功）',
+  // PR #5 rebase 轮：上游 6 个 library-*.test.mjs（35 例）与本分支契约有冲突的地方**逐条**改写，
+  // 正确口径是：**28 例原样通过 + 7 例（下面按 8 条细分逐一登记）按本分支契约有依据地改写**——
+  // **不能**把「改写后的副本全绿」当成上游 35 例全通过（评审用上游 origin/main 原文实测 28 pass / 7 fail）。
+  // 判据与逐条理由见 docs/pr5-fix-plan.md §2.6；新增改动必须同步这份清单，不许压缩成一行。
+  const documentedTestEdits = [
+    { file: 'test/library-pr1-completion.test.mjs', case: 'R1② EACCES', why: '旧场景「非空专题 + 只读目录」在本分支契约下不可达（非空专题在碰文件系统之前就 409 topic-not-empty）→ 改成「空专题 + 只读父目录」，保持原意（errno → 400 固定文案、不泄露绝对路径）' },
+    { file: 'test/library-pr1-completion.test.mjs', case: 'R1③ 不存在条目', why: '本分支契约给 404 not-found（带机器码）；上游那 400 是 primitive 抛普通 Error 的副作用' },
+    { file: 'test/library-traversal-verification.test.mjs', case: 'V5② 空白别名 trim', why: '「T\n」trim 后打到真实的 T；T 非空时我们按契约拒绝递归删除（409 topic-not-empty），故先断言 409、清空后再断言成功' },
+    { file: 'test/library-traversal-verification.test.mjs', case: 'V7④ 指向库内的符号链接专题', why: '上游 realpath 层放行「real 落在库内」的链接；我们**一律拒**（评审 §B 点名称赞的加严）→ 断言 400 escape-rejected，且链接与目标都完好' },
+    { file: 'test/library-traversal-verification.test.mjs', case: 'V8① 符号链接 .pdf', why: '我们不把符号链接当文献（listPapers 用 isFile 过滤）→ 删除 404 not-found，而不是删链接本身；安全不变量（库外目标逐字节不变）不变' },
+    { file: 'test/library-traversal-verification.test.mjs', case: 'V10 路由层成功路径', why: '非空专题不递归删：先断言 409（payload 带 clearEndpoint），逐篇删除后再断言 200' },
+    { file: 'test/library-traversal-verification.test.mjs', case: 'V11① -en 变体 / V11⑤ 大小写改名', why: '① 我们的产物清单把 -en/-zh/-dual 都算作该文献的产物（不留删不掉的孤儿，上游报告 F3「已修复」）；⑤ 目标与源是同一文件时不误报「已存在同名」（评审 §B 认可的 macOS 修复）' },
+    { file: 'test/library-traversal-verification.test.mjs', case: 'V14 F3 -en 残留', why: '同 V11①：-en.pdf 一并进回收站，断言反转为「不得残留」' },
+    { file: 'test/library-traversal.test.mjs', case: '大小写改名平台分支', why: '同 V11⑤：不敏感 FS 上不误报，三平台行为一致（成功）' },
+  ]
+  // 登记表完整性：评审点名的 7 例一个都不能少（V11①⑤ 记为一条，含两个子例）
+  const registered = documentedTestEdits.map((d) => d.case).join(' | ')
+  for (const k of ['R1②', 'V5②', 'V7④', 'V8①', 'V10', 'V11①', 'V11⑤', 'V14 F3']) {
+    assert.ok(registered.includes(k), `登记表缺 ${k}：${registered}`)
   }
   const changed = execFileSync('git', ['diff', '--name-only', 'HEAD', '--', 'test/'], { cwd: REPO, encoding: 'utf8' })
     .trim().split('\n').filter(Boolean)
@@ -1640,7 +1660,8 @@ test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作
       .split('\n').filter((x) => /^test\/library-.*\.test\.mjs$/.test(x))
   } catch { /* 浅克隆：下面的交集为空 → 只保留「登记过的文件」这一层语义 */ }
   const upstream = changed.filter((p) => upstreamAtTip.length === 0 ? /^test\/library-.*\.test\.mjs$/.test(p) : upstreamAtTip.includes(p))
-  const undocumented = upstream.filter((p) => !(p in documentedTestEdits))
+  const documentedFiles = [...new Set(documentedTestEdits.map((d) => d.file))]
+  const undocumented = upstream.filter((p) => !documentedFiles.includes(p))
   assert.deepEqual(undocumented, [], `改了未登记的上游用例：${undocumented.join(', ')}`)
   const status = execFileSync('git', ['status', '--porcelain'], { cwd: REPO, encoding: 'utf8' })
   const touched = status.split('\n').filter(Boolean).map((l) => l.slice(3).trim())
@@ -1665,7 +1686,7 @@ test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作
       .split('\n').filter((x) => /^test\/library-.*\.test\.mjs$/.test(x))
     const diffVsTip = execFileSync('git', ['diff', '--name-only', 'ef00a5d', 'HEAD', '--', ...upstreamFiles], { cwd: REPO, encoding: 'utf8' })
       .split('\n').filter(Boolean).sort()
-    assert.deepEqual(diffVsTip, Object.keys(documentedTestEdits).sort(),
+    assert.deepEqual(diffVsTip, documentedFiles.sort(),
       `上游用例的差异必须与登记清单一致（多改/少改都要同步这份清单）：${JSON.stringify(diffVsTip)}`)
   }
   writeProbe('vc1-git-status.txt', status)

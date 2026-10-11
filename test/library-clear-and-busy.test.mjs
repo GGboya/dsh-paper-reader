@@ -17,8 +17,9 @@ import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import vm from 'node:vm'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO = join(ROOT, '..')
@@ -160,8 +161,10 @@ test('A5 回滚自身也失败：绝不静默——rollbackFailed 如实列出�
   assert.ok(err.message.includes(files[0].name), '文案要点名')
   assert.ok(existsSync(join(bundle.abs, files[0].name)), '未能回滚的文件一定在回收站里（绝不销毁）')
   assert.equal(readFileSync(join(bundle.abs, files[0].name), 'utf8'), 'xP' + files[0].name.slice(1), '内容逐字节完好（rename，不是 unlink）')
-  assert.ok(err.extra.trashDir && err.extra.trashRel, '必须给出恢复线索')
-  assert.ok(existsSync(String(err.extra.trashDir)))
+  // F-G：恢复线索只给**相对**路径（绝对 trashDir 只出现在 200 成功响应）
+  assert.ok(typeof err.extra.trashRel === 'string' && err.extra.trashRel.length > 0, '必须给出（相对）恢复线索')
+  assert.ok(!('trashDir' in err.extra), '错误 extra 不得带绝对 trashDir（F-G）')
+  assert.ok(existsSync(join(data, String(err.extra.trashRel))), '按相对线索能定位到回收站')
 })
 
 test('A6 renamePaper 注入 EBUSY：409 file-busy + 已改名的文件回滚回原名', () => {
@@ -372,7 +375,14 @@ test('B4 clear 的会话前置：有运行中会话 → 409 session-running，�
   } finally { sessionItems = () => []; srv.close() }
 })
 
-test('B5 clear 的翻译前置：正在生成译文 → 409 translation-busy（payload 带将在清单里高亮的篇名）', async () => {
+test('B5 clear 的翻译前置：正在生成译文 → 409 translation-busy（payload 带将在清单里高亮的篇名）', async (t) => {
+  // F-D：win32 上假 babeldoc 造不出来 —— src/translate.ts 在 win32 找 `.venv-pdf2zh/Scripts/babeldoc.exe`，
+  // 而这里（以及 VB8）只能写一个 `#!/bin/sh` 的 `bin/babeldoc`（Windows 既认不到也无 sh）。
+  // 于是 zhStatus().busy 不会置上 → clear 返回 200 → 本用例的 409 断言在 windows 必红。
+  // 显式 skip 并注明「本机与 CI 均未跑过 win32」（按未验证登记，不做永真断言）。
+  if (process.platform === 'win32') {
+    return t.skip('win32：假 babeldoc 的路径/解释器与 src/translate.ts 的 win32 候选不一致，本机与 CI 均未跑过 win32 —— 未验证')
+  }
   // 造**真实** busy 状态：假 babeldoc（--version/--help 立刻返回，真被拉起时写 pid 后 sleep），
   // 不触发任何真实翻译、也不吃资源（照搬 VB8 的手法）。
   const TDATA = mkdtempSync(join(tmpdir(), 'dpr-t3-tx-'))
@@ -480,7 +490,8 @@ test('B8 clear 部分失败：整体回滚（含已完成篇）+ 如实报 clear
   assert.equal(err.extra.cleared, 0, '整体回滚后没有一篇处于「已清空」状态')
   assert.deepEqual(err.extra.rollbackFailed, [], '本次回滚干净')
   assert.deepEqual(err.extra.moved, [], '回收站里不应残留本次移动的文件')
-  assert.ok(err.extra.trashDir && err.extra.trashRel, '恢复线索必须有')
+  assert.ok(typeof err.extra.trashRel === 'string' && err.extra.trashRel.startsWith('.trash/'), `恢复线索必须是相对路径：${err.extra.trashRel}`)
+  assert.ok(!('trashDir' in err.extra), '错误 extra 不得带绝对 trashDir（F-G）')
   assert.deepEqual(snap(w.data), before, '失败 = 库内逐字节零变化（含已回滚的第 1 篇）')
 })
 
@@ -539,6 +550,146 @@ test('B10 UI 静态契约：非空专题走 clear-plan → clear、清单来自�
   // 清空确认框要能提示「会被服务端拦下」的篇名（translation.busy / sessions.running）
   assert.match(client, /clearBlockedNames/)
   assert.match(client, /delTopicClearBlocked/)
+})
+
+test('B12 【F-A 靶子】clear 回滚失败不静默：rollbackFailed/moved/papersWithFilesInTrash 逐个点名，文件真在回收站可恢复', () => {
+  // 场景 = 评审 rollback-probe 的 R2：第 3 篇前向失败（EBUSY）+ 第 2 篇的 .pdf 回滚失败（EPERM）。
+  // 这条用例是「承诺被钉住」的靶子：把 clearTopic 的 rollbackFailed 或 moved 改成 [] → 本用例必红
+  // （此前 23 例全绿，即该承诺在 clear 路径上无人守）。
+  const topic = 'T'
+  const names = ['P1', 'P2', 'P3', 'P4']
+  const root = mkdtempSync(join(tmpdir(), 'dpr-t7-rollback-'))
+  const data = join(root, 'data')
+  const topicDir = join(data, topic)
+  mkdirSync(topicDir, { recursive: true })
+  for (const n of names) {
+    writeFileSync(join(topicDir, n + '.pdf'), 'pdf:' + n)
+    writeFileSync(join(topicDir, n + '.txt'), 'txt:' + n)
+  }
+  const inj = (from, to) => {
+    // 方向判定要看**是否在 .trash 里**：回收站也在 data 之下，用 startsWith(data) 会把回滚误判成前向
+    const forward = !from.includes(`${sep}.trash${sep}`)
+    if (forward) {
+      if (from.endsWith('P3.pdf')) throw Object.assign(new Error('EBUSY: injected'), { code: 'EBUSY' })
+    } else if (to.endsWith('P2.pdf')) {
+      throw Object.assign(new Error('EPERM: injected rollback'), { code: 'EPERM' })
+    }
+    renameSync(from, to)
+  }
+  try {
+    const err = catchErr(() => clearTopic(data, topic, inj))
+    assert.ok(err instanceof ManageError, `必须抛 ManageError：${err}`)
+    assert.equal(err.status, 409, 'Windows 占用 → 409')
+    assert.equal(err.code, 'file-busy')
+    const e = err.extra
+    // ① F-A：三个「不静默」承诺必须被钉住
+    assert.deepEqual(e.rollbackFailed, ['P2/P2.pdf'], '未能回滚的文件必须逐个点名（含篇名）')
+    assert.deepEqual(e.moved, ['P2/P2.pdf'], 'moved 必须恰等于「回滚后真还在回收站」的文件')
+    assert.deepEqual(e.rolledBack.includes('P1/P1.pdf') && e.rolledBack.includes('P2/P2.txt') && e.rolledBack.includes('P3/P3.txt'), true, `成功回滚的也要记账：${JSON.stringify(e.rolledBack)}`)
+    // ② F-H：字段语义说清（unprocessedPapers = 压根没轮到的篇；还在回收站的篇另给一个清单）
+    assert.deepEqual(e.unprocessedPapers, ['P4'], 'unprocessedPapers 只列「没轮到」的篇')
+    assert.deepEqual(e.papersWithFilesInTrash, ['P2'], '用户数据仍在回收站的篇必须点名')
+    assert.ok(!('remainingPapers' in e), '易被误读成「没清掉的篇数」的 remainingPapers 已改名（F-H）')
+    assert.equal(e.cleared, 0, '整体回滚后没有一篇被真正清空')
+    assert.deepEqual([...e.clearedBeforeRollback].sort(), ['P1', 'P2'], '失败前已完成的篇（审计用）')
+    // ③ F-C：未回滚时不得声称「文献库未改变」
+    assert.ok(!err.message.includes('文献库未改变'), `未回滚时不得声称库未改变：${err.message}`)
+    assert.match(err.message, /未能回滚/)
+    assert.ok(err.message.includes('P2/P2.pdf'), '文案要点名未回滚的文件')
+    // ④ F-G：错误 extra 只给相对路径，绝不带绝对值
+    assert.ok(!('trashDir' in e), '错误响应不得带绝对 trashDir（F-G）')
+    assert.ok(String(e.trashRel).startsWith('.trash/'), `trashRel 必须是相对路径：${e.trashRel}`)
+    assert.ok(!JSON.stringify(e).includes(data), '错误 extra 任何字段都不许出现 dataDir 绝对路径（F-G）')
+    // ⑤ 线索可恢复 + 条目守恒
+    const trashRoot = join(data, e.trashRel)
+    assert.ok(existsSync(join(trashRoot, 'P2', 'P2.pdf')), '未能回滚的文件必须真的在回收站里（可恢复）')
+    assert.equal(readFileSync(join(trashRoot, 'P2', 'P2.pdf'), 'utf8'), 'pdf:P2', '内容逐字节完好（rename，不是 unlink）')
+    assert.deepEqual(readdirSync(topicDir).sort(),
+      ['P1.pdf', 'P1.txt', 'P2.txt', 'P3.pdf', 'P3.txt', 'P4.pdf', 'P4.txt'], '回滚后专题里只剩「P2.pdf 之外的全部文件」')
+    const inTrash = []
+    for (const d of readdirSync(trashRoot, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue
+      // manifest.json 是我们自己的审计记录，不算「用户文件」
+      for (const f of readdirSync(join(trashRoot, d.name))) if (f !== 'manifest.json') inTrash.push(f)
+    }
+    assert.deepEqual(inTrash, ['P2.pdf'], '回收站里恰好只有那一个未回滚的文件（不多不少）')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('B13 【F-G】错误响应绝不含服务端绝对路径：真实 rmdir 失败（专题里留同名目录）只回相对 trashRel', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dpr-t7-abs-'))
+  const data = join(root, 'data')
+  const topic = 'T'
+  const topicDir = join(data, topic)
+  mkdirSync(join(topicDir, 'P.txt'), { recursive: true })   // 同名目录：不是产物、移不走 → rmdir 必失败
+  writeFileSync(join(topicDir, 'P.txt', 'inner'), 'inner-data')
+  writeFileSync(join(topicDir, 'P.pdf'), 'pdf:P')
+  writeFileSync(join(topicDir, 'P.pages.json'), 'pages')
+  const before = snap(topicDir)
+  const { srv, post } = await boot(data)
+  try {
+    const r = await post('/api/library/topic/clear', { topic, confirmName: topic })
+    assert.equal(r.status, 409, r.txt)
+    assert.equal(r.body.code, 'topic-not-empty')
+    assert.ok(!r.txt.includes(data), `错误响应不得含 dataDir 绝对路径（F-G）：${r.txt}`)
+    assert.ok(!('trashDir' in r.body), `错误响应不得带绝对 trashDir 字段（F-G）：${r.txt}`)
+    assert.ok(String(r.body.trashRel).startsWith('.trash/'), `只回相对 trashRel：${r.txt}`)
+    assert.deepEqual(snap(topicDir), before, '被拒后库内逐字节零变化')
+    assert.equal(readFileSync(join(topicDir, 'P.txt', 'inner'), 'utf8'), 'inner-data', '同名目录内容不得被销毁')
+  } finally { srv.close(); rmSync(root, { recursive: true, force: true }) }
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// D. F-B：用户必须能从 UI 得知「文件还在回收站、在哪儿、怎么恢复」
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 在 Node 里真的**执行** lib/client.js（只 stub `window.__ModuleLoader__.load`，不调用 factory →
+ * 不需要真的 react），并用追加的 harness 把文件顶层的纯函数导出到上下文。
+ * 这样测的就是生产代码本身，而不是 grep 出来的字符串。
+ */
+function loadClientPure() {
+  let loaded = null
+  const ctx = { window: { __ModuleLoader__: { load: (m) => { loaded = m } } }, console }
+  vm.createContext(ctx)
+  vm.runInContext(
+    readFileSync(join(REPO, 'lib', 'client.js'), 'utf8') + '\n;globalThis.__dprPure = { clearFailureText };',
+    ctx, { filename: 'client-inline.js' },
+  )
+  assert.ok(loaded && typeof loaded.factory === 'function', 'client.js 必须通过 __ModuleLoader__.load 注册模块')
+  assert.equal(typeof ctx.__dprPure?.clearFailureText, 'function', 'client.js 顶层必须有纯函数 clearFailureText')
+  return ctx.__dprPure.clearFailureText
+}
+
+test('D1 【F-B】失败文案纯函数：点名未回滚文件 + 给出回收站位置与恢复方法（删掉该分支 → 必红）', () => {
+  const clearFailureText = loadClientPure()
+  const dict = {
+    delBusyFile: '文件被占用（可能正在阅读器或其他程序中打开），关闭后重试',
+    clearPartialFailText: '操作未完成：{n} 个文件未能回滚，仍在回收站里（文献树里可能已看不到）：{names}',
+    clearRecoveryHint: '恢复方法：把 {where}/ 里列出的这些文件移回原专题目录即可',
+  }
+  const t = (k) => dict[k]
+  // ① 回滚失败：必须点名文件 + 说明在回收站 + 给出相对路径与恢复方法
+  const f = clearFailureText({ code: 'file-busy', rollbackFailed: ['P2/P2.pdf'], trashRel: '.trash/2026-abc' }, t)
+  assert.ok(f.text.includes('P2/P2.pdf'), `文案必须点名未回滚的文件：${f.text}`)
+  assert.ok(String(f.text).includes('回收站'), `必须说明文件在回收站（否则用户以为文献丢了）：${f.text}`)
+  assert.ok(String(f.recovery).includes('.trash/2026-abc'), `必须给出回收站位置（相对路径）：${f.recovery}`)
+  assert.ok(String(f.recovery).includes('恢复'), `必须给出恢复方法：${f.recovery}`)
+  // ② 没有回滚失败：保持简洁（不给多余的恢复指引、不吓唬用户）
+  const clean = clearFailureText({ code: 'file-busy' }, t)
+  assert.equal(clean.recovery, '')
+  assert.ok(clean.text.includes('文件被占用'))
+  // ③ 服务端没给 trashRel 时退回默认相对目录名——绝不拼绝对路径
+  const noRel = clearFailureText({ code: 'trash-move-failed', message: '移入回收站失败；…', rollbackFailed: ['T/P.pdf'] }, t)
+  assert.ok(noRel.recovery.includes('.trash/'), noRel.recovery)
+  assert.ok(!noRel.recovery.includes('/tmp/'), '客户端文案不得出现服务端绝对路径')
+})
+
+test('D2 【F-B】四个失败入口（删文献/删专题/清空/改名）都必须走 clearFailureText（退回旧的罐头文案 → 本用例红）', () => {
+  const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
+  const calls = (src.match(/clearFailureText\((e|err), t\)/g) || []).length
+  assert.ok(calls >= 4, `删除/清空/改名共 4 条失败路径都必须调用它（现有 ${calls} 处）——否则用户只会看到罐头文案`)
+  assert.ok(!/catch \(e\) \{[\s\S]{0,80}errText\(e\), 8000/.test(src), 'clear 的 catch 不得退回「只 toast errText」的旧行为')
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
