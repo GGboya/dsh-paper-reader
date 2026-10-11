@@ -16,11 +16,12 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t1-home-')) // 隔离 agent preset 安装，不碰真实 home
-const { registerRoutes } = await import(dist('host.js'))
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
 /** 临时工作区：parent/data（文献库，含专题 T 与文献 P）+ parent/sentinel（库外哨兵）。 */
 function workspace() {

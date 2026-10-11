@@ -16,12 +16,13 @@ import { createServer } from 'node:http'
 import { dirname, join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t3-home-')) // 隔离 agent preset 安装，不碰真实 home
-const L = await import(dist('library.js'))
-const { registerRoutes } = await import(dist('host.js'))
+const L = await import(pathToFileURL(dist('library.js')).href)
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
 /** 临时工作区：parent/data（文献库，含专题 T 与文献 P）+ parent/outside（库外哨兵）。 */
 function workspace() {
@@ -105,7 +106,7 @@ test('R2：upload 的 x-dpr-topic 越界/符号链接全部 4xx，库外递归�
     assert.match(rNul.body.error, /名字不能包含控制字符/)
     assert.ok(!rNul.txt.includes(w.data), 'upload NUL 不得泄露 dataDir')
     // realpath 层：data/evil → 库外 outside
-    symlinkSync(w.outside, join(w.data, 'evil'))
+    symlinkSync(w.outside, join(w.data, 'evil'), 'dir')
     const rLink = await postRaw('/api/library/upload', pdf, { 'x-dpr-topic': 'evil', 'x-dpr-name': 'Injected.pdf' })
     assert.equal(rLink.status, 400, `符号链接 topic 应 400：${rLink.status} ${rLink.txt}`)
     assert.match(rLink.body.error, /路径越界/, '必须来自 realpath 层')
@@ -158,14 +159,20 @@ test('R1：errno 错误（ENAMETOOLONG/EACCES）不回显绝对路径，业务�
     }
     assert.ok(!r1.txt.includes(w.data), 'ENAMETOOLONG 不得泄露 dataDir')
 
-    // ② EACCES：嵌套目录 chmod 0500 后 delete-topic
+    // ② EACCES：嵌套目录 chmod 0500 后 delete-topic。
+    //    平台差异：Windows 的 chmod 只映射「只读位」，目录只读属性不阻止删除 → 200 成功；
+    //    unix 上删除被拒 → errno → 固定文案 400。两平台都不泄露 dataDir。
     mkdirSync(join(w.data, 'T2', 'locked'), { recursive: true })
     writeFileSync(join(w.data, 'T2', 'locked', 'f.txt'), 'F')
     lockedDir = join(w.data, 'T2', 'locked')
     chmodSync(lockedDir, 0o500)
     const r2 = await postJson('/api/library/delete-topic', { topic: 'T2' })
-    assert.equal(r2.status, 400, `EACCES 应 400：${r2.status} ${r2.txt}`)
-    assert.equal(r2.body.error, '系统错误，请稍后重试', 'errno 错误只回固定中文文案')
+    if (process.platform === 'win32') {
+      assert.equal(r2.status, 200, `win32 chmod 只读位不阻止目录删除，应成功：${r2.status} ${r2.txt}`)
+    } else {
+      assert.equal(r2.status, 400, `EACCES 应 400：${r2.status} ${r2.txt}`)
+      assert.equal(r2.body.error, '系统错误，请稍后重试', 'errno 错误只回固定中文文案')
+    }
     assert.ok(!r2.txt.includes(w.data), 'EACCES 不得泄露 dataDir')
 
     // ③ 业务错误必须原样可读（非 errno、无 .code）
