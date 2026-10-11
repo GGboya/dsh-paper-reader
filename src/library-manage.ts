@@ -10,7 +10,10 @@
 // 本模块不依赖 Cordis，可直接被测试 import（dist/library-manage.js）。
 
 import { lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync, existsSync } from 'node:fs'
-// 共享边界校验层（上游 #4 的路径穿越修复，逐字保留在 library.ts，唯一实现）。
+// 共享的**边界原语**（上游 #4 的路径穿越修复，逐字保留在 library.ts）：
+// validateEntryName / validateEntryBoundary / realDataDir / assertInside。
+// 注意口径（评审 F-F）：组合层**两套并存**——生产写路径用本模块的 resolveTopicDirChecked
+// （在其上更严），#4 的 resolveSafeTopic 组合层只被 library.ts 的适配器（上游测试用）调用。
 // 本模块**消费**它，不再自己重复一套词法/realpath 校验；我们的加严叠在其上（见下）。
 import {
   assertInside as assertInsideShared,
@@ -316,10 +319,13 @@ export function newTrashBundle(dataDir: string): { abs: string; rel: string } {
 export type RenameImpl = (from: string, to: string) => void
 
 /**
- * 移入回收站失败时的**结构化真相**（全部字段都会进响应体，绝不静默）：
+ * 移入回收站失败时的**结构化真相**（字段都会进**错误**响应体，绝不静默）：
  * `moved` 是「回滚后**仍留在回收站**」的文件；回滚成功的文件已回到原处，因此不计入 moved 而计入
  * `rolledBack`；`remaining` 是「回滚后不在回收站」的文件（从未移动 + 已回滚）。`rollbackFailed`
  * 非空时文案必须降级成「部分文件未能回滚，请到回收站手动恢复」——把散落状态如实说清楚，不粉饰。
+ *
+ * **不变量（F-G）**：错误响应体只带**相对**的 `trashRel`（+ 文件名），**绝不带绝对路径**；
+ * 绝对 `trashDir` 只出现在 200 成功响应里（O4 裁定：成功响应里那是刻意的恢复线索，错误响应一律脱敏）。
  */
 export interface MoveFailure {
   /** 命中 EBUSY/EPERM 的文件名（其它 errno 时缺省） */
@@ -329,7 +335,6 @@ export interface MoveFailure {
   remaining: string[]
   rolledBack: string[]
   rollbackFailed: string[]
-  trashDir: string
   trashRel: string
   cause: string
 }
@@ -341,7 +346,7 @@ export interface MoveFailure {
  *   ② 再按 errno 分类：EBUSY/EPERM（Windows 文件占用）→ 409 `file-busy` 可执行文案；
  *      其它 errno → 500 `trash-move-failed`。两种情况都带 `MoveFailure` 全量字段。
  * 回滚本身也可能失败（例如目标同时被占用）：此时**不静默**——失败的文件仍在回收站里（可恢复），
- * 如实列进 `rollbackFailed` 并给 `trashDir/trashRel`，文案降级为「未能回滚，请到回收站手动恢复」。
+ * 如实列进 `rollbackFailed` 并给**相对**的 `trashRel`，文案降级为「未能回滚，请到回收站手动恢复」。
  */
 export function moveToTrash(
   bundle: { abs: string; rel: string },
@@ -377,7 +382,7 @@ export function moveToTrash(
         remaining,
         rolledBack,
         rollbackFailed,
-        trashDir: bundle.abs,
+        // F-G：只给相对路径——错误响应永不带服务端绝对路径
         trashRel: bundle.rel,
         cause,
       }
@@ -556,7 +561,7 @@ export function deleteTopic(dataDir: string, name: unknown, renameImpl?: RenameI
     throw new ManageError('topic-not-empty', 409, '专题目录仍非空，未删除', {
       entries: readdirSync(topicDir),
       movedHidden,
-      trashDir,
+      // F-G：错误响应不带绝对路径（绝对 trashDir 只留给 200 成功响应）
       trashRel,
       cause: (err as NodeJS.ErrnoException).code ?? 'unknown',
     })
@@ -727,26 +732,39 @@ export function clearTopic(dataDir: string, topic: unknown, renameImpl: RenameIm
     const failedPaperRolledBack = prevRolledBack.map((n) => `${failedPaper || '?'}/${n}`)
     const failedPaperFailed = prevFailed.map((n) => `${failedPaper || '?'}/${n}`)
     const allRollbackFailed = [...failedPaperFailed, ...rollbackFailed]
+    const totalProcessed = done.length + (failedPaper ? 1 : 0)
+    const totalRolledBack = failedPaperRolledBack.length + rolledBack.length
     const tail = allRollbackFailed.length === 0
-      ? '本次已移动的文件已全部回滚，专题内容未改变'
-      : `已回滚 ${done.length + (prevRolledBack.length > 0 ? 1 : 0)} 篇中的可回滚部分，但 ${allRollbackFailed.length} 个文件未能回滚（仍在回收站，可手动恢复）：${allRollbackFailed.join('、')}`
-    const message = isManageError(err)
-      ? `${err.message}｜清空中断：${tail}`
-      : `清空中断：${tail}`
+      ? `已处理 ${totalProcessed} 篇：本次已移动的文件已全部回滚，专题内容未改变`
+      : `已处理 ${totalProcessed} 篇：${totalRolledBack} 个文件已回滚，但 ${allRollbackFailed.length} 个文件未能回滚（仍在回收站，可手动恢复）：${allRollbackFailed.join('、')}`
+    // F-C：**有文件没回滚时绝不保留内层那句「…已全部撤销，文献库未改变」**——它只对失败的那一篇成立，
+    // 拼到整体回滚结果上就自相矛盾。内层只保留「；」之前的可执行前缀（如「文件被占用…关闭后重试」），
+    // 回滚结论一律由外层的 tail 单方面给出。
+    const innerRaw = isManageError(err) ? err.message : '清空中断'
+    const inner = allRollbackFailed.length === 0 ? innerRaw : (innerRaw.split('；')[0] || innerRaw)
+    const message = `${inner}｜${tail}`
+    // F-H：字段名要说清语义——`unprocessedPapers` 只列「这次压根没轮到」的篇；
+    // 「用户数据还在回收站」的篇另给 `papersWithFilesInTrash`（回滚失败时唯一能自救的清单）。
+    const unprocessedPapers = plan.papers
+      .map((p) => p.name)
+      .filter((n) => !done.some((d) => d.paper === n) && n !== failedPaper)
+    const papersWithFilesInTrash = [...new Set(allRollbackFailed.map((n) => n.split('/')[0]))]
     throw new ManageError(
       isManageError(err) ? err.code : 'trash-move-failed',
       isManageError(err) ? err.status : 500,
       message,
       {
         ...base,
+        // `cleared` = 本次**真正清空**（最终仍留在回收站）的篇数：失败即回滚 ⇒ 恒为 0
         cleared: 0,
         clearedBeforeRollback: done.map((d) => d.paper),
         failedPaper: failedPaper || null,
         rolledBack: [...failedPaperRolledBack, ...rolledBack],
         rollbackFailed: allRollbackFailed,
         moved: allRollbackFailed,
-        remainingPapers: plan.papers.map((p) => p.name).filter((n) => !done.some((d) => d.paper === n)),
-        trashDir: bundle.abs,
+        unprocessedPapers,
+        papersWithFilesInTrash,
+        // F-G：错误响应只给相对路径（绝对 trashDir 只留在 200 成功响应）
         trashRel: bundle.rel,
       },
     )
