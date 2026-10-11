@@ -878,10 +878,25 @@ function eqLatex(raw) {
 /** 进会话的引用串：保留 `$$` 定界（模型对数学最友好） */
 function eqCite(eq) { return '$$ ' + eqLatex(eq.latex) + ' $$'; }
 
+/**
+ * MinerU **生效 mode**（GET /mineru/config 的 mode 字段）：'off' | 'local' | 'cloud' | null(未知)。
+ * 它是「重新转录」按钮的门控依据——`source:'auto'` 会按 mode 选引擎，而 mode==='off' 时
+ * auto 落到 pdf.js，pdf.js 重解析会**删掉** <文献>.mineru.md/.mineru.json 富产物
+ * （src/transcribe.ts）；宁可少一个按钮，也不给一个会反噬的按钮。
+ */
+let mineruMode = null;
+async function loadMineruMode() {
+  try {
+    const c = await api('/mineru/config');
+    mineruMode = c && typeof c.mode === 'string' ? c.mode : null;
+  } catch { mineruMode = null; }   // 取不到按「未知」处理（照常给按钮，行为与旧版一致）
+}
+
 function loadFormulas() {
   return (async () => {
     eqIndex = { source: 'none', equations: [], reason: 'no-mineru-artifact', bboxSpace: 'normalized-1000' };
     if (!current) { renderEqPanel(); return; }
+    await loadMineruMode();
     const q = `topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`;
     try {
       const idx = await api('/formulas?' + q);
@@ -1043,9 +1058,14 @@ function renderEqPanel() {
       ? 'MinerU 产物损坏或不可读，已忽略（不影响阅读与划词提问）。'
       : eqIndex.reason === 'no-equations'
         ? '这篇论文没有解析出公式块（MinerU 产物存在，但 content_list 里没有 equation）。'
-        : '未找到 MinerU 解析产物。在 dsh 设置 → 论文伴读 → MinerU 解析后端 启用后点下面按钮重新转录。';
+        : mineruMode === 'off'
+          ? '未启用 MinerU：请到 dsh 设置 → 论文伴读 → MinerU 解析后端 选择「本地」或「云端」并保存，然后回到这里点「重新转录」。'
+          : '未找到 MinerU 解析产物。在 dsh 设置 → 论文伴读 → MinerU 解析后端 启用后点下面按钮重新转录。';
     list.appendChild(n);
-    if (eqIndex.reason === 'no-mineru-artifact' || eqIndex.reason === 'no-equations') {
+    // 门控：mode==='off' 时不渲染按钮（auto 会落到 pdf.js 并删掉已有的 MinerU 富产物）；
+    // mode 未知（接口不可用）时照旧给按钮，保持与旧版一致的行为。
+    const canRetranscribe = (eqIndex.reason === 'no-mineru-artifact' || eqIndex.reason === 'no-equations') && mineruMode !== 'off';
+    if (canRetranscribe) {
       const b = document.createElement('button');
       b.id = 'eq-transcribe';
       b.className = 'tbtn';
@@ -1095,8 +1115,10 @@ async function transcribeWithMineru(btn) {
     await api('/transcribe', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      // 显式 source 不受 MinerU mode=off 阻挡（顶层：mode 只影响 auto）
-      body: JSON.stringify({ ...current, force: true, source: 'mineru-local' }),
+      // source:'auto' = 按**当前生效 mode** 选引擎（local → 本地 MinerU；cloud → mineru.net 云端；
+      // off → pdf.js）。硬编码 'mineru-local' 会让配了云端的用户点一次失败一次（上游评审第 6 条）。
+      // 按钮本身在 mode==='off' 时不渲染（见 renderEqPanel 的门控），所以走到这里 mode 必为 local/cloud。
+      body: JSON.stringify({ ...current, force: true, source: 'auto' }),
     });
     toast('MinerU 转录完成');
     await loadFormulas();
