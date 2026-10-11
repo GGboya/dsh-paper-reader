@@ -35,10 +35,10 @@ The agent loop, model layer, and session persistence are all handled by the dsh 
 - 🀄 **Chinese/English toggle + export**: the "中" button in the top bar switches original ↔ full Chinese; if no translation exists, one click generates it in the background (babeldoc) — **no Python preinstall required**: first use auto-downloads uv + managed Python + babeldoc (macOS / Linux / Windows, a few minutes), everything stays in the user directory; the ⤓ button in the top bar **downloads the version you are looking at** (original / full Chinese / bilingual PDF)
 - 🔍 **PDF transcription + search**: local extraction (pdf.js, pure Node, no Python), header/footer stripping / ligature / hyphenation repair / paragraph reflow, with a page-offset table; compatible with pdfqa's `data/` cache layout
 - 🧲 **Optional MinerU parsing backend**: for scanned PDFs / complex layouts / tables and formulas you can switch to MinerU (local API or mineru.net v4 cloud); output is the same page-indexed cache. Off by default — with no configuration the behavior is identical to previous versions (see "MinerU parsing backend" below)
-- 🧮 **Click-to-cite formulas** (v1.5.0): formulas in the PDF text layer come out as garbage (`𝑧𝑧1 𝑥𝑥𝑡𝑡`-style duplicated glyphs), so selecting them is useless; now you **click a formula in the PDF** and cite the **LaTeX** MinerU recognized (e.g. `$$\pi(\mathbf{s}_t)$$`), which enters the session through the existing select-to-ask path. **Requires the paper to have been parsed by MinerU first** (see "Formula citing and library management" below)
-- 🗂️ **Library management: delete & rename** (v1.5.0): topic rows and paper rows in the sidebar tree gained hover `✎` (rename) / `🗑` (delete) buttons — rename topic/paper, delete paper/topic, both in in-page portal dialogs (Electron has no window.prompt/confirm). Deletion is **destructive**: **a single click on `🗑`** opens a confirmation dialog whose file list **comes from the server** (`/api/library/paper/delete-plan` — the front end never assembles it); artifacts are moved into a trash folder inside the library (`data/.trash/`, recoverable), behind server-side preconditions (read "What deletion does" below)
+- 🧮 **Click-to-cite formulas** (v1.4.0): formulas in the PDF text layer come out as garbage (`𝑧𝑧1 𝑥𝑥𝑡𝑡`-style duplicated glyphs), so selecting them is useless; now you **click a formula in the PDF** and cite the **LaTeX** MinerU recognized (e.g. `$$\pi(\mathbf{s}_t)$$`), which enters the session through the existing select-to-ask path. **Requires the paper to have been parsed by MinerU first** (see "Formula citing and library management" below)
+- 🗂️ **Library management: delete & rename** (v1.4.0): topic rows and paper rows in the sidebar tree gained hover `✎` (rename) / `🗑` (delete) buttons — rename topic/paper, delete paper/topic, both in in-page portal dialogs (Electron has no window.prompt/confirm). Deletion is **destructive**: **a single click on `🗑`** opens a confirmation dialog whose file list **comes from the server** (`/api/library/paper/delete-plan` — the front end never assembles it); artifacts are moved into a trash folder inside the library (`data/.trash/`, recoverable), behind server-side preconditions (read "What deletion does" below)
 
-## Formula citing and library management (v1.5.0)
+## Formula citing and library management (v1.4.0)
 
 ### Click to cite a formula
 
@@ -61,7 +61,14 @@ Both **topic rows** and **paper rows** in the sidebar library tree show `✎` (r
 | --- | --- |
 | Rename topic / paper | Renames all same-stem artifacts and translation variants together. **Note**: companion session ids embed "topic/paper", so past conversations are kept but no longer listed under the renamed paper (the dialog says so) |
 | Delete paper | **One click on `🗑`** → a confirmation dialog lists every file **returned by the server** and its size → on confirm the files are **moved to the trash** |
-| Delete topic | **Only empty topics** (a topic that still has papers is rejected and asks you to delete them one by one); requires typing the topic name to confirm |
+| Delete topic | **Empty topic**: click `🗑` → type the topic name to confirm. **Non-empty topic**: click `🗑` to open the **bulk clear** step (server-side clear list, typed topic name, one confirmation) |
+
+**Bulk-clearing a non-empty topic (one confirmation)**: a 30-paper topic no longer means 30 confirmations. The dialog after clicking `🗑` lists **every paper** that will be moved to the trash (name + file count + size, from the server-side dry-run `/api/library/topic/clear-plan` — the front end never assembles it); type the topic name and confirm once:
+
+- each paper still goes through **the same trash** (`data/.trash/<bundle>/<paper>/`, one `manifest.json` per paper plus a bundle-level manifest — all recoverable), still moving **exact-stem** artifacts only, `.pdf` last;
+- the same **preconditions** apply (running companion session / translation in progress are refused; the dialog flags the papers that will be blocked, and the server finishes every check before moving a single byte);
+- any failure **rolls back every file moved by that request** (rename back, never `unlink`); files that could not be rolled back are reported truthfully (`rollbackFailed` + `trashDir` for manual recovery) — no half-deleted leftovers;
+- only after everything is moved is the topic folder removed, **non-recursively** (never `rm -rf`); hidden entries (`.DS_Store` …) go to the trash instead of being destroyed.
 
 **What deletion does (important)**:
 
@@ -99,12 +106,22 @@ The default backend is `pipeline` (general purpose, no VLM model needed); with a
 (needs the VLM model ready — a 2-page synthetic PDF took ~5s here). For scanned PDFs keep the parse method on `auto`
 and let MinerU decide on OCR.
 
-**Cloud MinerU**: sign up at [mineru.net](https://mineru.net) → create a token under API management → paste it into the
-card's "Cloud token" field. One parse runs: request batch upload URLs → PUT upload → poll results → download and parse
-the zip. ⚠️ **The cloud path is not live-tested in this repo** (the dev machine has no token); it is covered only by
-mock-HTTP unit tests — treat it as experimental. The token is stored only in
-`~/.dsh/.dsh-paper-reader/mineru.json` (0600); read endpoints return a masked hint only, and no log / error / response
-ever contains the plaintext key.
+**Cloud MinerU (three steps, about a minute)**:
+
+1. Sign up at [mineru.net](https://mineru.net);
+2. Create a token under "API management" and copy it;
+3. Open dsh **Settings → Paper Reader → MinerU parser**: set mode to "Cloud", paste the token into "Cloud token", click **Test connection**, then save.
+
+Two reasons to bother (one line each):
+
+- **Formula citing**: formulas in the PDF text layer come out as garbage (`𝑧𝑧1 𝑥𝑥𝑡𝑡`-style duplicated glyphs) — only the LaTeX MinerU recognizes can be clicked and cited;
+- **Scanned PDFs / complex layouts**: those have no text layer, so pdf.js gets nothing; MinerU (OCR) can read them.
+
+**What still works without it** (matches the implementation — no overclaiming): transcription uses local pdf.js, which is plenty for text-layer PDFs (transcription, search, select-to-ask and translation export are unaffected); only **scanned PDFs and formula citing** need MinerU. Once configured and saved, the reader's formula panel gains a "Re-parse with MinerU" button (with mode "Off" that button is not rendered at all, so pdf.js can never overwrite existing MinerU artifacts by accident).
+
+The parse sequence is: request a batch upload URL → PUT the file → poll → download and unzip.
+⚠️ **The cloud path has not been end-to-end tested yet** (only mock-HTTP unit coverage) — treat it as experimental, and verify with step 3's "Test connection" plus a small paper.
+The token is stored only in `~/.dsh/.dsh-paper-reader/mineru.json` (0600); read APIs return a mask only, and logs / errors / responses never contain the plaintext.
 
 **Config file / environment variables** (per-field priority: file > profile YAML `config.mineru` > env > defaults):
 
@@ -257,7 +274,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest
 
 ```bash
 dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # always newest
-# dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.5.0  # or pin a version
+# dsh plugin --profile web add @ggboy123/dsh-paper-reader@1.4.0  # or pin a version
 # Restart dsh web; hard-refresh the browser (Cmd+Shift+R) to avoid cached reader pages
 ```
 
