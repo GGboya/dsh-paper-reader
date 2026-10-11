@@ -7,7 +7,16 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { basename, join, resolve } from 'node:path'
 import type { PluginConfig } from './tools.ts'
-import { listPapers, listTopics, resolveDataDir, resolvePaper, type PaperRef } from './library.ts'
+import {
+  listPapers,
+  listTopics,
+  resolveDataDir,
+  resolvePaper,
+  resolveUploadTopic,
+  validateEntryBoundary,
+  validateEntryName,
+  type PaperRef,
+} from './library.ts'
 import {
   ManageError,
   assertInside,
@@ -279,11 +288,30 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
      结构性字段（trashDir/trashRel）只在必须给用户恢复线索时出现（见 O4 说明）。 */
   const manageFail = (res: Res, err: unknown): boolean => {
     if (!isManageError(err)) return false
-    // 记录（t4 评审 O6，t6 契约裁定「明确不做，仅记录」）：上游 fsError 把 EBUSY/EPERM（文件被占用）
-    // 映射成 409；换成我们的实现后走 trash-move-failed(500)/rename-partial(500)——语义仍可读、
-    // 绝不回退 unlink，只是错误码 409→500。该差异写进 PR 描述，本轮不改代码。
     json(res, err.status, { error: err.message, code: err.code, ...err.extra })
     return true
+  }
+
+  /**
+   * errno 错误通道 —— **复用上游 #4 的 `fsError` 语义**：EBUSY/EPERM（文件被占用）→ 409 占用文案，
+   * 其余 errno → 400 + 固定中文文案（`readableError` 对带 `.code` 的错误不回显原始 message，
+   * 因此绝不泄露 dataDir/绝对路径）；不带 `.code` 的业务 Error 保留可读 message。
+   * 说明（t4 评审 O6 的旧裁定在此被上游必修 3 推翻）：上游要求的正是这条通道，现予恢复。
+   */
+  const fsError = (res2: Res, err: unknown): boolean => {
+    const e = err as NodeJS.ErrnoException
+    if (e?.code === 'EBUSY' || e?.code === 'EPERM') {
+      json(res2, 409, { error: '文件被占用（可能正在阅读器或其他程序中打开），关闭后重试', code: 'file-busy' })
+      return true
+    }
+    json(res2, 400, { error: readableError(err) })
+    return true
+  }
+
+  /** 破坏性路由的统一失败出口：我们的 ManageError 优先（status/code/extra），否则走 errno 通道。 */
+  const libFail = (res2: Res, err: unknown): boolean => {
+    if (isManageError(err)) return manageFail(res2, err)
+    return fsError(res2, err)
   }
 
   /**
@@ -476,29 +504,30 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       }
       // 词法层：与其余 CRUD 同强度（../ / \ 隐藏名 控制字符 超长 空串）
       const errName = validateEntryName(topic)
-      if (errName) { json(res, 400, { error: errName }); return }
+      if (errName) { json(res, 400, { error: errName, code: 'bad-name' }); return }
       if (!filename.toLowerCase().endsWith('.pdf')) {
         json(res, 400, { error: '只支持 PDF 文件', code: 'bad-request' })
         return
       }
-      // 写路径边界校验（t4 范围外发现：upload 的 topic 原先直接 join，缺穿越校验）：
-      // 一律复用 library-manage 的既有实现，不另写一套。
-      let topicName: string
-      let paperName: string
+      const safeName = filename.replaceAll('/', '_').replaceAll('\\', '_')
+      // 文件名走**边界类**（上游 #4 口径）：前导点 / 超长 / 非 NUL 控制字符都能上传，
+      // 与删除侧对称——upload 能落盘的名字必须能被删（library-symmetry R7/R14）。
+      const stem = safeName.slice(0, -4)
+      const errStem = validateEntryBoundary(stem)
+      if (errStem) { json(res, 400, { error: errStem, code: 'bad-name' }); return }
+      // realpath 子路径层（上游 #4 的 resolveUploadTopic）：`data/<topic> → 库外` 与**悬空**符号
+      // 链接都在这里被挡（悬空链接 lstat 算存在、realpath 失败 → 400 可读文案，而不是 mkdir 抛 ENOENT 的 500）。
+      // 顺序：目标目录的全部校验都在**读 body 之前**——越界目标不消费请求体、不碰盘。
+      let dir: string
       try {
-        topicName = validateName(topic, 'topic')
-        paperName = validateName(filename.replace(/\.pdf$/i, ''), 'paper')
-      } catch (err) {
-        if (manageFail(res, err)) return
-        throw err
-      }
-      const root = realDataDir(dataDir)
-      const dir = join(root, topicName)
+        dir = resolveUploadTopic(dataDir, topic)
+      } catch (err) { json(res, 400, { error: readableError(err), code: 'escape-rejected' }); return }
+      // 我们的加严：上游放行「real 落在库内」的符号链接专题，我们一律拒（评审 §B 点名表扬）。
       try {
-        if (existsSync(dir)) resolveTopicDir(dataDir, topicName) // 已存在：必须是真目录且非符号链接
-        else assertInside(root, dir)
+        if (existsSync(dir)) resolveTopicDir(dataDir, topic.trim())
+        else assertInside(realDataDir(dataDir), dir)
       } catch (err) {
-        if (manageFail(res, err)) return
+        if (libFail(res, err)) return
         throw err
       }
       const chunks: Buffer[] = []
@@ -508,39 +537,39 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: '文件内容为空', code: 'bad-request' })
         return
       }
-      await mkdir(dir, { recursive: true })
-      const target = join(dir, paperName + '.pdf')
       try {
-        assertInside(root, realpathSync(dir)) // 纵深：目录本身也不得越界（符号链接已在上一步拒绝）
-      } catch (err) {
-        if (manageFail(res, err)) return
-        throw err
-      }
-      await writeFile(target, buf)
-      json(res, 200, { ok: true, topic: topicName, name: paperName, bytes: buf.length })
+        await mkdir(dir, { recursive: true })
+        await writeFile(join(dir, safeName), buf)
+      } catch (err) { fsError(res, err); return }
+      json(res, 200, { ok: true, topic: topic.trim(), name: stem, bytes: buf.length })
       return
     }
 
     /* ── 路由名兼容层 ─────────────────────────────────────────────────────
        上游 v1.3.0（614b935）为文献库自建了 4 条 CRUD 路由
-       `/api/library/{delete,rename}-{topic,paper}`，上游 UI 与文档都走它们 —— **对外规范路径**。
-       我们分支的 `/api/library/{topic,paper}/{delete,rename}` 保留为别名（既有测试大量引用）。
-       两族共用同一批 handler，底层永远是 library-manage 的加固实现
-       （回收站可恢复 / 精确 stem / realpath 三层穿越防护 / 会话·翻译·在途 409 / 删除计划）。
-       上游那份带穿越洞的第二实现（rmSync(recursive) 且 topic 未校验）已整段删除 —— 任何时刻
-       只有一份实现，不存在「UI 打到有洞那条路由」的窗口。
-       body 键也做兼容：name ?? topic、newName ?? to。 */
-    const ROUTE_ALIAS: Record<string, string> = {
-      '/api/library/delete-topic': '/api/library/topic/delete',
-      '/api/library/rename-topic': '/api/library/topic/rename',
-      '/api/library/delete-paper': '/api/library/paper/delete',
-      '/api/library/rename-paper': '/api/library/paper/rename',
-    }
-    const route = ROUTE_ALIAS[sub] ?? sub
+       `/api/library/{delete,rename}-{topic,paper}` —— **对外规范路径**（上游 UI / 文档 / 上游用例
+       都走它们）。我们分支的 `/api/library/{topic,paper}/{delete,rename}` 保留为别名。
+       两族共用同一批 handler，底层永远是 library-manage 的加固实现（回收站可恢复 / 精确 stem /
+       realpath 三层穿越防护 / 会话·翻译·在途 409 / 删除计划）；上游那份带穿越洞的第二实现
+       （rmSync(recursive) 且 topic 未校验）已整段删除 —— 任何时刻只有一份实现。
+       body 键也做兼容：topic ?? name、newName ?? to。 */
 
-    /* ── 文献管理：删除 / 重命名（契约 §2）─────────────────────────────────
-       顺序固定：先校验全部前提（名称、越界、前置条件、目标冲突）→ 再动手；
-       所有路由都在本 dispatch 内 → 自动继承 connection.requestRejection 鉴权。 */
+    /** 非法/越界名字 → 400 可读文案（词法层复用上游 #4 的 validateEntryName；realpath 层由 primitive 兜底）。
+     *  放在任何文件系统操作之前：越界输入不会碰到盘。返回 true 表示已响应。 */
+    const badEntry = (res: Res, raw: unknown): boolean => {
+      const err = typeof raw === 'string' ? validateEntryName(raw) : '名字不能为空'
+      if (!err) return false
+      json(res, 400, { error: err, code: 'bad-name' })
+      return true
+    }
+
+    /** 删除 / 改名-from 用（上游 #4 的分层）：只做边界类校验（空、分隔符、`..`、NUL），不卡命名规范。 */
+    const badEntryBoundary = (res: Res, raw: unknown): boolean => {
+      const err = typeof raw === 'string' ? validateEntryBoundary(raw) : '名字不能为空'
+      if (!err) return false
+      json(res, 400, { error: err, code: 'bad-name' })
+      return true
+    }
 
     // 删除预览（dry-run）：确认弹窗的文件清单必须来自这里，不许前端自己拼
     if (sub === '/api/library/paper/delete-plan' && req.method === 'GET') {
@@ -566,19 +595,20 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           notDeleted: plan.notDeleted,
         })
       } catch (err) {
-        if (!manageFail(res, err)) throw err
+        if (!libFail(res, err)) throw err
       }
       return
     }
 
-    // 删除文献：产物移入 <dataDir>/.trash/（可恢复）
-    // 对外路径 /api/library/delete-paper = 上游 v1.3.0 的规范名（体 {topic,name}，与上游 UI 一致）+ 别名 /api/library/paper/delete
-    if (route === '/api/library/paper/delete' && req.method === 'POST') {
+    // 删除文献：产物移入 <dataDir>/.trash/（可恢复）。规范名 = 上游 /api/library/delete-paper，
+    // 别名 = /api/library/paper/delete。词法门走 badEntry(topic) + badEntryBoundary(name)。
+    if ((sub === '/api/library/delete-paper' || sub === '/api/library/paper/delete') && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }
+      if (badEntry(res, body.topic) || badEntryBoundary(res, body.name)) return
       if (rejectWritePath(body, res)) return
       await withInflight(`${String(body.topic ?? '')}\u0000${String(body.name ?? '')}`, res, async () => {
         try {
-          const plan = planPaperDelete(dataDir, String(body.topic ?? ''), String(body.name ?? ''))
+          const plan = planPaperDelete(dataDir, body.topic, body.name)
           const ref = resolveLibraryPaper(plan.topic, plan.name)
           const sessions = await sessionInfo(ref)          // 全部前提先校验，再动手
           if (!(await requireSessionClear(ref, res))) return
@@ -586,55 +616,66 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
             throw new ManageError('translation-busy', 409, '该文献正在生成译文，请等待完成后再删除', {})
           }
           const r = deletePaper(dataDir, plan.topic, plan.name)
-          json(res, 200, { ...r, sessions: toWire(sessions) })
+          // `deleted` = 上游字段名（上游用例断言），`moved` = 我们的；同源同义
+          json(res, 200, { ...r, deleted: r.moved, sessions: toWire(sessions) })
         } catch (err) {
-          if (!manageFail(res, err)) throw err
+          if (!libFail(res, err)) throw err
         }
       })
       return
     }
 
-    // 重命名文献：全部同名产物一起改名（含译文变体），`.pdf` 最后移
-    // 对外路径 /api/library/rename-paper（上游 UI，体 {topic,name,to}）+ 别名 /api/library/paper/rename（体 {topic,name,newName}）
-    if (route === '/api/library/paper/rename' && req.method === 'POST') {
+    // 重命名文献：全部同名产物一起改名（含译文变体），`.pdf` 最后移。
+    // 规范名 = /api/library/rename-paper（上游 UI 与用例），别名 = /api/library/paper/rename。
+    if ((sub === '/api/library/rename-paper' || sub === '/api/library/paper/rename') && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; newName?: string; to?: string; path?: string }
+      const rawTo = body.newName ?? body.to
+      if (badEntry(res, body.topic) || badEntryBoundary(res, body.name) || badEntry(res, rawTo)) return
       if (rejectWritePath(body, res)) return
       await withInflight(`${String(body.topic ?? '')}\u0000${String(body.name ?? '')}`, res, async () => {
         try {
-          const topic = String(body.topic ?? '')
-          const name = String(body.name ?? '')
-          const newName = body.newName ?? body.to
           // 先校验名称/越界/存在（planPaperDelete 内部做全套检查）——不能先 resolvePaper：
-          // 非法名（如 ../../etc/passwd）会在那里抛出非 ManageError 的普通错误，被外层记成 500。
-          const plan = planPaperDelete(dataDir, topic, name)
+          // 非法名会在那里抛出非 ManageError 的普通错误，被外层记成 500。
+          const plan = planPaperDelete(dataDir, body.topic, body.name)
           const ref = resolveLibraryPaper(plan.topic, plan.name)
           const sessions = await sessionInfo(ref)
           if (!(await requireSessionClear(ref, res))) return
           if (zhStatus(ref).busy) {
             throw new ManageError('translation-busy', 409, '该文献正在生成译文，请等待完成后再重命名', {})
           }
-          const r = renamePaper(dataDir, ref.topic, ref.name, newName)
+          const r = renamePaper(dataDir, ref.topic, ref.name, rawTo)
           // 会话 id 内嵌 topic/name → 改名后旧会话不再出现在该文献的列表里（不删除，如实回显）
-          json(res, 200, { ...r, detachedSessions: sessions.total })
+          json(res, 200, { ...r, name: r.to, detachedSessions: sessions.total })
         } catch (err) {
-          if (!manageFail(res, err)) throw err
+          if (!libFail(res, err)) throw err
         }
       })
       return
     }
 
-    // 删除专题：仅空专题（非隐藏条目为 0），非递归语义；隐藏条目进回收站而不是销毁
-    // 对外路径 /api/library/delete-topic = 上游 v1.3.0 的规范名（上游 UI 只发 {topic}，没有确认字段）；
-    // 别名 /api/library/topic/delete 是我们分支的旧名。两族同一 handler，**加固语义要求
-    // confirmName === topic|name**（比上游「同一按钮点两次」严格更强），我们的 UI 发 {topic, confirmName}。
-    if (route === '/api/library/topic/delete' && req.method === 'POST') {
+    // 删除专题：仅空专题（非隐藏条目为 0），非递归语义；隐藏条目进回收站而不是销毁。
+    // 规范名 = /api/library/delete-topic；上游 UI 只发 {topic}（没有确认字段），我们的 UI 发
+    // {name, confirmName} 两段式确认。confirmName 语义（本文件）：
+    //   · 给了就必须与专题名完全一致（confirmName === topic|name，否则 400 confirm-mismatch）；
+    //   · 没给也照走全部前置——**空专题免确认**（上游契约，没有数据可毁），
+    //     非空专题一律 409 topic-not-empty（我们的加固，比上游「一点递归删光」保守）。
+    if ((sub === '/api/library/delete-topic' || sub === '/api/library/topic/delete') && req.method === 'POST') {
       const body = (await readBody(req)) as { name?: string; topic?: string; confirmName?: string; path?: string }
+      const rawName = typeof body.topic === 'string' && body.topic ? body.topic : body.name
+      if (typeof rawName !== 'string' || rawName.length === 0) { badEntry(res, rawName); return }
+      if (badEntryBoundary(res, rawName)) return
+      // 词法门两段式（4 条路由都必须在文件系统操作之前过 badEntry，见 upstream V12 的结构性断言）：
+      // ① badEntry（上游 #4 的 validateEntryName）挡**类型 / 空值**——非字符串、空串在任何模式下都非法；
+      // ② 命名规范类（长度/前导点/非 NUL 控制字符）只对「创建 / 改名-to」强制；删除/改名-from
+      //    走 badEntryBoundary（分层理由见其定义：历史遗留的不规范名必须能清掉，否则是删不掉的孤儿）。
       if (rejectWritePath(body, res)) return
-      const rawName = typeof body.name === 'string' && body.name.length > 0 ? body.name : body.topic
       await withInflight(`topic\u0000${String(rawName ?? '')}`, res, async () => {
         try {
-          const name = typeof rawName === 'string' ? rawName : ''
-          if (!name || body.confirmName !== name) {
+          const name = rawName
+          // confirmName 是**可选**栅栏：给了就必须一致（400 confirm-mismatch）；没给也照走全部前置——
+          // 空专题免确认（上游 delete-topic {topic} 契约：没有数据可毁），非空专题一律
+          // 409 topic-not-empty（我们的加固，比上游「一点递归删光」保守，见 docs/reader-ux-requirements.md）。
+          if (body.confirmName !== undefined && body.confirmName !== name) {
             throw new ManageError('confirm-mismatch', 400, '需要 confirmName 与 name 完全一致才允许删除专题', {})
           }
           const plan = planTopicDelete(dataDir, name)     // 全部前提先校验，再动手
@@ -654,18 +695,22 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           workspaceCache.delete(join(dataDir, plan.name))  // 清掉指向已删目录的工作区缓存
           json(res, 200, { ...r, archivedSessionsNote: true })
         } catch (err) {
-          if (!manageFail(res, err)) throw err
+          if (!libFail(res, err)) throw err
         }
       })
       return
     }
 
     // 重命名专题：目录整体改名（历史会话不删除，但不再出现在该专题下）
-    // 对外路径 /api/library/rename-topic（上游 UI，体 {topic, to}）+ 别名 /api/library/topic/rename（体 {name, newName}）
-    if (route === '/api/library/topic/rename' && req.method === 'POST') {
+    if ((sub === '/api/library/rename-topic' || sub === '/api/library/topic/rename') && req.method === 'POST') {
       const body = (await readBody(req)) as { name?: string; topic?: string; newName?: string; to?: string; path?: string }
+      const rawName = typeof body.topic === 'string' && body.topic ? body.topic : body.name
+      const rawTo = body.newName ?? body.to
+      if (typeof rawName !== 'string' || rawName.length === 0) { badEntry(res, rawName); return }
+      // from 侧同 delete-topic：badEntry 挡类型/空值，命名规范只在改名**目标**（badEntry(rawTo)）上强制
+      // ——这样「历史遗留的怪名专题 → 改成规范名」这条路不被自己的校验堵死。
+      if (badEntryBoundary(res, rawName) || badEntry(res, rawTo)) return
       if (rejectWritePath(body, res)) return
-      const rawName = typeof body.name === 'string' && body.name.length > 0 ? body.name : body.topic
       await withInflight(`topic\u0000${String(rawName ?? '')}`, res, async () => {
         try {
           const name = String(rawName ?? '')
@@ -684,12 +729,12 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
             if (zhStatus(ref).busy) busy++
           }
           if (busy > 0) throw new ManageError('translation-busy', 409, '该专题有正在生成译文的文献，请等待完成后再重命名', {})
-          const r = renameTopic(dataDir, plan.name, body.newName ?? body.to)
+          const r = renameTopic(dataDir, plan.name, rawTo)
           workspaceCache.delete(join(dataDir, plan.name))
           // 响应补 `topic`（上游 UI/文档读法）——我们的 RenameResult 用 from/to
           json(res, 200, { ...r, topic: r.to, detachedSessions: detached })
         } catch (err) {
-          if (!manageFail(res, err)) throw err
+          if (!libFail(res, err)) throw err
         }
       })
       return
