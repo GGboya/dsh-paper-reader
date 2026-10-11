@@ -11,13 +11,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 
-const mineru = await import(dist('mineru.js'))
-const search = await import(dist('search.js'))
+const mineru = await import(pathToFileURL(dist('mineru.js')).href)
+const search = await import(pathToFileURL(dist('search.js')).href)
 const { compressMathSpaces, normalizeMathBraces, projectContentList } = mineru
 const { chunkText, searchChunks } = search
 

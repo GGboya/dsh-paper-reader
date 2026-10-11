@@ -23,6 +23,7 @@ import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pathToFileURL } from 'node:url'
+import { caseInsensitiveFs as caseInsensitiveFsOf } from './fs-probe.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO = join(ROOT, '..')
@@ -36,6 +37,7 @@ const PRE_FIX_REF = 'a574288'
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t11-home-'))
 const L = await import(pathToFileURL(dist('library.js')).href)
 const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
+const caseInsensitiveFs = caseInsensitiveFsOf()
 
 // ── 真实文献库指纹：证明本次验证一个字节都没碰它 ────────────────────────────
 const REAL_LIB = join(homedir(), '.dsh-paper-reader', 'data')
@@ -686,11 +688,19 @@ test('V11 正常功能：多变体产物删除 / 精确 stem / 中文专题 / �
   const ren = L.renamePaper(w.data, 'T', 'My Paper-2.0_final', 'Renamed 3.1_beta')
   assert.deepEqual(ren.sort(), ['My Paper-2.0_final.pdf', 'My Paper-2.0_final.txt'])
   assert.ok(existsSync(join(dir2, 'Renamed 3.1_beta.pdf')) && existsSync(join(dir2, 'Renamed 3.1_beta.txt')))
-  // ⑤ 大小写改名：上游在 macOS 上会误报「已存在同名」（其自述的设计局限）；我们给「目标与源
-  //    是同一个文件」放行（评审 §B 认可本次顺带修好）→ 三平台都成功。
+  // ⑤ 大小写改名。平台分支按**实测**的文件系统大小写敏感性（不是硬编码 darwin）：
+  //    · 大小写敏感（ext4 / 大小写敏感卷）：`casea.pdf` 不存在 → 改名成功；
+  //    · 大小写不敏感（APFS 默认 / NTFS）：`casea.pdf` 与 `CaseA.pdf` 是同一个文件 → 产物名逐个
+  //      命中「已存在」→ 409 target-exists。上游对同类的原话是「源码返回 409 是对的，补平台分支即可」。
   writeFileSync(join(dir2, 'CaseA.pdf'), 'c')
-  assert.deepEqual(L.renamePaper(w.data, 'T', 'CaseA', 'casea'), ['CaseA.pdf'])
-  assert.ok(existsSync(join(dir2, 'casea.pdf')))
+  if (caseInsensitiveFs) {
+    assert.throws(() => L.renamePaper(w.data, 'T', 'CaseA', 'casea'), (e) => e?.code === 'target-exists',
+      '大小写不敏感 FS 上应 409 target-exists（上游认可的正确行为）')
+    assert.ok(existsSync(join(dir2, 'CaseA.pdf')), '冲突时源文件必须原样')
+  } else {
+    assert.deepEqual(L.renamePaper(w.data, 'T', 'CaseA', 'casea'), ['CaseA.pdf'])
+    assert.ok(existsSync(join(dir2, 'casea.pdf')))
+  }
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

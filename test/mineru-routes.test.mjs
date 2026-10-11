@@ -16,7 +16,7 @@ import { createServer } from 'node:http'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync, rmSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -27,9 +27,9 @@ const dist = (m) => join(ROOT, '..', 'dist', m)
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-routes-home-'))
 process.env.DSH_HOME = HOME
 
-const { registerRoutes } = await import(dist('host.js'))
-const { mineruConfigPath, writeMineruConfig, MINERU_DEFAULTS } = await import(dist('mineru-config.js'))
-const { testMineruLocal } = await import(dist('mineru-config.js'))
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
+const { mineruConfigPath, writeMineruConfig, MINERU_DEFAULTS } = await import(pathToFileURL(dist('mineru-config.js')).href)
+const { testMineruLocal } = await import(pathToFileURL(dist('mineru-config.js')).href)
 
 const DATA = mkdtempSync(join(tmpdir(), 'dpr-routes-data-'))
 
@@ -132,7 +132,9 @@ test('POST /api/mineru/config：mode=off 无需预检即落盘（0600）；GET �
   assert.equal(r.body.ok, true)
   const file = mineruConfigPath(HOME)
   assert.ok(existsSync(file), 'mineru.json 应落盘')
-  assert.equal(statSync(file).mode & 0o777, 0o600, 'mineru.json 必须是 0600')
+  // 0600 只在 POSIX 上有意义（Windows 的 statSync().mode 不承载权限位）→ 分平台断言。
+  if (process.platform !== 'win32') assert.equal(statSync(file).mode & 0o777, 0o600, 'mineru.json 必须是 0600')
+  else assert.ok(existsSync(file), 'mineru.json 必须落盘')
 
   const g = await api('/api/mineru/config')
   assert.equal(g.status, 200)

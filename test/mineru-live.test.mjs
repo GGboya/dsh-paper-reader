@@ -6,17 +6,17 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 
-const mineru = await import(dist('mineru.js'))
-const mcfg = await import(dist('mineru-config.js'))
-const tscribe = await import(dist('transcribe.js'))
-const library = await import(dist('library.js'))
-const search = await import(dist('search.js'))
+const mineru = await import(pathToFileURL(dist('mineru.js')).href)
+const mcfg = await import(pathToFileURL(dist('mineru-config.js')).href)
+const tscribe = await import(pathToFileURL(dist('transcribe.js')).href)
+const library = await import(pathToFileURL(dist('library.js')).href)
+const search = await import(pathToFileURL(dist('search.js')).href)
 
 const { parseLocalMineru, parseLocalMineruSync } = mineru
 const { testMineruLocal, MINERU_DEFAULTS } = mcfg

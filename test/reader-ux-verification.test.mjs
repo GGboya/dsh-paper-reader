@@ -19,8 +19,9 @@ import {
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join, relative, sep } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { caseInsensitiveFs as caseInsensitiveFsOf, isTrashRelPath } from './fs-probe.mjs'
 import vm from 'node:vm'
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 
@@ -56,14 +57,14 @@ const writeProbe = (name, data) => {
   writeFileSync(join(REPO, '.probe', name), data)
 }
 
-const { registerRoutes } = await import(dist('host.js'))
-const { buildFormulaIndex, compactLatex, resetFormulaCache } = await import(dist('formulas.js'))
-const { compressMathSpaces, normalizeMathBraces } = await import(dist('mineru.js'))
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
+const { buildFormulaIndex, compactLatex, resetFormulaCache } = await import(pathToFileURL(dist('formulas.js')).href)
+const { compressMathSpaces, normalizeMathBraces } = await import(pathToFileURL(dist('mineru.js')).href)
 const {
   ManageError, matchArtifactName, validateName, validateNewPaperName, listArtifacts,
   planPaperDelete, deletePaper, deleteTopic, planTopicDelete, renamePaper, renameTopic,
   moveToTrash, assertInside, resolveTopicDir,
-} = await import(dist('library-manage.js'))
+} = await import(pathToFileURL(dist('library-manage.js')).href)
 
 // ── 真实样本（只读；缺失则整组用例 skip）──────────────────────────────────────
 
@@ -328,10 +329,15 @@ test.after(() => {
 })
 
 /** 递归目录快照（文件 + 符号链接目标 + 大小），用于「不该删的一个都没少」。 */
+// 文件系统大小写敏感性：**实测**（APFS 默认不敏感、ext4 敏感、NTFS 一般不敏感但可按目录设置）
+const caseInsensitiveFs = caseInsensitiveFsOf()
+
 function snap(dir, base = dir, out = {}) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name)
-    const rel = relative(base, p)
+    // key 统一归一为 '/'：Windows 的 relative() 产反斜杠，会让下面 startsWith('.trash/') 之类的
+    // 断言全线失效（上游 905dc59 的同款修法）。
+    const rel = relative(base, p).split(sep).join('/')
     if (e.isSymbolicLink()) out[rel] = 'symlink->' + readlinkSync(p)
     else if (e.isDirectory()) { out[rel] = 'dir'; snap(p, base, out) }
     else out[rel] = statSync(p).size
@@ -1171,7 +1177,7 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
       assert.ok(Array.isArray(body.moved) && Array.isArray(body.remaining), '必须回报已移动/未移动清单')
       // R-2（F-G 之后）：错误响应**不带**绝对 trashDir，只给相对 trashRel
       assert.ok(!('trashDir' in body), `错误响应不得带绝对 trashDir（F-G/R-2）：${JSON.stringify(body)}`)
-      assert.ok(String(body.trashRel).startsWith('.trash/'), `必须给相对 trashRel（R-2）：${JSON.stringify(body)}`)
+      assert.ok(isTrashRelPath(body.trashRel), `必须给相对 trashRel（R-2，跨平台判定）：${JSON.stringify(body)}`)
       assert.ok(!JSON.stringify(body).includes(dataRO), '错误响应不得回显服务端绝对路径（S15）')
       assert.deepEqual(readdirSync(join(dataRO, 't')).sort(), ['p-zh.pdf', 'p.pdf', 'p.txt'], '失败后三个文件必须都还在（没有任何 unlink）')
       assert.ok(existsSync(join(dataRO, 't', 'p.pdf')), '`.pdf` 必须仍在（文献仍在库）')
@@ -1206,7 +1212,7 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     assert.equal(r.status, 500, `回收站不可建应 500，实际 ${r.status} ${text}`)
     assert.equal(body.code, 'trash-move-failed', `必须带机器可读 code（S15）：${text}`)
     assert.ok(!('trashDir' in body), `错误响应不得带绝对 trashDir（F-G/R-2）：${text}`)
-    assert.ok(String(body.trashRel).startsWith('.trash/'), `必须给相对 trashRel（R-2）：${text}`)
+    assert.ok(isTrashRelPath(body.trashRel), `必须给相对 trashRel（R-2，跨平台判定）：${text}`)
     assert.ok(!text.includes(dataDir), `错误响应不得回显服务端绝对路径（S15）：${text}`)
     t.diagnostic(`F1 现状：status=${r.status} code=${body.code} 响应含 dataDir = ${text.includes(dataDir)}`)
   } finally { rmSync(dataDir, { recursive: true, force: true }) }
@@ -1288,13 +1294,13 @@ test('VB5[B7] 符号链接逃逸：只动链接本身，库外内容不变；符
     const topic = 'sym'
     scaffoldPaper(topic, 'Real', { variants: false, tmp: false })
     // ① 指向库外文件的符号链接，名字与文献产物同名
-    symlinkSync(join(outside, 'precious.txt'), join(DATA, topic, 'Link.txt'))
+    symlinkSync(join(outside, 'precious.txt'), join(DATA, topic, 'Link.txt'), 'file')
     writeFileSync(join(DATA, topic, 'Link.pdf'), PDF())
     // ② 指向库外目录的符号链接，伪装成 .mineru.md
-    symlinkSync(join(outside, 'dir'), join(DATA, topic, 'LinkDir.mineru.md'))
+    symlinkSync(join(outside, 'dir'), join(DATA, topic, 'LinkDir.mineru.md'), 'dir')
     writeFileSync(join(DATA, topic, 'LinkDir.pdf'), PDF())
     // ③ 整篇文献的 .pdf 本身是指向库外 PDF 的符号链接
-    symlinkSync(join(outside, 'precious.txt'), join(DATA, topic, 'LinkedPaper.pdf'))
+    symlinkSync(join(outside, 'precious.txt'), join(DATA, topic, 'LinkedPaper.pdf'), 'file')
 
     const del = await postJson('/api/library/paper/delete', { topic, name: 'Link' })
     assert.equal(del.status, 200, del.text)
@@ -1322,7 +1328,7 @@ test('VB5[B7] 符号链接逃逸：只动链接本身，库外内容不变；符
     t.diagnostic(`F3 附带：delete-plan 同样返回 ${plan3.status}`)
 
     // ④ 专题目录本身是符号链接 → 一律 400 escape-rejected（不跟随）
-    symlinkSync(outside, join(DATA, 'evil-topic'))
+    symlinkSync(outside, join(DATA, 'evil-topic'), 'dir')
     for (const [p, b] of [
       ['/api/library/paper/delete', { topic: 'evil-topic', name: 'precious' }],
       ['/api/library/paper/rename', { topic: 'evil-topic', name: 'precious', newName: 'x' }],
@@ -1461,8 +1467,8 @@ test('VB8[B10] 翻译进行中 → 409 translation-busy（用假 babeldoc 造真
     registerRoutes(makeCtx(), { dataDir })
     const srv = createServer((req, res) => spec.handler(req, res))
     const base = (await listen(srv)) + '/paper-reader'
-    const { startTranslation, zhStatus } = await import(dist('translate.js'))
-    const { resolvePaper } = await import(dist('library.js'))
+    const { startTranslation, zhStatus } = await import(pathToFileURL(dist('translate.js')).href)
+    const { resolvePaper } = await import(pathToFileURL(dist('library.js')).href)
     const ref = resolvePaper(dataDir, { topic: 'tx', name: 'paper' })
     const started = await startTranslation(ref, dataDir, { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'k', model: 'm' })
     assert.equal(started.started, true, JSON.stringify(started))
@@ -1541,11 +1547,20 @@ test('VB9[B11/B12/B13/S12] 重命名：产物整体改名 + detachedSessions + `
   assert.equal(clash.body.code, 'target-exists')
   assert.ok(existsSync(join(DATA, 'del2', 'Kept.pdf')), '冲突时源文件必须原样')
 
-  // 纯大小写改名放行（源与目标 realpath 相同）
+  // 纯大小写改名：按**实测**的文件系统大小写敏感性分支（不硬编码 darwin）
+  //  · 敏感（ext4）：目标不存在 → 200 放行；
+  //  · 不敏感（APFS 默认 / NTFS）：`kept.*` 与 `Kept.*` 是同一批文件 → 冲突预检逐个命中 → 409
+  //    target-exists（上游认可的正确行为：「源码返回 409 是对的，补平台分支即可」）。
   const ci = await postJson('/api/library/paper/rename', { topic: 'del2', name: 'Kept', newName: 'kept' })
-  assert.equal(ci.status, 200, `大小写-only 改名应放行：${ci.text}`)
-  assert.ok(existsSync(join(DATA, 'del2', 'kept.pdf')))
-  await postJson('/api/library/paper/rename', { topic: 'del2', name: 'kept', newName: 'Kept' })
+  if (caseInsensitiveFs) {
+    assert.equal(ci.status, 409, `大小写不敏感 FS 上应 409 target-exists：${ci.text}`)
+    assert.equal(ci.body.code, 'target-exists')
+    assert.ok(existsSync(join(DATA, 'del2', 'Kept.pdf')), '冲突时源文件必须原样')
+  } else {
+    assert.equal(ci.status, 200, `大小写-only 改名应放行：${ci.text}`)
+    assert.ok(existsSync(join(DATA, 'del2', 'kept.pdf')))
+    await postJson('/api/library/paper/rename', { topic: 'del2', name: 'kept', newName: 'Kept' })
+  }
   sessionItems = () => []
 })
 
@@ -1663,9 +1678,9 @@ test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作
     { file: 'test/library-traversal-verification.test.mjs', case: 'V7④ 指向库内的符号链接专题', why: '上游 realpath 层放行「real 落在库内」的链接；我们**一律拒**（评审 §B 点名称赞的加严）→ 断言 400 escape-rejected，且链接与目标都完好' },
     { file: 'test/library-traversal-verification.test.mjs', case: 'V8① 符号链接 .pdf', why: '我们不把符号链接当文献（listPapers 用 isFile 过滤）→ 删除 404 not-found，而不是删链接本身；安全不变量（库外目标逐字节不变）不变' },
     { file: 'test/library-traversal-verification.test.mjs', case: 'V10 路由层成功路径', why: '非空专题不递归删：先断言 409（payload 带 clearEndpoint），逐篇删除后再断言 200' },
-    { file: 'test/library-traversal-verification.test.mjs', case: 'V11① -en 变体 / V11⑤ 大小写改名', why: '① 我们的产物清单把 -en/-zh/-dual 都算作该文献的产物（不留删不掉的孤儿，上游报告 F3「已修复」）；⑤ 目标与源是同一文件时不误报「已存在同名」（评审 §B 认可的 macOS 修复）' },
+    { file: 'test/library-traversal-verification.test.mjs', case: 'V11① -en 变体 / V11⑤ 大小写改名', why: '① 我们的产物清单把 -en/-zh/-dual 都算作该文献的产物（不留删不掉的孤儿，上游报告 F3「已修复」）；⑤ 大小写-only 改名按**实测**的文件系统大小写敏感性分支：敏感 FS 成功、不敏感 FS（APFS/NTFS）→ 409 target-exists（上游口径「源码返回 409 是对的，补平台分支即可」）' },
     { file: 'test/library-traversal-verification.test.mjs', case: 'V14 F3 -en 残留', why: '同 V11①：-en.pdf 一并进回收站，断言反转为「不得残留」' },
-    { file: 'test/library-traversal.test.mjs', case: '大小写改名平台分支', why: '同 V11⑤：不敏感 FS 上不误报，三平台行为一致（成功）' },
+    { file: 'test/library-traversal.test.mjs', case: '大小写改名平台分支', why: '同 V11⑤：按实测的大小写敏感性分支（敏感 FS → 成功；不敏感 FS → 409 target-exists）' },
   ]
   // 登记表完整性：评审点名的 7 例一个都不能少（V11①⑤ 记为一条，含两个子例）
   const registered = documentedTestEdits.map((d) => d.case).join(' | ')

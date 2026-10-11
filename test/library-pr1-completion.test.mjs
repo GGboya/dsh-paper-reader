@@ -13,7 +13,7 @@ import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:http'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { pathToFileURL } from 'node:url'
@@ -44,7 +44,7 @@ function workspace() {
 function snap(dir, base = dir, out = {}) {
   for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const p = join(dir, e.name)
-    const rel = relative(base, p)
+    const rel = relative(base, p).split(sep).join('/') // Windows 的 relative() 产反斜杠 → 归一为 '/'
     if (e.isSymbolicLink()) out[rel] = 'symlink->' + readlinkSync(p)
     else if (e.isDirectory()) { out[rel] = '[dir]'; snap(p, base, out) }
     else out[rel] = readFileSync(p, 'utf8')

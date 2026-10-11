@@ -16,7 +16,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 
@@ -26,11 +26,11 @@ const dist = (m) => join(ROOT, 'dist', m)
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-verify-home-'))
 process.env.DSH_HOME = HOME
 
-const mineru = await import(dist('mineru.js'))
-const mcfg = await import(dist('mineru-config.js'))
-const tscribe = await import(dist('transcribe.js'))
-const library = await import(dist('library.js'))
-const search = await import(dist('search.js'))
+const mineru = await import(pathToFileURL(dist('mineru.js')).href)
+const mcfg = await import(pathToFileURL(dist('mineru-config.js')).href)
+const tscribe = await import(pathToFileURL(dist('transcribe.js')).href)
+const library = await import(pathToFileURL(dist('library.js')).href)
+const search = await import(pathToFileURL(dist('search.js')).href)
 
 // ── 零依赖 2 页 PDF（每页 >1000 字符；每页唯一关键词）────────────────────
 function buildPdf(pages) {
@@ -248,7 +248,7 @@ test('verify: 投影规则 —— 表格剥标签保 caption/footnote、公式�
 
 // ── 4. 路由鉴权（t2 未覆盖的分支）──────────────────────────────────────
 test('verify: /api/mineru/* 与 /api/transcribe 经过 connection.requestRejection（401/403 被拦）', async () => {
-  const { registerRoutes } = await import(dist('host.js'))
+  const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
   const DATA = mkdtempSync(join(tmpdir(), 'dpr-verify-data-'))
   mkdirSync(join(DATA, 'demo'), { recursive: true })
   writeFileSync(join(DATA, 'demo', 'paper.pdf'), PDF)

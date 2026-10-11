@@ -18,7 +18,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -29,12 +29,12 @@ const HOME = mkdtempSync(join(tmpdir(), 'dpr-embed-home-'))
 process.env.DSH_HOME = HOME
 delete process.env.DSH_EMBED_API_KEY
 
-const embed = await import(dist('embed.js'))
-const econf = await import(dist('embed-config.js'))
-const search = await import(dist('search.js'))
-const mineru = await import(dist('mineru.js'))
-const { registerRoutes } = await import(dist('host.js'))
-const { registerTools } = await import(dist('tools.js'))
+const embed = await import(pathToFileURL(dist('embed.js')).href)
+const econf = await import(pathToFileURL(dist('embed-config.js')).href)
+const search = await import(pathToFileURL(dist('search.js')).href)
+const mineru = await import(pathToFileURL(dist('mineru.js')).href)
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
+const { registerTools } = await import(pathToFileURL(dist('tools.js')).href)
 
 const {
   EmbedError, EMBED_DEFAULTS, chunkSetHash, cosineSimilarity, embeddingsPathFor, embeddingsUrl,
@@ -128,7 +128,10 @@ test('A1 配置：write→read→clear，0600；enabled 需要 baseUrl+model+api
   const path = embedConfigPath(dir)
   assert.equal(path, join(dir, '.dsh-paper-reader', 'embed.json'))
   await writeEmbedConfig({ baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-abc', model: 'm' }, dir)
-  assert.equal(statSync(path).mode & 0o777, 0o600, '必须 0600')
+  // POSIX 权限位在 Windows 上没有意义（statSync().mode 只反映只读属性，恒为 0o666/0o444 之类）→
+  // 只在 POSIX 上断言 0600；Windows 的等价保护是用户 profile 目录的默认 ACL。
+  if (process.platform !== 'win32') assert.equal(statSync(path).mode & 0o777, 0o600, '必须 0600（POSIX）')
+  assert.ok(existsSync(path), '配置必须落盘')
   const back = await readEmbedConfig(dir)
   assert.equal(back.baseUrl, 'http://127.0.0.1:9/v1')
   assert.equal(back.apiKey, 'sk-abc')
@@ -200,7 +203,7 @@ test('A4 路由：GET 只回掩码、POST 预检失败不落盘成功才落盘�
   try {
     // 用临时 HOME 重建一次路由（config 的 embed 走 profile 通道）
     process.env.DSH_HOME = home
-    const { registerRoutes: register } = await import(dist('host.js'))
+    const { registerRoutes: register } = await import(pathToFileURL(dist('host.js')).href)
     register(ctx, { dataDir: data })
     const server = createServer((req, res) => spec.handler(req, res))
     await new Promise((r) => server.listen(0, '127.0.0.1', r))

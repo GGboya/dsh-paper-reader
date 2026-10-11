@@ -14,14 +14,14 @@ import { createServer } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-t8-home-'))
 process.env.DSH_HOME = HOME
 
-const { registerRoutes } = await import(dist('host.js'))
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
 /* ── host 路由挂到真实 http server ───────────────────────────────────────── */
 let spec = null

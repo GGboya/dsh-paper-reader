@@ -17,12 +17,14 @@ import { tmpdir } from 'node:os'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pathToFileURL } from 'node:url'
+import { caseInsensitiveFs as caseInsensitiveFsOf } from './fs-probe.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-t10-home-')) // 隔离 agent preset 安装，不碰真实 home
 const L = await import(pathToFileURL(dist('library.js')).href)
 const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
+const caseInsensitiveFs = caseInsensitiveFsOf()
 
 /** 递归快照：相对路径 → 内容/类型。用于证明「盘上零变化」。 */
 function snap(dir) {
@@ -124,12 +126,19 @@ test('正常功能零回归：中文专题、空格与 .-_ 名、大小写改名
   assert.ok(r1.length >= 1)
   assert.ok(existsSync(join(data, '默认专题 2', 'Renamed-2.0_new.pdf')))
 
-  // 大小写改名：目标与源是「同一个文件」（大小写不敏感 FS）时放行 —— 评审 §B 认可本次顺带修好
-  // 上游在 macOS 上会误报「已存在同名」的问题；三平台行为一致（成功）。
+  // 大小写改名：按**实测**的文件系统大小写敏感性分支（不硬编码 darwin）
+  //  · 敏感（ext4）：改名成功；
+  //  · 不敏感（APFS/NTFS）：`casea.pdf` 与 `CaseA.pdf` 同一文件 → 409 target-exists（上游认可的正确行为）。
   writeFileSync(join(data, '默认专题 2', 'CaseA.pdf'), 'case')
-  const r2 = L.renamePaper(data, '默认专题 2', 'CaseA', 'casea')
-  assert.ok(r2.includes('CaseA.pdf'))
-  assert.ok(existsSync(join(data, '默认专题 2', 'casea.pdf')))
+  if (caseInsensitiveFs) {
+    assert.throws(() => L.renamePaper(data, '默认专题 2', 'CaseA', 'casea'), (e) => e?.code === 'target-exists',
+      '大小写不敏感 FS 上应 409 target-exists')
+    assert.ok(existsSync(join(data, '默认专题 2', 'CaseA.pdf')), '冲突时源文件必须原样')
+  } else {
+    const r2 = L.renamePaper(data, '默认专题 2', 'CaseA', 'casea')
+    assert.ok(r2.includes('CaseA.pdf'))
+    assert.ok(existsSync(join(data, '默认专题 2', 'casea.pdf')))
+  }
 })
 
 test('路由层：越界 topic 返回 400 可读文案，且不泄露 dataDir 绝对路径', async () => {

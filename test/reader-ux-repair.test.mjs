@@ -22,7 +22,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 
@@ -38,8 +38,8 @@ const dist = (m) => join(ROOT, '..', 'dist', m)
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-repair-home-'))
 process.env.DSH_HOME = HOME
 
-const { registerRoutes } = await import(dist('host.js'))
-const { renamedName, newTrashBundle, ManageError } = await import(dist('library-manage.js'))
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
+const { renamedName, newTrashBundle, ManageError } = await import(pathToFileURL(dist('library-manage.js')).href)
 
 /** 零依赖 PDF；行数够多时 pdfjs 转录能过 1000 字符门槛。 */
 function buildPdf(pages) {
@@ -230,7 +230,7 @@ test('T3 文献 .pdf 本身是符号链接：delete / delete-plan 都 404（不�
   mkdirSync(dir, { recursive: true })
   const secret = join(OUTSIDE, 'secret-repair.txt')
   writeFileSync(secret, 'precious-repair')
-  symlinkSync(secret, join(dir, 'Linked.pdf'))
+  symlinkSync(secret, join(dir, 'Linked.pdf'), 'file')
   writeFileSync(join(dir, 'Linked.txt'), 'cache')
   const plan = await api('/api/library/paper/delete-plan?topic=t3&name=Linked')
   assert.equal(plan.status, 404, `符号链接 .pdf 应判 404：${plan.status} ${plan.text}`)
@@ -251,7 +251,7 @@ test('T4 transcribe：≥6 种恶意 path 全 4xx 带 code、库内外快照零�
   writeFileSync(join(dir, 'Good.pdf'), PDF_TEXT())
   const evilTarget = join(OUTSIDE, 'evil.pdf')
   writeFileSync(evilTarget, PDF_TEXT())
-  symlinkSync(evilTarget, join(dir, 'LinkOut.pdf')) // 库内符号链接 → 库外
+  symlinkSync(evilTarget, join(dir, 'LinkOut.pdf'), 'file') // 库内符号链接 → 库外
   const b4 = { data: snap(DATA), out: snap(OUTSIDE) }
   const bad = [
     join(OUTSIDE, 'evil.pdf'),            // 库外绝对路径
@@ -280,7 +280,7 @@ test('T4 transcribe：≥6 种恶意 path 全 4xx 带 code、库内外快照零�
 /* ── T5 upload 的 topic 边界 ────────────────────────────────────────────── */
 test('T5 upload：≥6 种恶意 topic 全 4xx 带 code、快照零变化；符号链接专题被拒；合法上传仍可用', async () => {
   // 符号链接专题：指向库外
-  try { symlinkSync(OUTSIDE, join(DATA, 'link-topic')) } catch { /* 已存在 */ }
+  try { symlinkSync(OUTSIDE, join(DATA, 'link-topic'), 'dir') } catch { /* 已存在 */ }
   const before = snap(DATA)
   const beforeOut = snap(OUTSIDE)
   const evil = ['..', '../x', '/abs-topic', 'a/b', 'a\\b', '.hidden-topic', 'x\u0000topic', 'a..b']
@@ -390,7 +390,7 @@ test('T9 不变式未回退：穿越输入全 4xx、`.pdf` 最后移、回收站
     assert.ok(['bad-name', 'escape-rejected'].includes(r.body.code))
   }
   const symTopic = join(DATA, 't9-link')
-  symlinkSync(OUTSIDE, symTopic)
+  symlinkSync(OUTSIDE, symTopic, 'dir')
   const symRes = await postJson('/api/library/paper/delete', { topic: 't9-link', name: 'x' })
   assert.equal(symRes.status, 400)
   assert.equal(symRes.body.code, 'escape-rejected')
