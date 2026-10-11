@@ -137,14 +137,20 @@ export function transcriptCached(ref: PaperRef): boolean {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 边界校验层（词法 + realpath 子路径双层）—— **逐字复用上游 #4**
-// （d8f24ec《fix(security)：路径穿越修复》）的实现，作为唯一实现：
-//   · library-manage.ts 的破坏性原语消费它（命名规范 / 边界规范 / realpath 断言）；
-//   · host.ts 的路由层消费它（badEntry 词法门 + upload 的 resolveUploadTopic）。
+// （d8f24ec《fix(security)：路径穿越修复》）的实现。
+//
+// 准确口径（评审 F-F，回复上游时按这个说，别写成「唯一实现」）：
+//   · **共享的是 4 个原语**：`validateEntryName` / `validateEntryBoundary` /
+//     `realDataDir` / `assertInside`（其中后两个只多了 `export`，供 library-manage 消费）；
+//   · host.ts 的路由层消费 `validateEntryName` / `validateEntryBoundary`（badEntry 词法门）
+//     与 `resolveUploadTopic`（upload 的 realpath 层）；
+//   · **组合层两套并存**：生产写路径走 library-manage 的 `resolveTopicDirChecked`
+//     （在其上更严：符号链接专题一律拒、`real === join(root, topic)`、`target === root` 拒），
+//     #4 的 `resolveSafeTopic` 组合层只被本文件下方的**适配器**调用，而那些适配器只服务
+//     上游那 6 个 `library-*.test.mjs` 与老调用方。
 // PR #5 整合时我们曾用自己那套「整段替换」掉这一层，代价是丢掉 #4 的两处覆盖
-// （悬空符号链接的写路径、trim 语义）与上游 35 个用例中的 29 个。按上游评审 A.1 的
-// 要求「复用 #4 的边界校验层，在其上加回收站与交互层」，此处恢复为单一实现；
-// 我们的加严（符号链接专题一律拒、`target === root` 拒绝、产物逐个 realpath 二次包含）
-// 全部加在这一层**之上**（见 library-manage.ts），不替换、不旁路。
+// （悬空符号链接的写路径、trim 语义）与上游 35 个用例中的 29 个；按上游评审 A.1
+// 「复用 #4 的边界校验层，在其上加回收站与交互层」的要求，原语层照抄、加严叠在其上。
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** 名字校验（专题/文献共用）。合法返回 null，否则返回中文错误文案。 */
