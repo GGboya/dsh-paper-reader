@@ -188,7 +188,10 @@ test('R1：errno 错误（ENAMETOOLONG/EACCES）不回显绝对路径，业务�
       assert.match(r.body.error, re, `${p} 业务文案应可读：${r.body.error}`)
     }
   } finally {
-    if (lockedDir) chmodSync(lockedDir, 0o700) // 恢复权限，便于清理
+    // 恢复权限必须容错：win32 上 chmod 不阻止删除 → T2 可能已被整个删掉（目录不存在）。
+    // 这里一旦抛出，下面的 srv.close() 永远执行不到 → server 挂着 → 文件进程不退出
+    // （Windows 首轮 CI「14 分钟挂死」的根因就是这条链）。
+    if (lockedDir) { try { chmodSync(lockedDir, 0o700) } catch { /* 目录已不存在即无需恢复 */ } }
     console.error = orig.error; console.warn = orig.warn; console.log = orig.log
     srv.close()
   }
