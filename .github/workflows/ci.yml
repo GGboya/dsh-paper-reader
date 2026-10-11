@@ -3,6 +3,7 @@
 # .probe/ 缺目录这类「干净克隆必崩」的问题就是这么漏网的。
 # 触发：push 到 main + 所有 PR（pull_request 用 merge ref，本文件随 base 生效，
 # 外部贡献者 rebase/push 后自动跑，无需授权）。
+# 三平台阻断（PR #6 清完 Windows 测试债：pathToFileURL / symlink 类型 / 平台差异分支）。
 name: ci
 
 on:
@@ -13,12 +14,11 @@ on:
 permissions: {}
 
 jobs:
-  # 阻断位：unix 双平台
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -26,29 +26,6 @@ jobs:
         with:
           # traversal-verification 的 V1/V2 用例 pin 基线 commit（a574288）构建
           # 「修复前」对照产物；浅克隆取不到时自动 skip，拉全历史让它们真正跑起来。
-          fetch-depth: 0
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run typecheck
-      - run: npm test
-
-  # 观察位：只在 PR 上跑（Windows 用户是大头，但套件还有 / 分隔符硬编码、import 反斜杠
-  # 路径等 Windows 债）。main 的 push 不跑——非阻断的红叉对维护者只是通知噪音；
-  # PR 上保留信号，债清后与本 job 合并进上面的阻断位。
-  test-windows:
-    if: github.event_name == 'pull_request'
-    runs-on: windows-latest
-    timeout-minutes: 30
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
           fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
