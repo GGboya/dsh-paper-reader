@@ -15,14 +15,14 @@ import { createServer } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import {
   chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  readlinkSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
+  readlinkSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { normalizeEol, extractModuleScript } from './reader-script.mjs' // 行尾无关的 <script> 提取（Windows CRLF 检出）
-import { caseInsensitiveFs as caseInsensitiveFsOf, isTrashRelPath } from './fs-probe.mjs'
+import { caseInsensitiveFs as caseInsensitiveFsOf, isBusyErrno, isTrashRelPath, renameOntoNonEmptyDirErrno } from './fs-probe.mjs'
 import vm from 'node:vm'
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 
@@ -1119,12 +1119,24 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     const files = listArtifacts(topicDir, 'p')
     const bundle = { abs: join(root, '.trash', 'bundle'), rel: join('.trash', 'bundle') }
     mkdirSync(bundle.abs, { recursive: true })
-    mkdirSync(join(bundle.abs, 'p.mineru.json')) // rename 到已存在目录 → EISDIR
+    // rename 到「已存在的**非空**目录」→ unix EISDIR/ENOTEMPTY；Windows EPERM（与 test/fs-probe.mjs 的
+    // 探针、A4 的注入同形：非空目录才与探针实测的操作完全一致）。
+    mkdirSync(join(bundle.abs, 'p.mineru.json'))
+    writeFileSync(join(bundle.abs, 'p.mineru.json', 'blocker'), 'x')
     let err = null
     try { moveToTrash(bundle, topicDir, files) } catch (e) { err = e }
     assert.ok(err instanceof ManageError, '必须是可识别的 ManageError')
-    assert.equal(err.code, 'trash-move-failed')
-    assert.equal(err.status, 500)
+    // 期望值按**本机实测**的 errno 分支（照 A4 口径，不猜平台）：同一注入在 unix 上是 EISDIR/ENOTEMPTY
+    // → 500 trash-move-failed（既有断言原样保留）；Windows 上是 EPERM → 契约的占用语义 409 file-busy
+    // （CI run 38140622772 实测就是 file-busy；行为正确，是本用例期望值没跟上）。
+    const injErrno = renameOntoNonEmptyDirErrno()
+    if (isBusyErrno(injErrno)) {
+      assert.equal(err.status, 409, `本机注入 errno=${injErrno} 属占用语义 → 409`)
+      assert.equal(err.code, 'file-busy')
+    } else {
+      assert.equal(err.status, 500, `本机注入 errno=${injErrno} → 500 trash-move-failed`)
+      assert.equal(err.code, 'trash-move-failed')
+    }
     assert.ok(Array.isArray(err.extra.moved) && Array.isArray(err.extra.remaining))
     // R-2′：原断言 `String(err.extra.trashDir).length > 0` 在 MoveFailure 移除 trashDir 之后**恒真**
     // （`String(undefined)` 长 9）→ 属失效断言。改为按现行契约真判：错误响应**只回相对 `trashRel`**，
@@ -1144,6 +1156,26 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     assert.ok(!err.extra.moved.includes('p.pdf'), '`.pdf` 必须最后移：失败时不得已被移走')
     const union = [...new Set([...stillThere, ...inTrash])].sort()
     assert.deepEqual(union, ['p-zh.pdf', 'p.mineru.json', 'p.pdf', 'p.txt'].sort(), '四个文件一个都不能少')
+
+    // ①b **平台中立补钉**：① 的真实注入在 Windows 上走的是 409 分支 ⇒ 「非占用 errno → 500」这条映射
+    // 在 Windows 上就没被验到。这里用可注入的 renameImpl 显式造一个非占用 errno（EISDIR），
+    // 让 500 分支在三平台都被真实执行（注入式 renameImpl 正是为此存在的，见 src 的 RenameImpl 注释）。
+    const root2 = mkdtempSync(join(tmpdir(), 'dpr-ver-trash-eisdir-'))
+    try {
+      const topicDir2 = join(root2, 't')
+      mkdirSync(topicDir2)
+      for (const f of ['q.pdf', 'q.txt', 'q.mineru.json', 'q-zh.pdf']) writeFileSync(join(topicDir2, f), 'x' + f)
+      const bundle2 = { abs: join(root2, '.trash', 'bundle'), rel: join('.trash', 'bundle') }
+      mkdirSync(bundle2.abs, { recursive: true })
+      let calls = 0
+      const eisdir = (from, to) => { if (++calls === 2) { const e = new Error('EISDIR: injected'); e.code = 'EISDIR'; throw e } renameSync(from, to) }
+      let err2 = null
+      try { moveToTrash(bundle2, topicDir2, listArtifacts(topicDir2, 'q'), eisdir) } catch (e) { err2 = e }
+      assert.ok(err2 instanceof ManageError, '①b：必须抛 ManageError')
+      assert.equal(err2.status, 500, '①b：非占用 errno（EISDIR）→ 必须 500（三平台一致）')
+      assert.equal(err2.code, 'trash-move-failed', '①b：非占用 errno → 必须 trash-move-failed')
+      assert.deepEqual(err2.extra.moved, [], '①b：回滚后回收站里不得残留本次移动的文件')
+    } finally { rmSync(root2, { recursive: true, force: true }) }
   } finally { rmSync(root, { recursive: true, force: true }) }
 
   // ② 路由级（真正的「移动失败」）：专题目录只读 → rename 失败，但回收站目录能正常创建
