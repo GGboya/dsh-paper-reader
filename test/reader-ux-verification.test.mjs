@@ -1118,7 +1118,14 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     assert.equal(err.code, 'trash-move-failed')
     assert.equal(err.status, 500)
     assert.ok(Array.isArray(err.extra.moved) && Array.isArray(err.extra.remaining))
-    assert.ok(String(err.extra.trashDir).length > 0)
+    // R-2′：原断言 `String(err.extra.trashDir).length > 0` 在 MoveFailure 移除 trashDir 之后**恒真**
+    // （`String(undefined)` 长 9）→ 属失效断言。改为按现行契约真判：错误响应**只回相对 `trashRel`**，
+    // 绝不带绝对路径（绝对 `trashDir` 只出现在 200 成功响应里）；同一契约另由 A5/B12 两处真实钉住。
+    assert.ok(!('trashDir' in err.extra), '错误响应不得回传绝对 trashDir（契约：错误只回相对 trashRel）')
+    assert.ok(
+      typeof err.extra.trashRel === 'string' && err.extra.trashRel.replaceAll('\\', '/').startsWith('.trash/'),
+      `必须回相对 trashRel 作为恢复线索，实际：${JSON.stringify(err.extra.trashRel)}`,
+    )
     // 没有任何文件被 unlink：原件仍在专题目录，或已在回收站里（可恢复）
     const stillThere = readdirSync(topicDir).sort()
     const inTrash = readdirSync(bundle.abs).filter((n) => n !== 'p.mineru.json').sort()

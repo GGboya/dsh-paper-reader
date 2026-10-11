@@ -1,7 +1,7 @@
 # 阅读器可用性与文献管理 — 需求冻结（v1）
 
-> 任务：`t1`（requirements round 1）· 团队 `dpr-reader-ux`
-> 状态：**冻结**，下游实现与验证逐条照做；本文档只写结论与契约，不含实现代码。
+> 文档类型：需求冻结（设计/契约文档）· 版本 v1
+> 状态：**冻结**，实现与验证逐条照做；本文档只写结论与契约，不含实现代码。
 > 改动范围：仅 `docs/`。本文档不修改 `src/`、`lib/`、`reader/`、`package.json`。
 >
 > 证据强度标记（每条结论都带）：
@@ -12,7 +12,7 @@
 > **PR #5 整改（t7 之后）口径更新**：删除/重命名/批量清空相关的**错误语义**以本文 §2 的现行描述为准
 > ——`EBUSY`/`EPERM` → **409 `file-busy`**；其余 errno → **500 `trash-move-failed`**；**失败即回滚**（`rollbackFailed` 如实上报）；
 > **错误响应只回相对 `trashRel`**（绝对 `trashDir` 只出现在 200 成功响应）。本文件已随该轮**纳入仓库**，
-> 使 `src/`、`lib/` 里以「冻结契约（`docs/reader-ux-requirements.md`）」为名的引用可解析（评审 R-5）。
+> 使 `src/`、`lib/` 里以「冻结契约（`docs/reader-ux-requirements.md`）」为名的引用可解析。
 >
 > 需求来源（用户原话）：「该插件不是很好用鼠标引用公式，能做一些前端优化吗？」/「能加强文献管理功能吗？目前好像不能删除添加的文件」
 
@@ -41,7 +41,7 @@
 
 # 第 1 部分：公式鼠标引用
 
-## 1.1 可行性实测（本任务核心问题）
+## 1.1 可行性实测（核心问题）
 
 ### 问题
 
@@ -59,11 +59,11 @@ MinerU `content_list` 里 `equation` 块的 `bbox:[x0,y0,x1,y1]` 是什么坐标
 | 样本 | 来源 | 页 | equation 块数 |
 |---|---|---|---|
 | A | 用户**真实文献库**：`<dataDir>/默认专题/Hansen et al. - 2024 - TD-MPC2 ….pdf` + 其 `.mineru.json` | page_idx 2/3/27/29（= PDF 第 3/4/28/30 页） | 12 |
-| B | `/home/vr/zotero-pdf2zh/server/translated/Gu et al. - 2022 - Vector Quantized Diffusion Model ….pdf`（单页解析） | PDF 第 5 页 | 5 |
+| B | 本机 zotero-pdf2zh 导出目录下的另一篇论文：`Gu et al. - 2022 - Vector Quantized Diffusion Model ….pdf`（单页解析） | PDF 第 5 页 | 5 |
 
 ### 结论：bbox 是「页面归一化坐标 ×1000」
 
-【源码证据】MinerU 3.4.5 本机实现（`/home/vr/.venvs/paper-share/lib/python3.12/site-packages/mineru/`）：
+【源码证据】MinerU 3.4.5 本机实现（本机 venv 的 `site-packages/mineru/`）：
 
 ```python
 # backend/pipeline/pipeline_middle_json_mkcontent.py:478-490
@@ -293,7 +293,7 @@ REJECT otherwise
      "sessions":2, "note":"…" }
    ```
 3. **顺序：`<name>.pdf` 最后移**。不变量：中途失败 ⇒ 文献仍在文献库里可见可用（只是缓存可能已进回收站，重问会自动重转录），错误响应必须说清「已移动哪些、还剩哪些、回收站在哪」。
-4. **移动失败绝不回退 `unlink`**，且**errno 分流**（PR #5 上游必修 3 + 评审 F-G 之后的现行语义）：
+4. **移动失败绝不回退 `unlink`**，且**errno 分流**（现行语义：占用类错误单独分流）：
    - `EBUSY` / `EPERM`（Windows 文件被阅读器/杀软/索引/同步盘占用）→ **`409 {code:'file-busy', busy, moved, remaining, rolledBack, rollbackFailed, trashRel, cause}`**，
      文案「文件被占用（可能正在阅读器或其他程序中打开），关闭后重试」；
    - 其余 errno → **`500 {code:'trash-move-failed', moved, remaining, rolledBack, rollbackFailed, trashRel, cause}`**；
@@ -309,7 +309,7 @@ REJECT otherwise
 
 理由与代价（会话脱钩是硬约束，必须如实告知用户）：
 
-- 伴读会话 id = `dpr-` + `base64url(topic + '/' + name)` + `-n`（`src/host.ts:151-152`）；会话存储又按**专题目录路径**分组（实测：`~/.dsh/sessions/--home-vr-.dsh-paper-reader-data-<专题>--/dpr-<b64>-1/`）。
+- 伴读会话 id = `dpr-` + `base64url(topic + '/' + name)` + `-n`（`src/host.ts:151-152`）；会话存储又按**专题目录路径**分组（实测：`~/.dsh/sessions/--<home>-.dsh-paper-reader-data-<专题>--/dpr-<b64>-1/`）。
 - ⇒ **重命名文献**：新名下 `scanPaperSessions` 找不到旧会话（`src/host.ts:157-175` 前缀匹配）→ 历史会话**不删除但脱钩、树上看不到**。
 - ⇒ **重命名专题**：会话分组目录名（按路径编码）随之失效 → 整个专题的历史会话同样脱钩。
 - 插件没有「重命名会话」的 API（`sessionController` 只有 list/create/follow/prompt；`workspaceRegistry` 只有 archive）。所以本轮的诚实语义是：**重命名 = 文件改名 + 历史会话脱钩**，UI 确认框必须逐字写明，并把脱钩会话数（`detachedSessions`）回显给用户。
@@ -350,7 +350,7 @@ REJECT otherwise
 
 > ### 📌 修订说明（rebase 整合轮追加，2026-10）：**路径名口径有变，语义不变**
 >
-> 本节（v1.5.0 功能轮冻结）把 5 条路径写成了「我们实现的路径名」。整合到上游 `a574288` 时按队长已定方向
+> 本节（v1.5.0 功能轮冻结）把 5 条路径写成了「我们实现的路径名」。整合到上游 `a574288` 时按既定方向
 > **「保留上游的路由名与 UI，把我们的加固整合进去」**做了两处口径调整。**下面各条的状态码、错误码、请求体字段名、
 > 前置校验与落盘语义全部不变**——变的只是「哪条路径是规范名」，以及把两条路径折叠到同一段 handler：
 >
@@ -442,10 +442,10 @@ dry-run，给确认弹窗用。
 
 > ### 📌 修订说明（rebase 整合轮追加，2026-10）：**入口从 `⋯` 菜单改为行内 `✎`/`🗑`**
 >
-> 整合时按队长已定方向保留**上游 v1.3.0 的 UI 入口**：专题行与文献行各自行内两个按钮 `✎`（重命名）/ `🗑`（删除），
+> 整合时按既定方向保留**上游 v1.3.0 的 UI 入口**：专题行与文献行各自行内两个按钮 `✎`（重命名）/ `🗑`（删除），
 > 悬停出现（`data-dpr-act`），**不再有 `⋯` 下拉菜单**（我们原先的 `menu`/`inlineMenu`/`renDlg` 已删除）。
 > `🗑` **一击**即打 `GET /library/paper/delete-plan` 拿服务端清单，然后弹**同一个页内 portal 确认框**
-> （`ConfirmDelete`，含 `requireText` 手输专题名）；上游原版的「同一按钮点两次（3 秒 arm）」按裁定 **D2 删除**
+> （`ConfirmDelete`，含 `requireText` 手输专题名）；上游原版的「同一按钮点两次（3 秒 arm）」按既定裁定删除
 > （`armDel`/`clickDelete`/`data-dpr-armed` 零残留，由 `.probe/deploy-check.mjs` 断言）。
 > **下面「弹窗内容实例」「i18n 文案」这些设计意图全部保留**（清单仍逐条列出、仍写明「不会删除」项）；
 > 变的是触发它的是行内 `🗑` 而不是 `⋯` 菜单项。其余内容**不改写**。
@@ -590,9 +590,9 @@ dry-run，给确认弹窗用。
 
 ---
 
-# 第 6 部分：对上游结论的修正（供队长归档）
+# 第 6 部分：对上游结论的修正
 
-1. **任务书里「第 4 页有 5 个 equation 块」的说法需要修正为「按 MinerU 的 0-based 页索引 4（= PDF 第 5 页）有 5 个 equation 块」**：`start_page_id=4` 返回的是 PDF 第 5 页，且该单页解析结果的 `page_idx` 是**相对子集**的 0。用户真实库中的论文（TD-MPC2，31 页）在 page_idx 2/3/27/29 上另有 12 个 equation 块，是更好的验证样本。【实测】
+1. **「第 4 页有 5 个 equation 块」的说法需要修正为「按 MinerU 的 0-based 页索引 4（= PDF 第 5 页）有 5 个 equation 块」**：`start_page_id=4` 返回的是 PDF 第 5 页，且该单页解析结果的 `page_idx` 是**相对子集**的 0。用户真实库中的论文（TD-MPC2，31 页）在 page_idx 2/3/27/29 上另有 12 个 equation 块，是更好的验证样本。【实测】
 2. **`.mineru.json` 里没有 `page_size`**，但这**不是**阻碍：content_list 的 bbox 已归一化，pdf.js 的 `viewport` 足够完成映射。真正缺的是**公式切图**（`imagesAvailable:false`）——只影响「悬停预览」这一可选体验，不影响热区点击。【源码证据 + 实测】
 3. **用户库里的真实论文足以做端到端验收**，不必依赖 `~/zotero-pdf2zh/...` 的外部样本；两者本次都验证过，结论一致。【实测】
 
@@ -611,7 +611,7 @@ dry-run，给确认弹窗用。
 ```bash
 # MinerU 单页解析（注意 start_page_id 是 0-based）
 curl -s -X POST http://127.0.0.1:8000/file_parse \
-  -F "files=@/home/vr/zotero-pdf2zh/server/translated/Gu et al. - 2022 - Vector Quantized Diffusion Model for Text-to-Image Synthesis.pdf" \
+  -F "files=@<本机样本目录>/Gu et al. - 2022 - Vector Quantized Diffusion Model for Text-to-Image Synthesis.pdf" \
   -F backend=pipeline -F parse_method=auto -F lang_list=en \
   -F return_md=true -F return_content_list=true -F return_middle_json=true \
   -F response_format_zip=false -F formula_enable=true -F table_enable=true \
@@ -649,4 +649,4 @@ node /tmp/probe/overlay.mjs "<Gu et al. pdf>" 5 /tmp/probe/cl_p5.json /tmp/probe
 - 相邻公式块最小竖直间隙：**0.8pt**（样本 A p30）。
 - `contentList` 顺序为版面序（先左栏后右栏）：样本 B p5 的 5 个公式 `bbox[1]` = 486,688,809,409,511。
 - 用户库真实产物：`.mineru.json` 146KB，266 块，类型分布 `text 112 / chart 52 / header 35 / page_number 31 / equation 12 / table 9 / image 6 / list 5 / code 2 / aside_text 1 / page_footnote 1`；equation 全部 `text_format:'latex'`，`bbox` 分量 min 126 / max 928。
-- 会话存储分组（实测目录）：`~/.dsh/sessions/--home-vr-.dsh-paper-reader-data-~9ED8~8BA4~4E13~9898--/dpr-<base64url(topic/name)>-1/` → 支撑 C11/§2.5 的脱钩结论。
+- 会话存储分组（实测目录）：`~/.dsh/sessions/--<home>-.dsh-paper-reader-data-~9ED8~8BA4~4E13~9898--/dpr-<base64url(topic/name)>-1/` → 支撑 C11/§2.5 的脱钩结论。
