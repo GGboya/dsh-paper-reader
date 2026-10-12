@@ -12,6 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync,
@@ -370,19 +371,39 @@ test('V4 规范化路由名上的 409/503：运行中会话、无法确认的会
   assert.equal(tren2.status, 409, tren2.text); assert.equal(tren2.body.code, 'translation-busy')
   assert.ok(existsSync(join(txData, 'tx', 'paper.pdf')), '被拒后文献仍在')
   assert.ok(!existsSync(join(txData, 'tx', 'paper-zh.pdf')), '不得产出译文')
-  // 等 pidfile 出现再 kill：脚本「先写 pid 再 exec sleep」，但 spawn→shell→落盘要几毫秒；macOS 上这个
-  // 竞态会让 kill 打空 → sleep 子进程留下来把整个文件的 event loop 撑到 60s 超时（CI run 38193897047
-  // 的 macOS「所有子用例 ok 但文件 timeout」正是它）。这里轮询最多 5s。
-  const killTxChild = () => {
-    if (!existsSync(pidFile)) return false
-    const pid = readFileSync(pidFile, 'utf8').trim()
-    if (!/^\d+$/.test(pid)) return false
-    try { process.kill(+pid, 'SIGKILL') } catch { /* 已退出 */ }
-    return true
+  // 「制造翻译中」这条路在**本平台能否真的跑起来**是平台能力，实测决定（不硬编码平台）：
+  //   · POSIX：产品按 <dataDir>/../.venv-pdf2zh/bin/babeldoc 找到我们造的 sh 假引擎并执行 → 会留下
+  //     `sleep` 子进程（macOS 上那个 pidfile 竞态就是它撑住 event loop）；
+  //   · Win32：产品按 venv 约定只找 `Scripts/babeldoc.exe`（真实 PE），我们的 sh 脚本**既不在它的搜索位、
+  //     也无法执行** ⇒ 根本没有子进程要清，产品停在引擎解析/自动安装阶段（`busy` 仍为真 —— CI run
+  //     38195117216 的 windows 实测就是这个状态；t17 加的「必须留下 pidfile」断言在那里恒假，本次修）。
+  //     注意：`src/translate.ts` 里 `findBabeldoc` 的引擎路径是**产品约定**，且该文件携带用户未提交的
+  //     NO_PROXY 修复（本任务 Out-of-scope），所以不去给产品加注入 seam，改用实测能力 + 等价断言。
+  const canRunFakeEngine = spawnSync(binPath, ['--version'], { encoding: 'utf8' }).status === 0
+  if (canRunFakeEngine) {
+    // 等 pidfile 出现再 kill：脚本「先写 pid 再 exec sleep」，但 spawn→shell→落盘要几毫秒；macOS 上这个
+    // 竞态会让 kill 打空 → sleep 子进程留下来把整个文件的 event loop 撑到 60s 超时（CI run 38193897047
+    // 的 macOS「所有子用例 ok 但文件 timeout」正是它）。这里轮询最多 5s。
+    const killTxChild = () => {
+      if (!existsSync(pidFile)) return false
+      const pid = readFileSync(pidFile, 'utf8').trim()
+      if (!/^\d+$/.test(pid)) return false
+      try { process.kill(+pid, 'SIGKILL') } catch { /* 已退出 */ }
+      return true
+    }
+    const deadline = Date.now() + 5000
+    while (!killTxChild() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
+    assert.ok(existsSync(pidFile), '假 babeldoc 必须已启动并写下 pid（否则上面的 busy 断言无从谈起）')
+  } else {
+    t.diagnostic('本平台执行不了假引擎（Win32 按 Scripts/babeldoc.exe 找真实可执行文件）⇒ 无 sleep 子进程可清；'
+      + '改为验同一条「翻译中」语义：busy 一直为真、再次删除仍 409 translation-busy、文件零改动')
+    assert.equal(zhStatus(ref).busy, true, '等价断言：此刻必须仍是「翻译中」')
+    const again = await txPost(CANON.deletePaper, { topic: 'tx', name: 'paper' })
+    assert.equal(again.status, 409, again.text)
+    assert.equal(again.body.code, 'translation-busy')
+    assert.equal(zhStatus(ref).busy, true, '等价断言：被拒之后仍是「翻译中」（没被误清）')
+    assert.ok(existsSync(join(txData, 'tx', 'paper.pdf')), '等价断言：被拒之后文献本体仍在、零改动')
   }
-  const deadline = Date.now() + 5000
-  while (!killTxChild() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
-  assert.ok(existsSync(pidFile), '假 babeldoc 必须已启动并写下 pid（否则上面的 busy 断言无从谈起）')
 })
 
 // 文件级兜底：任何用例失败都不许把翻译子进程留下撑住 event loop
