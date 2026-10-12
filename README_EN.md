@@ -80,7 +80,7 @@ grep '"version"' ~/.dsh/profiles/web/node_modules/@ggboy123/dsh-paper-reader/pac
 1. **Enter**: click "📚 Paper Reading" at the bottom of the sidebar — it becomes the library tree (click again to restore the official workspace list)
 2. **Add papers**: ＋ create a topic → ⬆ upload PDFs (with an empty library, "Upload PDF" auto-creates a default topic)
 3. **Read + ask**: click a paper — reader in the middle, chat on the right. Ask in the input box (no need to name the paper; answers cite pages), or **select text** in the reader for a pop-up question box; click "page N" in an answer to jump back
-4. **Chinese version**: the "中" button — one click generates a translation if none exists (first use auto-installs the engine; fill in an OpenAI-compatible endpoint once — DeepSeek/GLM/Kimi keys all work); ⤓ downloads the version you're viewing; ▣ toggles single-page mode
+4. **Chinese version**: the "中" button — one click generates a translation if none exists (first use auto-installs the engine; fill in an OpenAI-compatible endpoint once — DeepSeek/GLM/Kimi keys all work); ⤓ downloads the version you're viewing; ▣ toggles single-page mode ↔ scroll
 5. **Manage**: hover a row for ✎ rename / 🗑 delete. Deletion lists the files first, then moves them to a **recoverable trash** (`data/.trash/`); deleting a non-empty topic = batch-clear with one confirmation
 6. **Chats**: 🕐 in the chat header shows that paper's history; ＋ starts a new conversation
 
@@ -91,7 +91,7 @@ grep '"version"' ~/.dsh/profiles/web/node_modules/@ggboy123/dsh-paper-reader/pac
 By default text is extracted locally with pdf.js — **plain text-native PDFs need no configuration at all**. Two scenarios need MinerU:
 
 - **Scanned PDFs** (old papers, book chapters, scanned handouts): no text layer, pdf.js can't read them; MinerU (OCR) can
-- **Formulas**: formulas in PDFs are graphical garbage — unselectable and unsearchable. Once MinerU recovers them as LaTeX, **click a formula and its LaTeX is cited straight into the chat**; formula queries like `QK^T` hit search; the "∑ 公式" panel lists every formula by page
+- **Click to cite a formula**: formulas in PDFs are graphical garbage — unselectable and unsearchable. Once MinerU recovers them as LaTeX, **clicking a formula in the PDF puts its LaTeX into the ask bubble** (send it and the formula is cited with your question); formula queries like `QK^T` hit search; the "∑ 公式" (Formulas) panel lists every formula by page
 
 **You need to set this up yourself (pick one)**, configured under **Settings → Paper Reader → "MinerU parser"**:
 
