@@ -818,13 +818,13 @@ function textNode(data) {
   return n
 }
 
-/** 真实 vendored KaTeX（`reader/vendor/katex/katex.min.js`，与浏览器同一个文件）：
+/** 真实 vendored KaTeX（`reader/vendor/katex.min.js`，与浏览器同一个文件；已拉平，见 pr7 诊断 P0）：
  *  在 vm 里跑它的 UMD，取到 `katex` 对象（renderToString 纯函数、render 建 DOM 节点）。 */
 function loadVendoredKatex() {
   const kctx = { console, setTimeout, clearTimeout }
   kctx.globalThis = kctx; kctx.window = kctx; kctx.self = kctx
   vm.createContext(kctx)
-  vm.runInContext(readFileSync(join(REPO, 'reader', 'vendor', 'katex', 'katex.min.js'), 'utf8'), kctx)
+  vm.runInContext(readFileSync(join(REPO, 'reader', 'vendor', 'katex.min.js'), 'utf8'), kctx)
   return kctx
 }
 const KCTX = loadVendoredKatex()   // UMD 只跑一次；每次 loadReader 把当次的 document 绑给它（KaTeX.render 要建节点）

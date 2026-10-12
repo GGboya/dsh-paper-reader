@@ -7,7 +7,7 @@
 //   4. 气泡既有契约不变：内部零 button、#tr-note 仍是纯文本。
 //
 // 独立构造证据：本文件自带最小 DOM stub（不复用别的测试文件的 harness），真实 KaTeX 从
-// reader/vendor/katex/katex.min.js 现场加载 —— 与浏览器同一个文件、同一套参数。
+// reader/vendor/katex.min.js 现场加载 —— 与浏览器同一个文件、同一套参数。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -18,8 +18,8 @@ import vm from 'node:vm'
 import { extractModuleScript } from './reader-script.mjs'
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
-const KATEX_JS = join(REPO, 'reader', 'vendor', 'katex', 'katex.min.js')
-const KATEX_CSS = join(REPO, 'reader', 'vendor', 'katex', 'katex.min.css')
+const KATEX_JS = join(REPO, 'reader', 'vendor', 'katex.min.js')
+const KATEX_CSS = join(REPO, 'reader', 'vendor', 'katex.min.css')
 
 /** 真实 vendored KaTeX：它要在**同一个** vm 上下文里拿 document 建节点，故每次 harness 绑定当次 doc。 */
 const KCTX = (() => {
@@ -172,17 +172,23 @@ test('K2 切段器：行内/独立/多行/转义美元号/未闭合/空公式', 
   assert.deepEqual(sp('纯文字'), [{ kind: 'text', text: '纯文字' }])
   // 行内
   assert.deepEqual(sp('a $x_t$ b'), [
-    { kind: 'text', text: 'a ' }, { kind: 'math', text: 'x_t', display: false }, { kind: 'text', text: ' b' }])
+    { kind: 'text', text: 'a ' }, { kind: 'math', text: 'x_t', display: false, delim: '$' }, { kind: 'text', text: ' b' }])
   // 独立成行（含换行）
   assert.deepEqual(sp('前\n$$\n\\frac{1}{2}\n$$\n后'), [
-    { kind: 'text', text: '前\n' }, { kind: 'math', text: '\n\\frac{1}{2}\n', display: true }, { kind: 'text', text: '\n后' }])
+    { kind: 'text', text: '前\n' }, { kind: 'math', text: '\n\\frac{1}{2}\n', display: true, delim: '$$' }, { kind: 'text', text: '\n后' }])
   // 字面美元号 \$ 不是定界符
   assert.deepEqual(sp('价格 \\$5 与 $x$'), [
-    { kind: 'text', text: '价格 $5 与 ' }, { kind: 'math', text: 'x', display: false }])
-  // 未闭合 / 空公式 ⇒ 当普通文本，绝不产生「半个公式」
+    { kind: 'text', text: '价格 $5 与 ' }, { kind: 'math', text: 'x', display: false, delim: '$' }])
+  // \(…\) 行内 / \[…\] 独立成行（模型/上游有时给这套定界符 —— pr7 诊断 P2）
+  assert.deepEqual(sp('设 \\(x_t\\) 为状态'), [
+    { kind: 'text', text: '设 ' }, { kind: 'math', text: 'x_t', display: false, delim: '\\)' }, { kind: 'text', text: ' 为状态' }])
+  assert.deepEqual(sp('如下 \\[ \\frac{a}{b} \\] 所示'), [
+    { kind: 'text', text: '如下 ' }, { kind: 'math', text: ' \\frac{a}{b} ', display: true, delim: '\\]' }, { kind: 'text', text: ' 所示' }])
+  // 未闭合 / 空公式 / 不像数学 ⇒ 当普通文本，绝不产生「半个公式」
   assert.deepEqual(sp('a $x'), [{ kind: 'text', text: 'a $x' }])
   assert.deepEqual(sp('a $$b'), [{ kind: 'text', text: 'a $$b' }])
   assert.deepEqual(sp('a $$ $$ b'), [{ kind: 'text', text: 'a $$ $$ b' }])
+  assert.deepEqual(sp('未闭合 \\(x_t'), [{ kind: 'text', text: '未闭合 \\(x_t' }])
   // 行内公式不跨行（避免把整段散文吞进公式）
   assert.deepEqual(sp('$a\nb$'), [{ kind: 'text', text: '$a\nb$' }])
 })
@@ -231,15 +237,21 @@ test('K4 渲染参数契约 + 绝不 innerHTML（真实 KaTeX 与打桩两路都
   }
   const R2 = loadReader({ katex: fake })
   assert.deepEqual([...R2.t.trRenderBody('A $x$ B')], [])
-  assert.equal(calls.length, 2, '每个公式：探一次 renderToString + 真渲染一次 render')
+  // 每个公式现在是三步：① resolveMathMode 的探测（renderToString + throwOnError:true）
+  //                      ② renderMathSegment 的探测（同上）③ 真渲染（render + throwOnError:false）
+  assert.equal(calls.filter((c) => c.fn === 'renderToString').length, 2, `探测应恰有两次：${calls.map((c) => c.fn)}`)
+  assert.equal(calls.filter((c) => c.fn === 'render').length, 1, '真渲染应恰有一次')
+  const probes = calls.filter((c) => c.fn === 'renderToString')
+  const render = calls.find((c) => c.fn === 'render')
   for (const c of calls) {
     assert.equal(c.opts.trust, false, '必须 trust:false（不产原始 HTML）')
     assert.equal(c.opts.strict, 'ignore', "必须 strict:'ignore'")
   }
-  assert.equal(calls[1].opts.throwOnError, false, '真渲染必须 throwOnError:false（契约参数）')
-  assert.equal(calls[0].opts.throwOnError, true, '探测那次必须 throwOnError:true，失败才能被我们抓住并降级')
-  assert.equal(calls[1].tex, 'x')
-  assert.equal(calls[1].el._classes.has('tr-math'), true)
+  for (const p of probes) assert.equal(p.opts.throwOnError, true, '探测必须 throwOnError:true，失败才能被抓住并降级')
+  assert.equal(render.opts.throwOnError, false, '真渲染必须 throwOnError:false（契约参数）')
+  assert.equal(render.tex, 'x')
+  assert.equal(render.el._classes.has('tr-math'), true)
+  assert.equal(render.opts.displayMode, false, '普通行内公式仍按行内渲染（模式解析零误伤）')
 })
 
 test('K5 气泡既有契约不变：零 button、#tr-note 纯文本、#tr-status 仍走 textContent', () => {
@@ -260,19 +272,88 @@ test('K5 气泡既有契约不变：零 button、#tr-note 纯文本、#tr-status
 
 test('K6 vendored KaTeX 是离线资源：无 CDN、带版本/许可证、CSS 与字体齐备', () => {
   const html = readFileSync(join(REPO, 'reader', 'index.html'), 'utf8')
-  assert.match(html, /<link rel="stylesheet" href="\/paper-reader\/vendor\/katex\/katex\.min\.css">/, '必须以本地路径引 CSS')
-  assert.match(html, /<script src="\/paper-reader\/vendor\/katex\/katex\.min\.js"><\/script>/, '必须以本地路径引 JS')
+  assert.match(html, /<link rel="stylesheet" href="\/paper-reader\/vendor\/katex\.min\.css">/, '必须以本地扁平路径引 CSS')
+  assert.match(html, /<script src="\/paper-reader\/vendor\/katex\.min\.js"><\/script>/, '必须以本地扁平路径引 JS')
   for (const tag of html.match(/<(?:link|script)[^>]*(?:katex)[^>]*>/g) ?? []) {
     assert.ok(!/https?:\/\//.test(tag), `KaTeX 资源不得引 CDN：${tag}`)
   }
   const js = readFileSync(KATEX_JS, 'utf8')
   const css = readFileSync(KATEX_CSS, 'utf8')
   assert.match(js, /version:"0\.16\.22"/, 'vendored JS 必须能读出 0.16.22')
-  assert.ok(css.includes('fonts/KaTeX_'), 'CSS 必须引用同目录 fonts/')
-  const noticeKind = readFileSync(join(REPO, 'reader', 'vendor', 'katex', 'NOTICE.md'), 'utf8')
+  assert.ok(css.includes('url(KaTeX_'), 'CSS 必须引用同目录的 KaTeX_*.woff2（拉平后不带 fonts/ 前缀）')
+  const noticeKind = readFileSync(join(REPO, 'reader', 'vendor', 'katex.NOTICE.md'), 'utf8')
   assert.match(noticeKind, /0\.16\.22/)
-  assert.match(readFileSync(join(REPO, 'reader', 'vendor', 'katex', 'LICENSE'), 'utf8'), /MIT License/)
+  assert.match(readFileSync(join(REPO, 'reader', 'vendor', 'katex.LICENSE'), 'utf8'), /MIT License/)
   for (const f of ['KaTeX_Main-Regular.woff2', 'KaTeX_Math-Italic.woff2', 'KaTeX_Size1-Regular.woff2']) {
-    assert.ok(readFileSync(join(REPO, 'reader', 'vendor', 'katex', 'fonts', f)).length > 0, `缺字体 ${f}`)
+    assert.ok(readFileSync(join(REPO, 'reader', 'vendor', f)).length > 0, `缺字体 ${f}`)
   }
+})
+
+test('K7 反例：金额 / 落单 $ / 代码里的 $ / 中文标点里的 $ 一律不得当数学（过度识别更糟）', () => {
+  const R = loadReader()
+  const sp = (x) => JSON.parse(JSON.stringify(R.t.splitTranslatedMath(x)))
+  // 全部必须是「一段文本」，不得出现 kind==='math'（否则正文会被 KaTeX 吃掉）
+  for (const [label, input] of [
+    ['金额（两个 $ 之间是散文）', '价格 $5 到 $10 不等，共 $30。'],
+    ['金额（同一句里配对）', 'That costs $5 and that $10.'],
+    ['落单 $', '一个孤零零的 $ 符号'],
+    ['代码里的 $（环境变量/路径）', 'export PATH=$HOME/bin:$PATH 然后重开终端'],
+    ['代码里的 $（shell 变量）', '把 $FLAG 设为 1，再读 $OUT'],
+    ['中文标点里的 $', '「单价 $5，优惠 $3」—— 这是正文里的美元号'],
+    ['只有空白', '$   $'],
+    ['未闭合', '开头 $x^2 没有闭合'],
+  ]) {
+    const segs = sp(input)
+    assert.deepEqual(segs, [{ kind: 'text', text: input }], `${label} 必须整段当文本：${JSON.stringify(segs)}`)
+  }
+  // 但真的公式仍要认（正对照，避免「一律不认」也能骗过上面的用例）
+  assert.equal(sp('切线 $x^2$ 与 $\\frac{a}{b}$ 都算').filter((x) => x.kind === 'math').length, 2)
+  // 渲染这些反例：正文不许被吃掉，也不该出现降级提示
+  assert.deepEqual([...R.t.trRenderBody('价格 $5 到 $10 不等，共 $30。')], [])
+  assert.equal(R.els.get('tr-body').textContent, '价格 $5 到 $10 不等，共 $30。')
+  const note = R.doc.getElementById('tr-note')   // 惰性创建：先取一次再断言
+  assert.ok(!/未能渲染/.test(note.textContent), `反例不该出现降级提示：${note.textContent}`)
+})
+
+test('K8 真实论文的展示公式（服务端包成行内 $…$ + 自带 \\tag）必须被判成展示模式并渲染成功', () => {
+  const R = loadReader()
+  // 与线上一致的形态：assembleSource 把 equation 的 LaTeX 压成单行、再包一层**行内** $…$
+  const inline = DONG_EQUATIONS.map((raw) => {
+    let tex = raw.trim()
+    if (tex.startsWith('$$') && tex.endsWith('$$')) tex = tex.slice(2, -2)
+    tex = tex.replace(/\s*\n\s*/g, ' ')   // 服务端的 compactLatex 口径：折行压平（保留单空格）
+    return { tex, src: `$${tex}$` }
+  })
+  assert.equal(inline.length, 18, '夹具必须是 Dong 那篇的全部 18 个 equation')
+  const withTag = inline.filter((x) => x.tex.includes('\\tag'))
+  assert.ok(withTag.length >= 14, `这批公式大多带 \\tag（实测 ${withTag.length}/18）——正是 P1 的触发条件`)
+
+  inline.forEach(({ tex, src }, i) => {
+    const failed = [...R.t.trRenderBody(src)]
+    assert.deepEqual(failed, [], `第 ${i + 1} 个 equation（行内形态，含 \\tag：${tex.includes('\\tag')}）必须渲染成功，不得降级`)
+    const segs = R.els.get('tr-body').children
+    assert.equal(segs.length, 1, `第 ${i + 1} 个 equation 应恰好一段数学`)
+    assert.ok(segs[0]._classes.has('tr-math'), `第 ${i + 1} 个 equation 必须是数学段`)
+    assert.ok(!segs[0]._classes.has('tr-math-fallback'), `第 ${i + 1} 个 equation 不得走降级`)
+    assert.ok(segs[0].children.length > 0, `第 ${i + 1} 个 equation 不得留白`)
+    if (tex.includes('\\tag')) {
+      // \tag 只允许展示模式 ⇒ 必须被 resolveMathMode 升级成块级（而源定界符只是行内 $）
+      assert.ok(segs[0]._classes.has('tr-math-block'), `带 \\tag 的第 ${i + 1} 个 equation 必须升级为展示模式`)
+    }
+  })
+})
+
+test('K9 模式解析零误伤：普通行内公式仍按行内渲染（不会因为「会失败就升级」而全变块级）', () => {
+  const R = loadReader()
+  assert.deepEqual([...R.t.trRenderBody('设 $x_t$ 为状态，$QK^T$ 是注意力得分')], [])
+  const segs = R.els.get('tr-body').children.filter((e) => e._classes.has('tr-math'))
+  assert.equal(segs.length, 2)
+  for (const e of segs) {
+    assert.ok(!e._classes.has('tr-math-block'), '能按行内渲染的公式不得被升级成块级（否则排版被拆散）')
+    assert.equal(e.tagName, 'SPAN')
+  }
+  // 反向：只有行内确实失败时才升级（\\tag 是 KaTeX 的硬规则）
+  assert.deepEqual([...R.t.trRenderBody('$E=mc^2 \\tag{1}$')], [])
+  const tagged = R.els.get('tr-body').children.find((e) => e._classes.has('tr-math'))
+  assert.ok(tagged._classes.has('tr-math-block'), '\\tag 行内渲染不了 ⇒ 必须升级成展示模式')
 })

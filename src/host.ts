@@ -469,10 +469,17 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: 'bad asset name' })
         return
       }
-      const mime: Record<string, string> = { '.mjs': 'text/javascript', '.js': 'text/javascript', '.css': 'text/css', '.map': 'application/json' }
+      const mime: Record<string, string> = { '.mjs': 'text/javascript', '.js': 'text/javascript', '.css': 'text/css', '.map': 'application/json',
+        // 字体（vendored KaTeX 的 woff2 就靠这条；不给对 MIME 时某些浏览器会拒绝 @font-face）
+        '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf' }
       try {
         const body = await readFile(new URL(name, readerVendorDir))
-        res.writeHead(200, { 'content-type': (mime[name.slice(name.lastIndexOf('.'))] ?? 'application/octet-stream') + '; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-cache' })
+        const ext = name.slice(name.lastIndexOf('.'))
+        const type = mime[ext] ?? 'application/octet-stream'
+        // 只有文本类才追加 charset：给 font/woff2 这类二进制资源加 `; charset=utf-8` 是错的
+        // （实测 font/woff2 被浏览器按未知类型处理的风险；见 test/reader-vendor-http.test.mjs）
+        const texty = type.startsWith('text/') || type === 'application/json'
+        res.writeHead(200, { 'content-type': texty ? type + '; charset=utf-8' : type, 'content-length': body.length, 'cache-control': 'no-cache' })
         res.end(body)
       } catch {
         json(res, 404, { error: 'not found' })

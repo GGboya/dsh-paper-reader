@@ -10,9 +10,9 @@
      还没就绪 → "pdfjsLib is not defined"。改为经典脚本里动态 import()（见 ensurePdfjs），顺序有保证。 -->
 <!-- KaTeX 0.16.22 本地 vendor（数学渲染；论文伴读是**离线场景**，绝不引 CDN）。
      经典脚本：页面解析期同步设置 window.katex；缺失时渲染路径会**降级**为原始 LaTeX（见 trRenderBody）。
-     体积与来源见 reader/vendor/katex/NOTICE.md。 -->
-<link rel="stylesheet" href="/paper-reader/vendor/katex/katex.min.css">
-<script src="/paper-reader/vendor/katex/katex.min.js"></script>
+     体积与来源见 reader/vendor/katex.NOTICE.md。 -->
+<link rel="stylesheet" href="/paper-reader/vendor/katex.min.css">
+<script src="/paper-reader/vendor/katex.min.js"></script>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #e2e5ea; --text: #24292f;
@@ -1532,9 +1532,28 @@ function hideTrPop() { trPop.style.display = 'none'; }
      · 渲染失败：该段**降级**为原始 LaTeX 文本（可读可复制），并在 #tr-note 如实提示第几个失败。
    `splitTranslatedMath` / `trComposeNote` 是纯函数，可在 vm 里单测。 */
 
-/** 把译文切成 [{kind:'text'|'math', text, display}]。
+/** 「这段 `$…$` 像不像数学」（与 src/translate-selection.ts 的 `isLatexLikeFragment` 同判据 + 两道收窄）。
+ *  过度识别的代价更大：`$5 到 $10`、`$HOME/bin:$PATH` 这类一旦被当公式，正文会被 KaTeX 吃掉。
+ *  规则（自上而下）：
+ *    ① 含 LaTeX 特征（`\` `_` `^` `{` `}` `&`）⇒ 像数学；
+ *    ② 含空白却没有特征 ⇒ 像散文/金额（`$5 up to $10`）⇒ 不是；
+ *    ③ 全大写标识符（`HOME`、`PATH`）⇒ 不是；
+ *    ④ `NAME:…` 形态（命令行/环境变量写法）⇒ 不是；
+ *    ⑤ 其余短符号串（`x`、`QK`、`a/b`）⇒ 是（上限 24 字符，避免把长路径吃掉）。 */
+function looksLikeMath(tex) {
+  const t = String(tex);
+  if (!t.trim()) return false;
+  if (/[\\_^{}&]/.test(t)) return true;
+  if (/\s/.test(t)) return false;
+  if (/^[A-Z][A-Z0-9_]*$/.test(t)) return false;
+  if (/^[A-Za-z0-9_./-]+:/.test(t)) return false;
+  return t.length <= 24;
+}
+
+/** 把译文切成 [{kind:'text'|'math', text, display, delim}]。
  *  `$$…$$` 独立成行（可跨行）；`$…$` 行内（不跨行，避免把整段散文吞进公式）；`\$` 是字面美元号；
- *  定界符没有闭合时按普通字符处理（绝不产生"半个公式"）。 */
+ *  `\(…\)` 行内、`\[…\]` 独立成行（模型/上游有时给这套定界符，见 pr7 诊断 P2）；
+ *  定界符没有闭合、或 `$…$` 内容不像数学时按普通字符处理（绝不产生"半个公式"，也不吃正文）。 */
 function splitTranslatedMath(input) {
   const s = String(input ?? '');
   const out = [];
@@ -1542,6 +1561,29 @@ function splitTranslatedMath(input) {
   const flush = () => { if (buf) { out.push({ kind: 'text', text: buf }); buf = ''; } };
   for (let i = 0; i < s.length;) {
     if (s[i] === '\\' && s[i + 1] === '$') { buf += '$'; i += 2; continue; }
+    // \(…\) 行内 / \[…\] 独立成行：与 $ 一样，必须找到闭合才认（否则按字面字符处理）
+    if (s[i] === '\\' && (s[i + 1] === '(' || s[i + 1] === '[')) {
+      const display = s[i + 1] === '[';
+      const closeSeq = display ? '\\]' : '\\)';
+      let j = i + 2;
+      let close = -1;
+      while (j < s.length) {
+        if (s[j] === '\\') {
+          if (s[j + 1] === (display ? ']' : ')')) { close = j; break; }
+          j += 2; continue;
+        }
+        if (!display && s[j] === '\n') break;   // 行内不跨行（同 $…$ 的口径）
+        j += 1;
+      }
+      const tex = close === -1 ? '' : s.slice(i + 2, close);
+      if (close !== -1 && tex.trim() && looksLikeMath(tex)) {
+        flush();
+        out.push({ kind: 'math', text: tex, display, delim: closeSeq });
+        i = close + 2;
+        continue;
+      }
+      buf += s.slice(i, i + 2); i += 2; continue;   // 不闭合/不像数学 → 原样当文本
+    }
     if (s[i] !== '$') { buf += s[i]; i += 1; continue; }
     const display = s[i + 1] === '$';
     const open = display ? 2 : 1;
@@ -1555,13 +1597,29 @@ function splitTranslatedMath(input) {
     }
     if (close === -1) { buf += s.slice(i, i + open); i += open; continue; }
     const tex = s.slice(i + open, close);
-    if (!tex.trim()) { buf += s.slice(i, close + open); i = close + open; continue; }
+    if (!tex.trim() || !looksLikeMath(tex)) { buf += s.slice(i, close + open); i = close + open; continue; }
     flush();
-    out.push({ kind: 'math', text: tex, display });
+    out.push({ kind: 'math', text: tex, display, delim: open === 2 ? '$$' : '$' });
     i = close + open;
   }
   flush();
   return out;
+}
+
+/* 模式解析：MinerU 的**展示公式**常带 `\tag{}`（KaTeX 硬规则：\tag 只允许展示模式），而服务端
+   `assembleSource` 会把展示公式统一包成**行内 `$…$`** ⇒ 按 `display:false` 渲染必失败（pr7 诊断 P1：
+   35/37 真实 equation 命中）。这里先按切分结果探测，失败再按**另一种模式**探测：
+   只有真的行内渲染不了时才升级成展示模式 ⇒ **零误伤**（不会把普通行内公式变成块级）。
+   两种都失败返回 null，交给调用方走降级（原始 LaTeX + #tr-note，绝不留白）。 */
+function resolveMathMode(tex, display) {
+  const k = typeof window !== 'undefined' ? window.katex : null;
+  if (!k || typeof k.renderToString !== 'function') return null;
+  const probe = (d) => {
+    k.renderToString(tex, { displayMode: d, throwOnError: true, trust: false, strict: 'ignore' });
+    return d;
+  };
+  try { return probe(display); } catch { /* 按切分结果渲染不了 → 试另一种模式 */ }
+  try { return probe(!display); } catch { return null; }
 }
 
 /** 把一段 LaTeX 渲染进**我们新建的**元素（KaTeX，vendored 离线）。
@@ -1591,13 +1649,16 @@ function trRenderBody(body) {
       continue;
     }
     n += 1;
-    const el = document.createElement(seg.display ? 'div' : 'span');
-    el.className = seg.display ? 'tr-math tr-math-block' : 'tr-math';
-    let ok = true;
-    try { renderMathSegment(el, seg.text, seg.display); } catch { ok = false; }
+    // 先解析该用哪种模式（探测失败会换另一种重试），再决定元素的形态
+    const mode = resolveMathMode(seg.text, seg.display);
+    const block = mode === true;                        // 只有真的按展示模式渲染时才用块级
+    const el = document.createElement(block ? 'div' : 'span');
+    el.className = block ? 'tr-math tr-math-block' : 'tr-math';
+    let ok = mode !== null;
+    if (ok) { try { renderMathSegment(el, seg.text, mode); } catch { ok = false; } }
     if (!ok) {
-      el.className += ' tr-math-fallback';
-      const delim = seg.display ? '$$' : '$';
+      el.className = 'tr-math tr-math-fallback';
+      const delim = seg.delim ?? (seg.display ? '$$' : '$');
       el.textContent = delim + seg.text + delim;        // 降级：原始 LaTeX 原样可见、可复制
       failed.push(n);
     }

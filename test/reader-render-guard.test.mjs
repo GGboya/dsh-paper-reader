@@ -6,7 +6,8 @@
 //      **不得出现 innerHTML**（译文是模型输出，当不可信数据；文本段一律 textContent，数学段交 KaTeX 建 DOM）。
 //   R2 KaTeX 必须按契约参数调用：trust:false、throwOnError:false（真渲染）、strict:'ignore'，
 //      并且**探测那次**必须是 throwOnError:true，否则渲染失败抓不住、降级逻辑就成空转。
-//   R3 KaTeX 是本地 vendored 资源：页面用 /paper-reader/vendor/katex/… 引（不得引 CDN），文件真实存在。
+//   R3 KaTeX 是本地 vendored 资源：页面用 **扁平** 路径 /paper-reader/vendor/<file> 引（不得引 CDN），
+//      且该路径形状必须与 host 路由的 `^[\w.-]+$` 白名单一致（子目录会让资源 400，见 pr7 诊断 P0）。
 //   R4 版本/许可证可追溯：NOTICE 与 vendored JS 的版本一致、LICENSE 是 MIT。
 
 import { test } from 'node:test'
@@ -19,7 +20,7 @@ import { normalizeEol, extractModuleScript } from './reader-script.mjs'
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const HTML = normalizeEol(readFileSync(join(REPO, 'reader', 'index.html'), 'utf8'))
 const SCRIPT = extractModuleScript(HTML, { where: 'reader/index.html' })
-const KATEX_DIR = join(REPO, 'reader', 'vendor', 'katex')
+const KATEX_DIR = join(REPO, 'reader', 'vendor')
 
 /** 取出一个顶层函数的源码（按大括号配对，字符串/注释/模板串原样保留）。 */
 function fnSource(src, name) {
@@ -87,23 +88,39 @@ test('R2 KaTeX 调用参数必须是契约参数（且探测那次必须 throwOn
   // 文本段必须走 textContent（只允许给新建元素赋 textContent）
   const renderBody = fnSource(SCRIPT, 'trRenderBody')
   assert.match(renderBody, /el\.textContent\s*=\s*seg\.text/, '文本段必须 textContent')
+  // 模式解析（P1 的核心）：探测用 throwOnError:true，且**失败要换另一种模式再试**（否则 \\tag 那批全降级）；
+  // 两个探测都必须是契约参数（trust:false / strict:'ignore'）。
+  const mode = fnSource(SCRIPT, 'resolveMathMode')
+  // 探测逻辑收敛在一个 probe() 里（一处 renderToString + 契约参数），调用两次：原模式 → 另一种模式
+  assert.equal((mode.match(/renderToString\(/g) ?? []).length, 1, 'resolveMathMode 的探测只应有一处 renderToString 调用')
+  assert.match(mode, /throwOnError:\s*true/, '探测必须 throwOnError:true（否则抓不住失败、无法换模式/降级）')
+  assert.match(mode, /trust:\s*false/, 'resolveMathMode 的探测也要 trust:false')
+  assert.match(mode, /strict:\s*'ignore'/, "resolveMathMode 的探测也要 strict:'ignore'")
+  assert.match(mode, /probe\(display\)/, '必须先按切分结果探测')
+  assert.match(mode, /probe\(!display\)/, '第一种模式失败后必须用**另一种**模式重试（display 取反）')
 })
 
 test('R3 KaTeX 必须是本地 vendored 资源（离线，不得引 CDN）', () => {
   const tags = HTML.match(/<(?:link|script)[^>]*katex[^>]*>/g) ?? []
   assert.equal(tags.length, 2, `页面应当恰好引 2 个 KaTeX 资源（CSS + JS）：${tags.join(' | ')}`)
   for (const tag of tags) {
-    assert.ok(tag.includes('/paper-reader/vendor/katex/'), `KaTeX 资源必须走本地路径：${tag}`)
+    assert.ok(tag.includes('/paper-reader/vendor/'), `KaTeX 资源必须走本地路径：${tag}`)
     assert.ok(!/https?:\/\//.test(tag), `不得引 CDN：${tag}`)
+    // 关键：URL 形状必须与 host 路由 `^[\w.-]+$` 白名单一致 —— 带子目录时资源会被 400 掉，
+    // 而这条正是 t18 漏掉的盲区（守卫只看磁盘、从不发 HTTP），见 docs/pr7-render-diagnosis.md P0。
+    const url = tag.match(/(?:href|src)="([^"]+)"/)?.[1] ?? ''
+    const name = url.replace('/paper-reader/vendor/', '')
+    assert.match(name, /^[\w.-]+$/, `KaTeX 资源名必须在路由白名单内（不能带子目录）：${url}`)
   }
-  for (const f of ['katex.min.js', 'katex.min.css', 'LICENSE', 'NOTICE.md']) {
-    assert.ok(existsSync(join(KATEX_DIR, f)), `缺文件 reader/vendor/katex/${f}`)
+  for (const f of ['katex.min.js', 'katex.min.css', 'katex.LICENSE', 'katex.NOTICE.md']) {
+    assert.ok(existsSync(join(KATEX_DIR, f)), `缺文件 reader/vendor/${f}`)
   }
   assert.ok(statSync(join(KATEX_DIR, 'katex.min.js')).size > 100_000, 'katex.min.js 体积异常（可能是占位文件）')
   const css = readFileSync(join(KATEX_DIR, 'katex.min.css'), 'utf8')
-  const missing = [...css.matchAll(/url\(fonts\/([A-Za-z0-9_.-]+\.woff2)\)/g)]
+  // CSS 里的字体 URL 已随拉平改写为同目录（`url(KaTeX_X.woff2)`）——每个都得真实存在
+  const missing = [...css.matchAll(/url\(([A-Za-z0-9_.-]+\.woff2)\)/g)]
     .map((m) => m[1])
-    .filter((f) => !existsSync(join(KATEX_DIR, 'fonts', f)))
+    .filter((f) => !existsSync(join(KATEX_DIR, f)))
   assert.deepEqual(missing, [], `CSS 引用的字体必须都在（离线渲染要用）：${missing.join(', ')}`)
 })
 
@@ -111,10 +128,10 @@ test('R4 版本与许可证可追溯（NOTICE 与 vendored JS 一致、LICENSE �
   const js = readFileSync(join(KATEX_DIR, 'katex.min.js'), 'utf8')
   const m = js.match(/version:"(\d+\.\d+\.\d+)"/)
   assert.ok(m, 'katex.min.js 里读不到版本号')
-  const notice = readFileSync(join(KATEX_DIR, 'NOTICE.md'), 'utf8')
+  const notice = readFileSync(join(KATEX_DIR, 'katex.NOTICE.md'), 'utf8')
   assert.ok(notice.includes(m[1]), `NOTICE.md 的版本必须与 vendored JS 一致（JS=${m[1]}）`)
   assert.ok(notice.includes('registry.npmjs.org/katex') && notice.includes('sha256'), 'NOTICE 必须写明来源 URL 与校验值')
-  const lic = readFileSync(join(KATEX_DIR, 'LICENSE'), 'utf8')
+  const lic = readFileSync(join(KATEX_DIR, 'katex.LICENSE'), 'utf8')
   assert.match(lic, /MIT License/, 'LICENSE 必须是 KaTeX 的 MIT 全文')
   assert.match(lic, /Khan Academy/, 'LICENSE 必须保留上游版权声明')
 })
