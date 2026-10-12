@@ -342,14 +342,15 @@ test('4.1 隐私：发往端点的是分块文本原文（分批、无 apiKey、
   } finally { await srv.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('4.2 隐私：README 提示与实际发送行为一致（分块文本 + 查询文本都外发）', async () => {
-  const zh = readFileSync(join(ROOT, '..', 'README.md'), 'utf8')
-  const en = readFileSync(join(ROOT, '..', 'README_EN.md'), 'utf8')
-  const zhSec = zh.slice(zh.indexOf('嵌入'), zh.indexOf('嵌入') + 2600)
+test('4.2 隐私：功能文档提示与实际发送行为一致（分块文本 + 查询文本都外发）', async () => {
+  // README 瘦身重构后，隐私声明由 docs/features.md / docs/features_EN.md 承接
+  const zh = readFileSync(join(ROOT, '..', 'docs', 'features.md'), 'utf8')
+  const en = readFileSync(join(ROOT, '..', 'docs', 'features_EN.md'), 'utf8')
+  const zhSec = zh.slice(zh.indexOf('## 嵌入语义检索'), zh.indexOf('## 嵌入语义检索') + 2600)
   // 事实：分块文本 + 查询文本 + 模型名都会发给端点
-  assert.match(zhSec, /分块|片段/, 'zh README 必须说明发出的内容是分块文本')
-  assert.match(zhSec, /查询/, 'zh README 必须说明查询文本也会外发')
-  assert.match(en.slice(en.indexOf('Embedding'), en.indexOf('Embedding') + 2600), /chunk/i)
+  assert.match(zhSec, /分块|片段/, 'zh 功能文档必须说明发出的内容是分块文本')
+  assert.match(zhSec, /查询/, 'zh 功能文档必须说明查询文本也会外发')
+  assert.match(en.slice(en.indexOf('## Embedding semantic search'), en.indexOf('## Embedding semantic search') + 2600), /chunk/i)
   // 缓存文件里不含查询文本（只有分块向量）——抓一个真实缓存核对
   const dir = tempDir()
   const srv = await startMock(() => ({}), 4)
@@ -559,8 +560,8 @@ test('10.2 隐私提示与实测一致性：分块文本与**查询文本**都�
     await tool.execute({ path: p.pdf, query: 'reward of the policy', k: 3 }, {})
     const allSent = srv.state.calls.flatMap((c) => c.body.input)
     assert.ok(allSent.includes('reward of the policy'), '实测：查询文本确实会发往端点')
-    const zh = readFileSync(join(ROOT, '..', 'README.md'), 'utf8')
-    const en = readFileSync(join(ROOT, '..', 'README_EN.md'), 'utf8')
+    const zh = readFileSync(join(ROOT, '..', 'docs', 'features.md'), 'utf8')
+    const en = readFileSync(join(ROOT, '..', 'docs', 'features_EN.md'), 'utf8')
     const zhWarn = zh.slice(zh.indexOf('**隐私提示**'), zh.indexOf('**隐私提示**') + 300)
     const enWarn = en.slice(en.indexOf('**Privacy notice**'), en.indexOf('**Privacy notice**') + 300)
     assert.match(zhWarn, /分块文本/, 'zh 已声明分块文本外发')

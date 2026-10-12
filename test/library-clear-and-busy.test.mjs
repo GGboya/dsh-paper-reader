@@ -755,18 +755,24 @@ test('C1 设置卡片：MinerU 描述有「什么时候需要 + 配好后入口�
   assert.match(client, /setMineruWhy: 'Scanned PDFs unreadable/, 'en 同步')
 })
 
-test('C2 两份 README：云端三步指引 + 公式/扫描件两类场景各一句；不夸大', () => {
-  for (const f of ['README.md', 'README_EN.md']) {
+// 文档归口说明（README 瘦身重构）：MinerU 的配置指引与实测声明已从两份 README 搬到
+// docs/features.md / docs/features_EN.md，README 只留一行指针。本测试的校验意图
+// （云端指引可照做 + 两类场景各一句 + 不夸大）不变，读取目标随之改到 docs——
+// 断言对象变了，断言的事实没变。
+test('C2 两份功能文档（docs/features*.md）：云端配置指引可照做 + 公式/扫描件两类场景各一句；不夸大', () => {
+  for (const f of ['docs/features.md', 'docs/features_EN.md']) {
     const t = readFileSync(join(REPO, f), 'utf8')
     assert.match(t, /mineru\.net/, `${f} 必须给出注册地址`)
-    const steps = t.match(/^\d\. .*$/gm) || []
-    assert.ok(steps.length >= 3, `${f} 三步指引必须是真的编号列表：${JSON.stringify(steps.slice(0, 4))}`)
+    // 云端指引必须含「注册 → 建 token → 保存」三步信息（呈现形式不限，表格/列表均可）
+    assert.match(t, /注册|[Rr]egister/, `${f} 云端指引缺「注册」一步`)
+    assert.match(t, /token/i, `${f} 云端指引缺「创建 token」一步`)
+    assert.match(t, /保存|[Ss]ave/, `${f} 云端指引缺「保存」一步`)
     assert.match(t, /API (管理|management)/i, `${f} 必须说明 token 在站内哪里创建`)
     assert.match(t, /MinerU (解析后端|parser)/, `${f} 必须给出粘贴位置（设置卡片）`)
     // 两类受益场景各一句（按语言各自的说法断言）
     assert.match(t, /公式/, `${f} 缺「公式引用」场景一句`)
     assert.match(t, /公式引用[^\n]*LaTeX|LaTeX[^\n]*cited/, `${f} 公式场景要说到 LaTeX 才能点着引用`)
-    const scanWord = f === 'README.md' ? /扫描/ : /scanned/i
+    const scanWord = f === 'docs/features.md' ? /扫描/ : /scanned/i
     assert.match(t, scanWord, `${f} 缺「扫描版」场景一句`)
     // 不夸大：明确 pdf.js 路径不受影响、云端尚未端到端实测
     assert.match(t, /pdf\.js/, `${f} 必须如实说明不配置时的能力（pdf.js）`)

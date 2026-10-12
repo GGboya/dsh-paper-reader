@@ -731,14 +731,15 @@ test('I1 设置面板：嵌入卡片指向 /embed/config，zh/en 文案 key 齐�
     assert.equal(uses, 1, `${key} 应被卡片引用一次`)
     assert.equal(defs, 2, `${key} 必须在 zh 与 en 两份文案里都有定义`)
   }
-  // 隐私提示必须出现在两份 README（同时覆盖文案齐全性）
-  const zh = readFileSync(join(ROOT, '..', 'README.md'), 'utf8')
-  const en = readFileSync(join(ROOT, '..', 'README_EN.md'), 'utf8')
+  // 隐私提示与配置事实必须出现在两份功能文档（README 瘦身重构后由 docs/features*.md 承接，
+  // 校验意图不变：文档必须如实声明外发行为与配置项）
+  const zh = readFileSync(join(ROOT, '..', 'docs', 'features.md'), 'utf8')
+  const en = readFileSync(join(ROOT, '..', 'docs', 'features_EN.md'), 'utf8')
   assert.match(zh, /两类文本都会发送到你配置的那个端点[\s\S]{0,400}检索时的查询文本/)
   assert.match(en, /two kinds of text are sent to the endpoint you configure[\s\S]{0,400}query text of every search/)
   for (const kw of [/DSH_EMBED_API_KEY/, /embeddings\.json/, /batchSize/, /非目标|Non-goals/]) {
-    assert.match(zh, kw, `README.md 缺 ${kw}`)
-    assert.match(en, kw, `README_EN.md 缺 ${kw}`)
+    assert.match(zh, kw, `docs/features.md 缺 ${kw}`)
+    assert.match(en, kw, `docs/features_EN.md 缺 ${kw}`)
   }
 })
 
