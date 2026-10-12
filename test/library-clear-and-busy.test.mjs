@@ -791,13 +791,15 @@ test('C4 【F-J】content_list 形态按通道区分：本地 legacy = JSON 字�
   assert.match(m, /vlm[^\n]*未(实测|验证)|未(实测|验证)[^\n]*vlm/, 'src 注释也要列出未验证项')
 })
 
-test('C3 README 版本标签与 package.json 同步（不再残留 1.5.0/1.6.0）', () => {
-  // 期望值跟着 package.json 走：发版只改三处（package.json + 两个 README），本测试不再逐版手写
+test('C3 README 版本标签与 package.json 同步（不残留其它 1.x.0 版本号）', () => {
+  // 以 package.json 为**单一事实源**，不再把版本号硬编码进测试（每 bump 一次就要改测试 = 假守卫；
+  // 本功能的 1.6.0 → 1.5.0 重排就是被这条抓到的）。仍然拦「README 落后于包版本」这种真实漂移。
   const v = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version
-  const vEsc = v.replaceAll('.', '\\.')
+  assert.match(v, /^\d+\.\d+\.\d+$/, `package.json 版本格式异常：${v}`)
   for (const f of ['README.md', 'README_EN.md']) {
     const t = readFileSync(join(REPO, f), 'utf8')
-    assert.ok(!/1\.5\.0|1\.6\.0/.test(t), `${f} 残留旧版本号：${(t.match(/1\.[56]\.0/g) || []).join(', ')}`)
-    assert.match(t, new RegExp(`v${vEsc}|@${vEsc}`), `${f} 必须出现 v${v} / @${v}`)
+    assert.ok(t.includes(`v${v}`) || t.includes(`@${v}`), `${f} 必须出现当前版本 v${v} / @${v}`)
+    const others = [...new Set([...t.matchAll(/[v@](\d+\.\d+\.\d+)/g)].map((m) => m[1]).filter((x) => x !== v))]
+    assert.deepEqual(others, [], `${f} 残留其它版本号：${others.join(', ')}`)
   }
 })

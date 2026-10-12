@@ -124,6 +124,9 @@ export async function testTranslateEndpoint(ep: TranslateEndpoint): Promise<{ ok
     // Node 的 fetch 把真实原因（ECONNREFUSED / 证书错误 / 超时）塞在 cause 里，
     // 只报 "fetch failed" 对用户毫无帮助
     const cause = err instanceof Error && err.cause instanceof Error ? `: ${err.cause.message}` : ''
-    return { ok: false, detail: (err instanceof Error ? err.message : String(err)) + cause }
+    // ⚠️ t7（t4 评审 R-04 的同类项）：这条 detail 会进响应体、再上屏（设置浮层）。
+    // fetch 抛出的原因串可能带上 baseUrl（含凭据/查询参数）或回显 Authorization ——
+    // 与同函数上面两条分支一样先过 sanitizeDetail；可读原因（ECONNREFUSED 等）不受影响。
+    return { ok: false, detail: sanitizeDetail((err instanceof Error ? err.message : String(err)) + cause, apiKey) }
   }
 }

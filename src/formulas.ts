@@ -55,6 +55,73 @@ export interface FormulaIndex {
   warning?: string
 }
 
+/**
+ * `text` 块索引：**行内公式**（`$…$`）嵌在 `type:"text"` 块的 `text` 字段里，没有自己的
+ * bbox/equation 块（docs/selection-translate-requirements.md §2.1 实测：Dong 28/154、
+ * Hansen 22/112 个 text 块含 `$`）。划词翻译的服务端行内还原（§3.4）必须能拿到这些块。
+ *
+ * 只收「含 `$` 的 text 块」：全量 text 块会把 138KB 级的产物整篇搬进内存（§7 R15），
+ * 而还原只需要候选块。`text` 一律过 `compactLatex`（§2.5 实测：整块投影安全，
+ * `$F _ { \theta }$` → `$F_\theta$`，且片段外正文逐字节不变）。
+ */
+export interface TextBlockEntry {
+  /** 页码（1 起，= page_idx + 1） */
+  page: number
+  pageIdx: number
+  /** 页内序号（1 起，阅读序） */
+  index: number
+  /** [x0,y0,x1,y1]，归一化坐标（null = 该块没有可用 bbox） */
+  bbox: [number, number, number, number] | null
+  /** 紧凑投影后的块文本（`$…$` 片段已压紧） */
+  text: string
+}
+
+export interface TextBlockIndex {
+  source: 'mineru' | 'none'
+  blocks: TextBlockEntry[]
+  reason?: FormulaReason
+}
+
+/** 从 `.mineru.json` 的原始文本建 text 块索引（只收含 `$` 的块）。 */
+export function buildTextBlockIndex(raw: string | null): TextBlockIndex {
+  if (raw === null) return { source: 'none', blocks: [], reason: 'no-mineru-artifact' }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { source: 'none', blocks: [], reason: 'bad-artifact' }
+  }
+  if (!isRecord(parsed)) return { source: 'none', blocks: [], reason: 'bad-artifact' }
+  const list = parsed['contentList']
+  if (!Array.isArray(list)) return { source: 'none', blocks: [], reason: 'bad-artifact' }
+
+  // page_idx 缺失的块沿用上一个有页码的块（与 buildFormulaIndex / transcribe 的投影口径一致）
+  const blocks: TextBlockEntry[] = []
+  const perPage = new Map<number, number>()
+  let lastPageIdx = 0
+  for (const b of list) {
+    if (!isRecord(b)) continue
+    if (b['type'] !== 'text') continue
+    const pi = b['page_idx']
+    if (typeof pi === 'number' && Number.isFinite(pi) && pi >= 0) lastPageIdx = Math.trunc(pi)
+    const text = b['text']
+    if (typeof text !== 'string' || !text.includes('$')) continue
+    const index = (perPage.get(lastPageIdx) ?? 0) + 1
+    perPage.set(lastPageIdx, index)
+    blocks.push({
+      page: lastPageIdx + 1,
+      pageIdx: lastPageIdx,
+      index,
+      bbox: toBbox(b['bbox']),
+      text: compactLatex(text),
+    })
+  }
+  // 注意：blocks 为空**不是**错误——产物可能根本没有含 `$` 的 text 块（行内还原直接
+  // 走 unavailable）。reason 只在「读不到 contentList」时给，语义与 FormulaReason 一致。
+  return { source: 'mineru', blocks }
+}
+
 /** 供测试与调用方复用的紧凑化：既有投影两步 + 算子名统一（见下）。 */
 export function compactLatex(rawLatex: string): string {
   return unifyOperatorNames(normalizeMathBraces(compressMathSpaces(rawLatex)))
@@ -253,32 +320,62 @@ export function buildFormulaIndex(raw: string | null, opts: { producer?: unknown
 // ── 读盘 + 记忆化（.mineru.json 实测 146KB/31 页，不能让每次渲染都读一遍）─────────
 interface CacheEntry { key: string; value: FormulaIndex }
 let cache: CacheEntry | null = null
+// 同一个 `.mineru.json` 现在有两个索引（equation 的 FormulaIndex 与行内公式用的
+// TextBlockIndex）。原始文本单读一层缓存：两个索引共用，避免 138KB 文件读两遍/解析两遍
+// 的放大（§7 R15）。key 同样是 `mtimeMs:size`——改名/重转录后自然失效。
+interface RawCacheEntry { key: string; raw: string | null }
+let rawCache: RawCacheEntry | null = null
+let textCache: { key: string; value: TextBlockIndex } | null = null
 
-/** 读 `<ref.mineruJsonPath>` 并建索引。文件缺失/损坏一律返回可用的空索引，**不抛异常**。 */
-export async function readFormulaIndex(ref: PaperRef): Promise<FormulaIndex> {
+/**
+ * 读 `.mineru.json` 原始文本（缺失 → null）。**不抛异常**：权限等异常也降级成 null，
+ * 由调用方决定 reason（读取失败按 bad-artifact 记）。
+ */
+async function readMineruRaw(ref: PaperRef): Promise<{ key: string; raw: string | null; failed?: string }> {
   let key = `${ref.mineruJsonPath}:absent`
   try {
     const st = await stat(ref.mineruJsonPath)
     key = `${ref.mineruJsonPath}:${st.mtimeMs}:${st.size}`
-    if (cache && cache.key === key) return cache.value
+    if (rawCache && rawCache.key === key) return { key, raw: rawCache.raw }
     const raw = await readFile(ref.mineruJsonPath, 'utf8')
-    const value = buildFormulaIndex(raw)
-    cache = { key, value }
-    return value
+    rawCache = { key, raw }
+    return { key, raw }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
     if (code === 'ENOENT' || code === 'EISDIR') {
-      const value = buildFormulaIndex(null)
-      if (cache?.key === key) return cache.value
-      cache = { key, value }
-      return value
+      if (!(rawCache && rawCache.key === key)) rawCache = { key, raw: null }
+      return { key, raw: null }
     }
-    // 权限等异常也不许把阅读器打崩：降级成 bad-artifact
-    return EMPTY('bad-artifact', `读取 mineru.json 失败：${code ?? 'unknown'}`)
+    return { key, raw: null, failed: code ?? 'unknown' }
   }
+}
+
+/** 读 `<ref.mineruJsonPath>` 并建索引。文件缺失/损坏一律返回可用的空索引，**不抛异常**。 */
+export async function readFormulaIndex(ref: PaperRef): Promise<FormulaIndex> {
+  const { key, raw, failed } = await readMineruRaw(ref)
+  if (failed !== undefined) return EMPTY('bad-artifact', `读取 mineru.json 失败：${failed}`)
+  if (cache && cache.key === key) return cache.value
+  const value = buildFormulaIndex(raw)
+  cache = { key, value }
+  return value
+}
+
+/**
+ * 读同一份产物并建 **text 块索引**（行内公式还原用，服务端内部；不经 `/api/formulas`
+ * 下发——§7 R14/R15 明确要求响应面不变）。与 `readFormulaIndex` 共用原始文本缓存。
+ */
+export async function readTextBlockIndex(ref: PaperRef): Promise<TextBlockIndex> {
+  const { key, raw, failed } = await readMineruRaw(ref)
+  if (failed !== undefined) return { source: 'none', blocks: [], reason: 'bad-artifact' }
+  if (textCache && textCache.key === key) return textCache.value
+  const value = buildTextBlockIndex(raw)
+  textCache = { key, value }
+  return value
 }
 
 /** 仅供测试：清空记忆化。 */
 export function resetFormulaCache(): void {
   cache = null
+  rawCache = null
+  textCache = null
 }
