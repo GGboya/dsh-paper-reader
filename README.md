@@ -161,6 +161,18 @@ reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，ifram
 lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管) + PDF 页签 + 主面板
 ```
 
+## 贡献者
+
+感谢每一位贡献者：
+
+<a href="https://github.com/GGboya/dsh-paper-reader/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=GGboya/dsh-paper-reader" alt="贡献者头像墙" />
+</a>
+
+## Star 趋势
+
+[![Star 趋势图](https://api.star-history.com/svg?repos=GGboya/dsh-paper-reader&type=Date)](https://star-history.com/#GGboya/dsh-paper-reader&Date)
+
 ## License
 
 MIT

@@ -161,6 +161,18 @@ reader/index.html      the reader page (pdf.js, independent of the React host, i
 lib/client.js          browser half: library tree (sidebar.workspaces takeover) + PDF tab + main panel
 ```
 
+## Contributors
+
+Thanks to everyone who has contributed:
+
+<a href="https://github.com/GGboya/dsh-paper-reader/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=GGboya/dsh-paper-reader" alt="Contributor avatars" />
+</a>
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=GGboya/dsh-paper-reader&type=Date)](https://star-history.com/#GGboya/dsh-paper-reader&Date)
+
 ## License
 
 MIT
