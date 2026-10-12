@@ -21,15 +21,18 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { normalizeEol, extractModuleScript } from './reader-script.mjs'
 import vm from 'node:vm'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
-const READER_HTML = readFileSync(join(ROOT, '..', 'reader', 'index.html'), 'utf8')
-const SCRIPT_SRC = READER_HTML.match(/<script>\n([\s\S]*)\n<\/script>/)[1]
+// 行尾归一化后再取脚本：Windows 检出是 CRLF，按 LF 写死的正则会 `null[1]` 崩掉整个文件
+// （main 的守卫 C4/C5 口径，见 test/reader-script.mjs）
+const READER_HTML = normalizeEol(readFileSync(join(ROOT, '..', 'reader', 'index.html'), 'utf8'))
+const SCRIPT_SRC = extractModuleScript(READER_HTML, { where: 'reader/index.html' })
 
-const { buildFormulaIndex, compactLatex } = await import(dist('formulas.js'))
+const { buildFormulaIndex, compactLatex } = await import(pathToFileURL(dist('formulas.js')).href)
 
 /* ── 夹具：真实 MinerU 产物的 equation（bbox + LaTeX 逐字），见 .probe/merge-verify/11-real-equation-fixture.json ── */
 const FIXTURE = {

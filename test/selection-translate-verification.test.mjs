@@ -12,13 +12,13 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const dist = (m) => join(REPO, 'dist', m)
 
-const { assembleSource, alignSelectionToBlock, stripJunk, formulaStatusOf, normForAlign } = await import(dist('translate-selection.js'))
-const { compactLatex, buildTextBlockIndex, buildFormulaIndex } = await import(dist('formulas.js'))
+const { assembleSource, alignSelectionToBlock, stripJunk, formulaStatusOf, normForAlign } = await import(pathToFileURL(dist('translate-selection.js')).href)
+const { compactLatex, buildTextBlockIndex, buildFormulaIndex } = await import(pathToFileURL(dist('formulas.js')).href)
 
 const LIB = join(homedir(), '.dsh-paper-reader', 'data', '默认专题')
 const DONG = 'Dong et al. - 2026 - Language-Conditioned World Modeling for Visual Navigation'

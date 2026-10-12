@@ -19,7 +19,8 @@ import { createServer } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { normalizeEol, extractModuleScript } from './reader-script.mjs'
 import vm from 'node:vm'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -28,18 +29,20 @@ const dist = (m) => join(REPO, 'dist', m)
 
 const {
   buildFormulaIndex, buildTextBlockIndex, compactLatex, resetFormulaCache,
-} = await import(dist('formulas.js'))
+} = await import(pathToFileURL(dist('formulas.js')).href)
 const {
   CACHE_LIMIT, MIN_NORM, SELECTION_SYSTEM_PROMPT,
   SelectionTranslateError, TranslateSelectionCache,
   alignSelectionToBlock, assembleSource, buildRequestBody, clampMaxTokens, formulaStatusOf,
   formulaTokens, isLatexLikeFragment, normForAlign, selectionCache, selectionCacheKey,
   stripFence, stripJunk, stripPrefix, translateSelection, verifyFormulas,
-} = await import(dist('translate-selection.js'))
-const { registerRoutes } = await import(dist('host.js'))
+} = await import(pathToFileURL(dist('translate-selection.js')).href)
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
-const READER_HTML = readFileSync(join(REPO, 'reader', 'index.html'), 'utf8')
-const SCRIPT_SRC = READER_HTML.match(/<script>\n([\s\S]*)\n<\/script>/)[1]
+// 行尾归一化后再取脚本：Windows 检出是 CRLF，按 LF 写死的正则会 `null[1]` 崩掉整个文件
+// （main 的守卫 C4/C5 口径，见 test/reader-script.mjs）
+const READER_HTML = normalizeEol(readFileSync(join(REPO, 'reader', 'index.html'), 'utf8'))
+const SCRIPT_SRC = extractModuleScript(READER_HTML, { where: 'reader/index.html' })
 
 /* ══════════════════════════════════════════════════════════════════════════
    零依赖夹具：一份合成的 .mineru.json（3 个含行内公式的 text 块 + 1 个 equation）
@@ -1813,7 +1816,7 @@ test('R-04-续 testTranslateEndpoint 的 catch 分支同样脱敏（同类既有
   // 该路径的 detail 会进 /api/translate/config 的响应体、再上屏（设置浮层）⇒ 必须脱敏。
   // 用例放在本文件（新的、未跟踪的测试文件）：既有的 test/translate-precheck-redaction.test.mjs
   // 受 VC1 守卫「既有测试文件零改动」保护，不得修改。
-  const { testTranslateEndpoint } = await import(dist('translate-config.js'))
+  const { testTranslateEndpoint } = await import(pathToFileURL(dist('translate-config.js')).href)
   const key = 'sk-catch-branch-abcdefghijklmnopqrstuvwxyz'
   const realFetch = globalThis.fetch
   try {

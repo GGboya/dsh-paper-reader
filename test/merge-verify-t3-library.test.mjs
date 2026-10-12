@@ -18,14 +18,14 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-mv3-home-'))
 process.env.DSH_HOME = HOME
 
-const { registerRoutes } = await import(dist('host.js'))
+const { registerRoutes } = await import(pathToFileURL(dist('host.js')).href)
 
 /* ── 夹具 ─────────────────────────────────────────────────────────────────── */
 const PDF = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Size 1 /Root 1 0 R >>\n%%EOF\n', 'latin1')
@@ -214,8 +214,8 @@ test('V2 符号链接：专题→库外目录、文献 .pdf→库外文件，五
   const OUTSIDE = mkdtempSync(join(tmpdir(), 'dpr-mv3-out2-'))
   writeFileSync(join(OUTSIDE, 'sentinel.txt'), 'must stay')
   scaffold(DATA, 'vic', 'P')
-  symlinkSync(OUTSIDE, join(DATA, 'evil'))
-  symlinkSync(join(OUTSIDE, 'sentinel.txt'), join(DATA, 'vic', 'link.pdf'))
+  symlinkSync(OUTSIDE, join(DATA, 'evil'), 'dir')
+  symlinkSync(join(OUTSIDE, 'sentinel.txt'), join(DATA, 'vic', 'link.pdf'), 'file')
   const base = await boot(DATA)
   const post = async (p, obj) => {
     const r = await fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(obj) })
@@ -342,8 +342,8 @@ test('V4 规范化路由名上的 409/503：运行中会话、无法确认的会
   writeFileSync(binPath, '#!/bin/sh\ncase "$1" in\n  --version) echo "babeldoc fake 1.0"; exit 0 ;;\n  --help) echo "--no-watermark --skip-figure-text"; exit 0 ;;\n  *) echo $$ > "$MV3_TX_PIDFILE"; exec sleep 120 ;;\nesac\n')
   chmodSync(binPath, 0o755)
   const txBase = await boot(txData)
-  const { startTranslation, zhStatus } = await import(dist('translate.js'))
-  const { resolvePaper } = await import(dist('library.js'))
+  const { startTranslation, zhStatus } = await import(pathToFileURL(dist('translate.js')).href)
+  const { resolvePaper } = await import(pathToFileURL(dist('library.js')).href)
   const ref = resolvePaper(txData, { topic: 'tx', name: 'paper' })
   const started = await startTranslation(ref, txData, { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'k', model: 'm' })
   assert.equal(started.started, true, JSON.stringify(started))
@@ -410,10 +410,15 @@ test('V5 创建/删除对称（规范化路由名）、畸形 JSON 体 4xx、历
   assert.ok(existsSync(join(DATA, '.trash')), '回收站目录本身绝不能被当专题删掉')
   // 非空专题：409 topic-not-empty，且 confirmName 必须一致（UI 两段式确认接的是我们的删除计划）
   scaffold(DATA, 'nonempty', 'P')
+  // confirmName 在 delete-topic 上是**可选**栅栏（契约：host.ts:688-698）：给了才校验一致性；
+  // 没给就照走全部前置 → 非空专题一律 409 topic-not-empty（我们的加固，比上游「一点递归删光」保守）。
+  // 重排到合并后的 main 时这里是本功能唯一一处与现行契约不符的期望值（旧写成 400 confirm-mismatch）。
   const noConfirm = await post(CANON.deleteTopic, { topic: 'nonempty' })
-  assert.equal(noConfirm.status, 400); assert.equal(noConfirm.body.code, 'confirm-mismatch')
+  assert.equal(noConfirm.status, 409, noConfirm.text); assert.equal(noConfirm.body.code, 'topic-not-empty')
+  assert.ok(existsSync(join(DATA, 'nonempty', 'P.pdf')), '被拒时一个文件都不能动')
   const mismatch = await post(CANON.deleteTopic, { topic: 'nonempty', confirmName: 'NonEmpty' })
   assert.equal(mismatch.status, 400); assert.equal(mismatch.body.code, 'confirm-mismatch')
+  assert.ok(existsSync(join(DATA, 'nonempty', 'P.pdf')), '被拒时一个文件都不能动')
   const nonEmpty = await post(CANON.deleteTopic, { topic: 'nonempty', confirmName: 'nonempty' })
   assert.equal(nonEmpty.status, 409); assert.equal(nonEmpty.body.code, 'topic-not-empty')
   assert.ok(existsSync(join(DATA, 'nonempty', 'P.pdf')), '被拒时一个文件都不能动')
