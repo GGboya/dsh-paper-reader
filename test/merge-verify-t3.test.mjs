@@ -519,7 +519,11 @@ test('R8 翻页控件/状态/键盘：模式切换、页码输入、‹› 按�
   const prev = R.byId.get('page-prev')
   const input = R.byId.get('page-input')
   await T.renderPaged()
-  assert.equal(modeBtn.textContent, '▣', '翻页模式下模式按钮显示 ▣')
+  // main 的 5fdc51d 把顶栏统一成 inline SVG 图标集：paged 模式显示 paged 图标（不再有 ▣/≣ 字形），
+  // 状态由「图标 + active + title」表达 —— 这里钉图标口径 + active。
+  const pagedIcon = modeBtn.innerHTML
+  assert.match(pagedIcon, /<svg class="ic"/, '翻页模式下模式按钮显示图标（main 的图标集）')
+  assert.match(modeBtn.title, /单页翻页/, 'title 必须说明当前是单页翻页')
   assert.ok(modeBtn.classList.contains('active'), '翻页模式下模式按钮 active')
   assert.equal(prev.disabled, true, '第一页时 ‹ 禁用')
   assert.equal(next.disabled, false, '第一页时 › 可用')
@@ -549,7 +553,9 @@ test('R8 翻页控件/状态/键盘：模式切换、页码输入、‹› 按�
   const container = R.byId.get('pdf-pages')
   assert.equal(container.classList.contains('paged'), false, '切回滚动后 paged 类摘掉')
   assert.equal(pagesIn(R).length, REAL_DOC.numPages, '切回滚动渲染全量页')
-  assert.equal(modeBtn.textContent, '≣', '滚动模式按钮显示 ≣')
+  assert.match(modeBtn.innerHTML, /<svg class="ic"/, '滚动模式按钮同样显示图标')
+  assert.notEqual(modeBtn.innerHTML, pagedIcon, '滚动模式的图标必须与翻页模式不同（scroll ↔ paged）')
+  assert.match(modeBtn.title, /连续滚动/, 'title 必须说明当前是连续滚动')
   assert.ok(!modeBtn.classList.contains('active'))
   assert.equal(prev.disabled, false, '滚动模式下 ‹ 不禁用（禁用只属于翻页模式）')
   assert.equal(next.disabled, false, '滚动模式下 › 不禁用')

@@ -187,6 +187,10 @@
   <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none" data-icon="translate"></button>
   <button id="dual-toggle" class="tbtn" title="用 babeldoc 的中英对照 PDF（模式 A）" style="display:none" data-icon="columns">对照</button>
   <button id="split-toggle" class="tbtn" title="原文与中文版并排同步滚动（模式 B）" style="display:none" data-icon="split">分屏</button>
+  <!-- 「同步滚动」开关（模式 B 的全局偏好）：分屏控件旁，只在分屏下可见（模式 A/原文/译文都没有两个滚动条）。
+       状态换图标（sync / syncOff，与 mode-toggle 的 paged/scroll 同法）+ title 里 zh/en 说明状态；
+       与设置面板里的同一项共用 dpr.syncScroll 键、互相同步。 -->
+  <button id="sync-toggle" class="tbtn" title="同步滚动 / Sync scroll：开（两列一起滚，点击关闭）" style="display:none" data-icon="sync"></button>
   <button id="zh-regen" class="tbtn" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none" data-icon="regen"></button>
   <button id="dl-btn" class="tbtn" title="下载 PDF" style="display:none" data-icon="download"></button>
   <span class="spacer"></span>
@@ -285,6 +289,8 @@ const ICONS = {
   sigma: '<path d="M18 7V5H6l6 7-6 7h12v-2"/>',
   columns: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/>',
   split: '<rect width="8" height="18" x="3" y="3" rx="2"/><rect width="8" height="18" x="13" y="3" rx="2"/>',
+  sync: '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>',
+  syncOff: '<path d="m18.84 12.25 1.72-1.71h-.02a5.004 5.004 0 0 0-.12-7.07 5.006 5.006 0 0 0-6.95 0l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a5.004 5.004 0 0 0 .12 7.07 5.006 5.006 0 0 0 6.95 0l1.71-1.71"/><line x1="8" x2="8" y1="2" y2="5"/><line x1="2" x2="5" y1="8" y2="8"/><line x1="16" x2="16" y1="19" y2="22"/><line x1="19" x2="22" y1="16" y2="16"/>',
   spin: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
 };
 const iconHtml = (name) => `<svg class="ic${name === 'spin' ? ' spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -471,6 +477,10 @@ function updateViewButtons() {
     : !hasZh ? (hasDual ? '需先生成中文版（模式 B 用 -zh.pdf 与原文并排）' : '还没有中文版，先用「中」生成（babeldoc，需要几分钟）')
     : splitOn ? '当前：分屏对照（模式 B），点击回到原文'
     : '原文与中文版并排同步滚动（模式 B）';
+
+  // 「同步滚动」开关：与三个视图控件同一个状态机（一处决定所有按钮的可见性/文案/态）；
+  // 仅分屏下可见 —— 模式 A/原文/译文只有一个滚动条，开关无意义
+  updateSyncToggle();
 }
 
 $('zh-toggle').onclick = async () => {
@@ -1958,15 +1968,110 @@ const splitCols = () => [
   { pane: $('pdf-pane-zh'), box: $('pdf-pages-zh') },
 ];
 
-/** 滚动同步：主导方 = 用户正在滚的那一列；rAF 节流 + 守卫吞掉回声（§4.2/R7）。 */
+/* =====================================================================================
+   同步滚动开关（模式 B 的可选项）—— 两处入口（分屏控件旁 + dsh 设置面板）、全局记忆、默认开
+   · 持久化键 `dpr.syncScroll`（'1'/'0'）：**故意不带 topic/name**，也**不在**
+     `dpr.variant.` / `dpr.sessionN.` 两个前缀里 —— lib/client.js 的改名搬家（migrateLsKeys）
+     只搬那两个前缀，所以论文/专题改名既不会搬它、更不会丢它（全局键本来就没有跟着某篇走的身份）。
+     取值缺省 = 开：与改造前「两列被 rAF 强行同步」的既有行为一致，老用户观感不变。
+   · 设置面板在**另一个文档**里（阅读器是同源 iframe）：两处靠 localStorage 的 storage 事件互通
+     （它只对**其他**文档触发，天然不会回声）——任一处改动，另一处立即反映。
+   · 关掉只关「持续联动」：进分屏/重渲时的一次性对齐（alignSplit）仍然执行，否则两列会停在不同页。
+   ===================================================================================== */
+const SYNC_SCROLL_KEY = 'dpr.syncScroll';
+let syncScroll = readSyncPref();
+/** 最后一次被用户滚过的那一列（关同步时也记）：重开同步时以它为基准对齐 —— 用户停在哪儿就对齐到哪儿。 */
+let splitLeadPane = null;
+
+/** 读偏好：只有显式的 '0' 算关，其余（含缺失/脏值）都算开。 */
+function readSyncPref() {
+  try { return localStorage.getItem(SYNC_SCROLL_KEY) !== '0'; } catch { return true; }   // 隐私模式读不了 → 默认开
+}
+function persistSyncPref() {
+  try { localStorage.setItem(SYNC_SCROLL_KEY, syncScroll ? '1' : '0'); } catch { /* 隐私模式写不了：本次会话内仍然生效 */ }
+}
+
+/** 开关控件（分屏控件旁）：**只在分屏（模式 B）下可见** —— 模式 A（-dual.pdf 一个 PDF 里并排嵌好）
+ *  与原文/译文视图都只有一个滚动条，本开关没有意义；隐藏而不是留个死控件。 */
+function updateSyncToggle() {
+  const b = $('sync-toggle');
+  if (!b) return;
+  b.style.display = viewMode === 'split' ? '' : 'none';
+  // 状态换图标（与 mode-toggle 的 paged/scroll、zh-toggle 的 translate/spin 同法）：
+  // data-icon 跟着渲染出来的图标走，图标本身由 iconHtml 统一给出（class="ic"、size、aria-hidden）
+  const icon = syncScroll ? 'sync' : 'syncOff';
+  b.dataset.icon = icon;
+  b.innerHTML = iconHtml(icon);
+  b.classList.toggle('active', syncScroll);
+  b.title = syncScroll
+    ? '同步滚动 / Sync scroll：开（两列一起滚，点击关闭）'
+    : '同步滚动 / Sync scroll：关（两列各自独立滚动，点击打开并对齐回当前页）';
+}
+
+/** 唯一写入口（按钮点击 / 设置面板的 storage 事件都走这里）：落持久化 → 刷新控件 → 打开时立刻对齐。 */
+function setSyncScroll(on, { persist = true, realign = true } = {}) {
+  syncScroll = !!on;
+  if (persist) persistSyncPref();
+  updateSyncToggle();
+  if (syncScroll && realign) alignSplit(currentLeadCol());
+}
+
+/** 重开同步时的基准列：用户最后滚过的那一列；没滚过（或那列已不在）就用原文列。 */
+function currentLeadCol() {
+  const cols = splitCols();
+  return cols.find((c) => c.pane === splitLeadPane) || cols[0];
+}
+
+/** 一次性对齐：把**跟随列**滚到基准列当前锚点对应的位置。
+ *  与 onSplitScroll 的区别是**不看 syncScroll** —— 进分屏 / 重渲 / 重开同步都必须先把两列摆到同一页，
+ *  否则用户看到「两列停在不同页」会以为坏了（关同步只关持续联动，不关「一开始就对齐」）。 */
+function alignSplit(src) {
+  if (viewMode !== 'split') return;
+  const other = splitCols().find((c) => c.pane !== src.pane);
+  if (!other) return;
+  const srcPages = columnPages(src.box);
+  const target = syncTargetOf(anchorOf(srcPages, src.pane.scrollTop), columnPages(other.box), srcPages.length);
+  if (!target) return;
+  splitSyncing = true;              // 跟随引起的 scroll 事件在下一帧被守卫吞掉（与 onSplitScroll 同法）
+  crafFn(splitRaf);
+  splitRaf = rafFn(() => {
+    try {
+      other.pane.scrollTop = target.top;
+      if (target.mismatch && !splitWarned) { splitWarned = true; toast('⚠ 中文版页数与原文不一致，按比例同步', 4000); }
+    } finally {
+      splitSyncing = false;
+    }
+  });
+}
+
+/** 分屏控件旁的开关：只在分屏下可见；模式 A / 单列下点不到，也绝不报错。 */
+$('sync-toggle').onclick = () => {
+  if (viewMode !== 'split') return;
+  setSyncScroll(!syncScroll);
+};
+
+/** 设置面板（dsh 设置 → 论文伴读）改了同一个键 → 阅读器立即反映（含重新打开同步时的一次性对齐）。
+ *  只在值真的变了的时候动：storage 只对**其他**文档触发，这里也不回写（不回写就不会回声）。 */
+window.addEventListener('storage', (e) => {
+  if (!e || e.key !== SYNC_SCROLL_KEY) return;
+  const next = e.newValue !== '0';
+  if (next === syncScroll) return;
+  setSyncScroll(next, { persist: false });
+});
+
+/** 滚动同步：主导方 = 用户正在滚的那一列；rAF 节流 + 守卫吞掉回声（§4.2/R7）。
+ *  syncScroll=false 时本函数直接早退 ⇒ 两列各自独立滚动（不节流、也不强行对齐）。 */
 function onSplitScroll(src) {
-  if (viewMode !== 'split' || splitSyncing) return;
+  if (viewMode !== 'split' || splitSyncing || !syncScroll) return;
   const other = splitCols().find((c) => c.pane !== src.pane);
   if (!other) return;
   splitSyncing = true;              // 跟随引起的 scroll 事件被守卫吞掉
   crafFn(splitRaf);
   splitRaf = rafFn(() => {
     try {
+      // 排到这一帧时开关可能已被关掉（用户点了开关、或面板刚同步过来）：在飞的回调也不得再拉列，
+      // 否则「关掉后各自独立」会在下一帧被自己打破（F1 同一族问题）。
+      if (!syncScroll) return;
       const srcPages = columnPages(src.box);
       const a = anchorOf(srcPages, src.pane.scrollTop);
       const t = syncTargetOf(a, columnPages(other.box), srcPages.length);
@@ -1994,6 +2099,36 @@ async function renderColumn(doc, docKey, container, pages, token, scale) {
   }
 }
 
+/** 清空前捕获一列的滚动锚点：优先「页号 + 页内比例」（此刻旧页节点还在，页内几何有效）；
+ *  页节点不可用（并发重渲刚好清空过容器）时退回滚动比例锚点 —— 与 renderAllPages 同口径，
+ *  绝不把锚点归零成「回到第一页」。 */
+function captureScrollAnchor(pane, box) {
+  const pages = columnPages(box);
+  const a = pages.length ? anchorOf(pages, pane.scrollTop) : null;
+  if (a) return a;
+  const range = pane.scrollHeight - pane.clientHeight;
+  return { ratio: range > 0 ? pane.scrollTop / range : 0 };
+}
+
+/** 把一列恢复到自己捕获的锚点：优先「同页号 + 页内比例」（zoom / dppx 前后都落回**同一页**，
+ *  不因页面间 gap/padding 造成的比例漂移而挪页）；该页这次没有（页数变了/节点缺失）时退回滚动比例。 */
+function restoreScrollAnchor(pane, box, anchor) {
+  if (anchor && anchor.page != null) {
+    const p = columnPages(box).find((x) => x.page === anchor.page);
+    if (p) { pane.scrollTop = p.offsetTop + anchor.ratio * p.offsetHeight; return; }
+  }
+  const range = pane.scrollHeight - pane.clientHeight;
+  pane.scrollTop = (anchor && typeof anchor.ratio === 'number' ? anchor.ratio : 0) * Math.max(0, range);
+}
+
+/** 中文列这次重渲前是否有一个「和即将渲染的形态可比」的位置：重渲前的页数必须等于这次要渲染的页数
+ *  （还没渲过 / 页数变了 / 翻页↔滚动切换都不可比 —— 那些情况沿用统一对齐，见 renderSplit 尾注）。 */
+function zhOwnAnchorUsable(box, doc, paged) {
+  const before = columnPages(box).length;
+  if (before === 0) return false;
+  return before === (doc ? (paged ? 1 : doc.numPages) : 0);
+}
+
 /** 分屏全量渲染入口：两列同时渲（滚动=各列全量、翻页=两列同渲 curPage）。 */
 async function renderSplit() {
   if (viewMode !== 'split') return rerender();
@@ -2005,11 +2140,17 @@ async function renderSplit() {
   const origBox = $('pdf-pages'), zhBox = $('pdf-pages-zh');
   const range = pane.scrollHeight - pane.clientHeight;
   const anchorRatio = range > 0 ? pane.scrollTop / range : 0;
+  // F1：清空前**各自**记下两列的锚点（此刻旧页节点还在）。同步关着时两列各回各的 ——
+  // 关掉同步的全部意义就是「两列读不同位置」，zoom / dppx / resize 一下不该把这个意图抹掉。
+  const zhPane = $('pdf-pane-zh');
+  const origAnchor = captureScrollAnchor(pane, origBox);
+  const zhAnchor = captureScrollAnchor(zhPane, zhBox);
+  const paged = pageMode === 'paged';
+  const zhOwn = zhOwnAnchorUsable(zhBox, pdfDocZh, paged);
   origBox.innerHTML = '';
   zhBox.innerHTML = '';
   clearEqGeometry();   // 旧页几何 + 跨列残留的 hover/hit 描边一起作废
   $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
-  const paged = pageMode === 'paged';
   origBox.classList.toggle('paged', paged);
   zhBox.classList.toggle('paged', paged);
   curPage = Math.min(Math.max(1, curPage), pdfDoc.numPages);
@@ -2023,12 +2164,24 @@ async function renderSplit() {
     await renderColumn(pdfDocZh, 'zh', zhBox, zhList, token, scale);
     if (token !== renderToken) return;
   }
-  // 锚点恢复：滚动模式按比例回到原位置，再让中文列跟一次
+  // 锚点恢复：重渲后两列各自回到重渲前的位置。
+  //  · 同步开着 / 刚进分屏（中文列还没有可比的位置）：**既有语义一字不动** —— 原文列按滚动比例回位，
+  //    中文列统一对齐到原文列（「进分屏的一次性对齐不看开关」是评审已裁定必要的行为，保持）；
+  //  · 同步关着且中文列有**同形态**的重渲前位置（F1 修法）：两列各回各的锚点 —— 不能让一次
+  //    zoom / dppx / resize 把「两列读不同位置」的意图抹掉。
   if (!paged) {
-    const newRange = pane.scrollHeight - pane.clientHeight;
-    pane.scrollTop = anchorRatio * Math.max(0, newRange);
-    splitSyncing = false;
-    onSplitScroll(splitCols()[0]);
+    if (syncScroll || !zhOwn) {
+      const newRange = pane.scrollHeight - pane.clientHeight;
+      pane.scrollTop = anchorRatio * Math.max(0, newRange);
+      splitSyncing = false;
+      alignSplit(splitCols()[0]);
+    } else {
+      restoreScrollAnchor(pane, origBox, origAnchor);
+      restoreScrollAnchor(zhPane, zhBox, zhAnchor);
+      splitSyncing = false;
+      crafFn(splitRaf);     // 作废可能在飞的对齐/联动回调：别让它下一帧再把中文列拉回原文列
+      splitRaf = 0;
+    }
   }
   observePages();      // 只观察原文列（#pdf-pages .page 的 id 限定必须保持）
 }
@@ -2079,6 +2232,7 @@ function teardownSplit() {
   $('pdf-pages-zh').classList.remove('paged');
   splitCols().forEach((c) => { c.pane.onscroll = null; });
   splitSyncing = false;
+  splitLeadPane = null;   // 分屏退出：上一轮「最后滚过的那一列」作废（下次进分屏回到原文列为准）
   crafFn(splitRaf);
   if (pdfDocZh) { try { pdfDocZh.destroy?.(); } catch { /* 已释放 */ } }
   pdfDocZh = null;
@@ -2086,7 +2240,10 @@ function teardownSplit() {
 
 /** 两列的滚动监听（各自一个，**不**共用一个滚动容器——R7 明令）。 */
 function attachSplitScroll() {
-  splitCols().forEach((col) => { col.pane.onscroll = () => onSplitScroll(col); });
+  splitCols().forEach((col) => {
+    // 关掉同步时也记「最后滚过的那一列」：重开同步要按它对齐（见 setSyncScroll/currentLeadCol）
+    col.pane.onscroll = () => { splitLeadPane = col.pane; onSplitScroll(col); };
+  });
 }
 
 /* ================= 启动：URL 参数 > localStorage > 第一篇 ================= */

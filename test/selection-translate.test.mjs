@@ -10,6 +10,8 @@
 //   · 提示词逐字节契约、请求体字段集合、公式保全校验、缓存、失败分档
 //   · UI 结构性断言：译文气泡存在且零按钮、.eqLayer 仍 pointer-events:none、
 //     data-doc 作用域（中文列无热区/不污染 EQ_BY_PAGE）、模式切换的存储键
+//   · 分屏「同步滚动」开关（§G）：两处入口互相同步（阅读器 storage 事件 + 设置面板真渲染的组件）、
+//     全局记忆（不按篇、改名不丢）、默认开、关掉后各自独立滚动、重开对齐回当前页、模式 A 不受影响
 //
 // 全部零网络（上游用本机 mock HTTP），不触碰真实文献库（真实样本只**只读**读取）。
 
@@ -774,7 +776,19 @@ function makeEl(tag = 'div') {
     appendChild(c) {
       // DocumentFragment（nodeType 11）appendChild 时展平（真实 DOM 语义；KaTeX 用它建子树）
       if (c && c.nodeType === 11) { for (const k of c.children.slice()) el.appendChild(k); c.children = []; return c }
-      el.children.push(c); el.childNodes.push(c); c.parentNode = el; c.parentElement = el; return c
+      el.children.push(c); el.childNodes.push(c); c.parentNode = el; c.parentElement = el
+      // 可选的「假布局」：测试显式给容器设了 _pageH 时，才给 .page 子节点算 offsetTop/offsetHeight
+      // （真实浏览器里由排版算出来）。不设 = 既有行为（offset 全 0），既有用例不受影响。
+      if (el._pageH && c.className === 'page') {
+        let i = 0
+        for (const ch of el.children) {
+          if (ch.className !== 'page') continue
+          ch.offsetTop = i * el._pageH
+          ch.offsetHeight = el._pageH
+          i += 1
+        }
+      }
+      return c
     },
     append(...cs) { cs.forEach((c) => el.appendChild(c)) },
     remove() { const p = el.parentNode; if (p) { p.children = p.children.filter((x) => x !== el); p.childNodes = p.childNodes.filter((x) => x !== el) } },
@@ -829,8 +843,10 @@ function loadVendoredKatex() {
 }
 const KCTX = loadVendoredKatex()   // UMD 只跑一次；每次 loadReader 把当次的 document 绑给它（KaTeX.render 要建节点）
 
-/** 跑真实 reader 脚本 + 可观测 DOM stub。 */
-function loadReader({ innerWidth = 1200 } = {}) {
+/** 跑真实 reader 脚本 + 可观测 DOM stub。
+ *  `store` 可注入：让「另一篇论文 / 另一个文档」的阅读器实例与上一个**共用同一个 localStorage**
+ *  （storage 事件与全局偏好都靠它复现；默认新建一个空 Map）。 */
+function loadReader({ innerWidth = 1200, store: storeInit = null } = {}) {
   const els = new Map()
   const created = []
   const requests = []
@@ -861,7 +877,7 @@ function loadReader({ innerWidth = 1200 } = {}) {
     dispatch(t, ev) { for (const h of doc._handlers[t] || []) h(ev) },
     documentElement: makeEl('html'),
   }
-  const store = new Map()
+  const store = storeInit || new Map()
   // 划词翻译接口的响应（可被用例改写；`__status` 存在 = 让这次请求失败）。
   // 放在 ctx 上：harness 字符串在 vm 里求值，看不到本函数的闭包变量。
   const ctrl = {
@@ -883,8 +899,26 @@ function loadReader({ innerWidth = 1200 } = {}) {
     // 真实 vendored KaTeX（离线，与浏览器加载的是同一个文件）；渲染路径的用例靠它跑真渲染
     katex: KCTX.katex,
     devicePixelRatio: 1, innerWidth, innerHeight: 900,
-    addEventListener() {}, getSelection: () => null,
-    matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }),
+    // window 上的监听**记录下来**（原先是一律 no-op）：同步滚动靠 `storage` 事件与设置面板互通，
+    // 要能真的派发它。记录是 no-op 的超集，既有用例不受影响。
+    _handlers: {},
+    addEventListener(t, h) { (win._handlers[t] ||= []).push(h) },
+    removeEventListener(t, h) { if (win._handlers[t]) win._handlers[t] = win._handlers[t].filter((x) => x !== h) },
+    dispatch(t, ev) { for (const h of win._handlers[t] || []) h(ev) },
+    getSelection: () => null,
+    // matchMedia 也记录下来（原先一律 no-op）：dppx 变化那条重渲路径靠**真的**触发 mq 的 change
+    // 来复现（watchDpr 每次重建 mq，所以测试取「最后一个」）。记录是 no-op 的超集。
+    _mqs: [],
+    matchMedia(q) {
+      const mq = {
+        media: q, _handlers: {},
+        addEventListener(t, h) { (mq._handlers[t] ||= []).push(h) },
+        removeEventListener(t, h) { if (mq._handlers[t]) mq._handlers[t] = mq._handlers[t].filter((x) => x !== h) },
+        fire(t) { for (const h of mq._handlers[t] || []) h({ matches: true, media: q }) },
+      }
+      win._mqs.push(mq)
+      return mq
+    },
   }
   const ctx = {
     document: doc, window: win, navigator: {}, location: { search: '' },
@@ -952,6 +986,13 @@ function loadReader({ innerWidth = 1200 } = {}) {
       getVariant: () => zhVariant,
       setTrResp: (r) => { ctrl.trResp = r },
       openSplit, getPdfDocZh: () => pdfDocZh,
+      // 同步滚动开关（模式 B）：偏好读写 + 两处同步 + 一次性对齐
+      onSplitScroll, alignSplit, attachSplitScroll, teardownSplit, updateSyncToggle, columnPages,
+      setSyncScroll, getSyncScroll: () => syncScroll, readSyncPref, SYNC_SCROLL_KEY, variantKey,
+      setSplitLead: (p) => { splitLeadPane = p }, getSplitLead: () => splitLeadPane,
+      setSyncing: (v) => { splitSyncing = v }, getSyncing: () => splitSyncing,
+      // F1（t3）：重渲时的两列锚点捕获/恢复 + 「中文列有没有可比的位置」闸门
+      captureScrollAnchor, restoreScrollAnchor, zhOwnAnchorUsable, scrollRafId: () => splitRaf,
       openPaper, invalidateTranslate, getTrBusy: () => trBusy, getTrSeq: () => trSeq,
       splitTranslatedMath, trRenderBody, trComposeNote, showTrPop,
       // F3：把 pdf.js 置成「未就绪」，只有 ensurePdfjs 能把它装上 —— 复现刷新后恢复分屏的时序
@@ -2005,4 +2046,749 @@ test('N-04 RATIO_LO 可达：只有它能拦下的候选（夹具钉住，改 0 
   const ok = alignSelectionToBlock('the beta schedule is warmup', 'the $\\beta$ schedule is warmup')
   assert.equal(ok.applied, 1)
   assert.ok(ok.text.includes('$\\beta$'))
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// G. 分屏「同步滚动」开关（模式 B）：两处入口 / 全局记忆 / 默认开 / 关掉各自滚 / 重开对齐
+//
+// 验收口径（t1 任务书）：开关在「分屏控件旁」与「设置面板」两处且互相同步；记忆**全局**（不按篇）
+// 且改名不丢；**默认开**；关掉后两列各自独立滚动、重开时对齐回当前页；模式 A（babeldoc -dual.pdf
+// 一个 PDF 里并排嵌好、只有一个滚动条）不受影响；不新增会夺走 textLayer 选区 / 干扰 .eqLayer 的监听。
+//
+// 每条新行为都配一条**能区分它**的用例（括号内是把实现改回缺陷态时该用例的表现）：
+//   G1 默认开 / 关掉后确实不再联动（去掉 `!syncScroll` 早退 → 红）
+//   G2 打开后确实重新对齐（删掉 setSyncScroll 里的 alignSplit → 红）
+//   G3 阅读器侧两处同步（删掉 reader 的 storage 监听 → 红）
+//   G3b 两处互相同步的端到端（两个真实现 + 同一个 localStorage，双向；删任一侧监听或改键 → 红）
+//   G4 设置面板侧两处同步（删掉面板的 storage 监听 / 改成别的键 → 红）
+//   G5 两处同一个键 + 同一套编码（缺省/脏值逐值对照；任一侧改语义 → 红）
+//   G6 全局（不按篇）+ 改名不丢（把键改成 dpr.variant.<topic>/<name> → 红）
+//   G7 模式 A 不受影响、开关不可见且不报错（可见性改成恒显 → 红）
+//   G8 结构性红线（#bar 里的 .tbtn、只加一个 window storage 监听、不碰选区/.eqLayer）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 与 reader 的 harness 共用同一个 Map 的 localStorage 实现（含 length/key —— 改名搬家要用）。 */
+function fakeLocalStorage(store) {
+  return {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)) },
+    removeItem: (k) => { store.delete(k) },
+    key: (i) => [...store.keys()][i] ?? null,
+    get length() { return store.size },
+  }
+}
+
+/** 往某一列的 #pdf-pages* 里铺 n 个页节点（offsetTop/offsetHeight 是同步算式的唯一输入）。 */
+function paintColumn(R, boxId, n, { h = 800, startPage = 1 } = {}) {
+  const box = R.doc.getElementById(boxId)
+  box.innerHTML = ''
+  for (let i = 0; i < n; i++) {
+    const d = R.doc.createElement('div')
+    d.className = 'page'
+    d.dataset.page = String(startPage + i)
+    d.offsetTop = i * h
+    d.offsetHeight = h
+    box.appendChild(d)
+  }
+  return box
+}
+
+/** 进入「分屏」态的最小场景：两列各铺若干页 + 挂上各自的滚动监听（不拉真 PDF）。 */
+function enterSplit(R, { n = 5, zhN = 5 } = {}) {
+  R.t.setView('split')
+  R.t.updateViewButtons()          // 与真实路径一致：进分屏先过视图控件状态机（开关可见性/文案在这一处决定）
+  const ob = paintColumn(R, 'pdf-pages', n)
+  const zb = paintColumn(R, 'pdf-pages-zh', zhN)
+  R.t.attachSplitScroll()
+  return { ob, zb, opane: R.doc.getElementById('pdf-pane'), zpane: R.doc.getElementById('pdf-pane-zh') }
+}
+
+const splitAnchor = (R, box, pane) => ({ ...R.t.anchorOf(R.t.columnPages(box), pane.scrollTop) })
+
+test('G1 默认开；关掉（分屏控件旁的开关）后两列各自独立滚动，不再被 rAF 强行对齐', async () => {
+  const R = loadReader()
+  assert.equal(R.t.getSyncScroll(), true, '缺省必须开 —— 等于改造前「两列被 rAF 强行同步」的既有行为')
+  const S = enterSplit(R)
+  // 默认开：滚原文列 → 中文列被 rAF 联动到同页同比例
+  S.opane.scrollTop = 2 * 800 + 400
+  S.opane.onscroll()
+  await TICK()
+  assert.equal(S.zpane.scrollTop, 2 * 800 + 400, '默认开：跟随列必须被联动')
+  assert.equal(R.t.getSplitLead(), S.opane, '主导方 = 用户正在滚的那一列')
+  // 关掉：点分屏控件旁的那个开关
+  R.els.get('sync-toggle').onclick()
+  assert.equal(R.t.getSyncScroll(), false, '点一下必须关掉')
+  assert.equal(R.store.get('dpr.syncScroll'), '0', '必须落持久化（设置面板读的是同一个键）')
+  assert.deepEqual(syncToggleState(R), { icon: 'syncOff', svg: true }, '图标必须跟着状态换成 syncOff（main 的图标集口径）')
+  assert.equal(R.els.get('sync-toggle').classList.contains('active'), false)
+  // 关掉后再滚原文列：中文列一动不动（rAF 联动路径被闸掉）
+  S.zpane.scrollTop = 0
+  S.opane.scrollTop = 4 * 800
+  S.opane.onscroll()
+  await TICK()
+  assert.equal(S.zpane.scrollTop, 0, '关掉后跟随列必须一动不动（不再被强行对齐）')
+  assert.equal(R.t.getSplitLead(), S.opane, '关着的时候仍要记「最后滚过的那一列」（重开对齐要用）')
+  // 反向同样独立：滚中文列不得动原文列
+  S.zpane.scrollTop = 3 * 800 + 100
+  const origBefore = S.opane.scrollTop
+  S.zpane.onscroll()
+  await TICK()
+  assert.equal(S.opane.scrollTop, origBefore, '两列必须各自独立（双向）')
+})
+
+test('G2 重新打开必须对齐回当前页：两列落在同一页同一比例，基准 = 最后滚过的那一列', async () => {
+  // 用户上次关掉了（持久化的关必须被读回）
+  const R = loadReader({ store: new Map([['dpr.syncScroll', '0']]) })
+  assert.equal(R.t.getSyncScroll(), false)
+  const S = enterSplit(R)
+  // 关着的时候两列滚到不同页：原文第 4 页、中文第 1 页
+  S.opane.scrollTop = 3 * 800
+  S.opane.onscroll()
+  await TICK()
+  assert.equal(S.zpane.scrollTop, 0, '关着的时候不许联动')
+  // 打开（分屏控件旁的开关）→ 立即对齐回当前页
+  R.els.get('sync-toggle').onclick()
+  await TICK()
+  assert.equal(R.t.getSyncScroll(), true)
+  assert.equal(S.zpane.scrollTop, 3 * 800, '打开后跟随列必须对齐到当前页（原文第 4 页），不许停在第 1 页')
+  const oa = splitAnchor(R, S.ob, S.opane)
+  const za = splitAnchor(R, S.zb, S.zpane)
+  assert.deepEqual(za, oa, '两列必须落在同一页同一页内比例（否则用户以为坏了）')
+  // 基准 = 最后滚过的那一列：用户在中文列读到第 2 页时重开，原文列要跟过去（而不是把中文列拉回来）
+  R.t.setSyncScroll(false)
+  S.zpane.scrollTop = 1 * 800 + 200
+  S.zpane.onscroll()
+  await TICK()
+  assert.equal(R.t.getSplitLead(), S.zpane)
+  R.t.setSyncScroll(true)
+  await TICK()
+  assert.equal(S.opane.scrollTop, 1 * 800 + 200, '基准必须是「最后滚过的那一列」：原文列跟到中文列当前页')
+  assert.deepEqual(splitAnchor(R, S.ob, S.opane), splitAnchor(R, S.zb, S.zpane))
+  // 页数不同（-zh.pdf 少一页）：按比例映射仍然对齐 + 一次性提示（既有 mismatch 语义不退化）
+  const R2 = loadReader()
+  const S2 = enterSplit(R2, { n: 4, zhN: 3 })
+  S2.opane.scrollTop = 3 * 800
+  R2.t.setSyncScroll(false)
+  R2.t.setSyncScroll(true)
+  await TICK()
+  assert.equal(S2.zpane.scrollTop, 2 * 800, '页数不同按比例映射（第 4/4 页 → 第 3/3 页）')
+  // 刻意保留的行为（设计决定，可被评审挑战）：一次性对齐**不看开关** —— 进分屏/重渲后两列仍落在
+  // 同一页（renderSplit 走的就是 alignSplit）。否则「关着同步打开分屏」会直接停在两页上，
+  // 正是用户说的「会以为坏了」。持续联动（滚动时的 rAF 跟随）才由开关决定（G1 钉住）。
+  const R3 = loadReader({ store: new Map([['dpr.syncScroll', '0']]) })
+  const S3 = enterSplit(R3)
+  S3.zpane.scrollTop = 0
+  S3.opane.scrollTop = 2 * 800 + 400
+  R3.t.alignSplit({ pane: S3.opane, box: S3.ob })
+  await TICK()
+  assert.equal(S3.zpane.scrollTop, 2 * 800 + 400, '一次性对齐与开关无关（进分屏/重渲必须先把两列摆到同一页）')
+  assert.equal(R3.t.getSyncScroll(), false, '一次性对齐不得把开关改掉')
+  // 而持续联动仍然关着（同一次会话里再滚：不动）
+  S3.zpane.scrollTop = 0
+  S3.opane.scrollTop = 4 * 800
+  S3.opane.onscroll()
+  await TICK()
+  assert.equal(S3.zpane.scrollTop, 0, '一次性对齐之后，持续联动仍然是关的')
+})
+
+test('G3 两处开关互相同步（阅读器侧）：设置面板改同一个键 → 阅读器立即跟着变，且不回写不回声', async () => {
+  const R = loadReader()
+  const S = enterSplit(R)
+  assert.deepEqual(syncToggleState(R), { icon: 'sync', svg: true }, '开着 = sync 图标')
+  assert.equal(R.els.get('sync-toggle').style.display, '')     // 分屏下可见（只在分屏下）
+  // 设置面板（另一个文档，同一个 localStorage）关掉 → 阅读器收到 storage 事件
+  R.store.set('dpr.syncScroll', '0')                 // 另一处已经写进去了（这就是 storage 事件的来源）
+  const writes = []
+  const realSet = R.store.set.bind(R.store)
+  R.store.set = (k, v) => { writes.push(k); return realSet(k, v) }
+  R.win.dispatch('storage', { key: 'dpr.syncScroll', newValue: '0' })
+  R.store.set = realSet
+  assert.deepEqual(writes, [], 'storage 事件驱动的那一次不得回写（不回写就不会回声/打架）')
+  assert.equal(R.t.getSyncScroll(), false, '另一处关了 → 阅读器必须立即关')
+  assert.deepEqual(syncToggleState(R), { icon: 'syncOff', svg: true }, '控件状态必须立即反映（图标换到 syncOff）')
+  assert.equal(R.els.get('sync-toggle').classList.contains('active'), false)
+  assert.equal(R.store.get('dpr.syncScroll'), '0', '不得把值改成别的')
+  // 行为立即生效：不再联动
+  S.zpane.scrollTop = 0
+  S.opane.scrollTop = 2 * 800
+  S.opane.onscroll()
+  await TICK()
+  assert.equal(S.zpane.scrollTop, 0, '面板关掉后阅读器必须立刻各自滚')
+  // 面板再打开 → 阅读器立即打开**并对齐回当前页**
+  R.store.set('dpr.syncScroll', '1')
+  R.win.dispatch('storage', { key: 'dpr.syncScroll', newValue: '1' })
+  await TICK()
+  assert.equal(R.t.getSyncScroll(), true)
+  assert.equal(S.zpane.scrollTop, 2 * 800, '面板打开 → 阅读器立即对齐回当前页')
+  // 无关键、同值事件都不得影响
+  R.win.dispatch('storage', { key: 'dpr.pageMode', newValue: '0' })
+  R.win.dispatch('storage', { key: 'dpr.syncScroll', newValue: '1' })
+  assert.equal(R.t.getSyncScroll(), true)
+  // 键被删（newValue = null）→ 回默认「开」
+  R.t.setSyncScroll(false)
+  R.store.delete('dpr.syncScroll')
+  R.win.dispatch('storage', { key: 'dpr.syncScroll', newValue: null })
+  assert.equal(R.t.getSyncScroll(), true, '键被删（null）必须回默认开')
+  // 阅读器里点开关 → 写同一个键（设置面板那一侧靠它读）
+  R.els.get('sync-toggle').onclick()
+  assert.equal(R.store.get('dpr.syncScroll'), '0')
+})
+
+test('G3b 两处互相同步（端到端、两个真实现 + 同一个 localStorage）：阅读器改 → 面板立即反映；面板改 → 阅读器立即反映', async () => {
+  // 一个共享的 localStorage；两侧都是**真实现**：阅读器=真跑 reader 脚本，面板=真跑 client.js 的 apply() 后渲染卡片
+  const store = new Map()
+  const R = loadReader({ store })
+  const S = enterSplit(R)
+  const P = loadSettingsPanel({ store })
+  assert.equal(P.render().input.props.checked, true, '开局两侧都是「开」')
+  // 浏览器的 storage 事件语义：写方之外的每个同源文档都收到 → 这里把「写」与「派发」按方向接起来
+  const pending = []
+  const realSet = store.set.bind(store)
+  store.set = (k, v) => { pending.push([k, String(v)]); return realSet(k, v) }
+  const flushTo = (docWin) => { for (const [k, v] of pending.splice(0)) docWin.dispatch('storage', { key: k, newValue: v }) }
+  // ① 阅读器里点开关（关）→ 面板必须立即跟着取消勾选
+  R.els.get('sync-toggle').onclick()
+  assert.equal(store.get('dpr.syncScroll'), '0', '阅读器必须落持久化')
+  flushTo(P.win)
+  const v1 = P.render()
+  assert.equal(v1.input.props.checked, false, '阅读器改了 → 设置面板必须立即反映')
+  assert.equal(v1.stateKey, 'setSyncScrollOffHint')
+  // ② 面板里勾回来 → 阅读器必须立即跟着打开，并**对齐回当前页**
+  S.zpane.scrollTop = 0
+  S.opane.scrollTop = 3 * 800
+  S.opane.onscroll()
+  await TICK()
+  assert.equal(S.zpane.scrollTop, 0, '此刻还是关着（不联动）')
+  P.render().input.props.onChange({ target: { checked: true } })
+  assert.equal(store.get('dpr.syncScroll'), '1', '面板必须写同一个键')
+  flushTo(R.win)
+  await TICK()
+  assert.equal(R.t.getSyncScroll(), true, '面板改了 → 阅读器必须立即反映')
+  assert.equal(S.zpane.scrollTop, 3 * 800, '面板打开同步 → 阅读器把两列对齐回当前页')
+})
+
+/** 伪 React：只实现本文件渲染要用的那点东西（createElement / Fragment / useState / useEffect / useCallback）。 */
+function makeFakeReact() {
+  const state = []
+  const effects = []
+  let cursor = 0
+  const React = {
+    Fragment: Symbol('dpr-fragment'),
+    createElement(type, props, ...kids) {
+      const children = kids.length === 0 ? undefined : kids.length === 1 ? kids[0] : kids
+      return { type, props: { ...(props || {}), children } }
+    },
+    useState(init) {
+      const i = cursor++
+      if (!(i in state)) state[i] = typeof init === 'function' ? init() : init
+      return [state[i], (v) => { state[i] = typeof v === 'function' ? v(state[i]) : v }]
+    },
+    useEffect(fn) { effects[cursor++] = fn },
+    useCallback(fn) { cursor++; return fn },
+  }
+  return { React, begin() { cursor = 0; effects.length = 0 }, effects }
+}
+
+/** 按 props 递归找节点（**不调用**函数组件，只按属性定位）。 */
+function findNode(node, pred) {
+  if (!node || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const n of node) { const hit = findNode(n, pred); if (hit) return hit }
+    return null
+  }
+  if (pred(node)) return node
+  return findNode(node.props && node.props.children, pred)
+}
+
+/** 收集树里所有字符串子节点（文案断言用）。 */
+function collectStrings(node, out = []) {
+  if (typeof node === 'string') { out.push(node); return out }
+  if (!node || typeof node !== 'object') return out
+  if (Array.isArray(node)) { for (const n of node) collectStrings(n, out); return out }
+  collectStrings(node.props && node.props.children, out)
+  return out
+}
+
+/**
+ * 真跑 `lib/client.js` 的 `apply()`（只 stub 宿主 seam：slots/locale/layout/document/window），
+ * 拿到注册进 `settings.section` 的真组件，再用伪 React 渲染其中的「同步滚动」卡片。
+ * 这样测的是**生产代码本身**（不是 grep 出来的字符串）：面板里有没有这一项、读写的键对不对、
+ * 有没有监听 storage 事件（= 与阅读器互相同步的那一半）。
+ */
+function loadSettingsPanel({ store }) {
+  const { React, begin, effects } = makeFakeReact()
+  let loaded = null
+  const win = {
+    __ModuleLoader__: { load: (m) => { loaded = m } },
+    _handlers: {},
+    addEventListener(t, h) { (win._handlers[t] ||= []).push(h) },
+    removeEventListener(t, h) { if (win._handlers[t]) win._handlers[t] = win._handlers[t].filter((x) => x !== h) },
+    dispatch(t, ev) { for (const h of win._handlers[t] || []) h(ev) },
+  }
+  const registered = []
+  const ctx = {
+    window: win,
+    localStorage: fakeLocalStorage(store),
+    console,
+    document: {
+      getElementById: () => null,
+      createElement: () => ({ style: {}, textContent: '', setAttribute() {}, appendChild() {} }),
+      head: { appendChild() {} },
+      addEventListener() {},
+    },
+  }
+  ctx.globalThis = ctx
+  vm.createContext(ctx)
+  vm.runInContext(readFileSync(join(REPO, 'lib', 'client.js'), 'utf8'), ctx, { filename: 'client-settings-inline.js' })
+  assert.ok(loaded && typeof loaded.factory === 'function', 'client.js 必须通过 __ModuleLoader__.load 注册模块')
+  const mod = loaded.factory((name) => (name === 'react' ? React : { createPortal: () => null }))
+  assert.equal(typeof mod.apply, 'function')
+  mod.apply({
+    effect: (fn) => { fn(); return () => {} },
+    locale: { register: () => {}, bind: () => (k) => k },
+    layout: {}, uiWorkspace: {}, sidebarRight: {}, sidebarRightTabs: { register: () => {} },
+    slots: { inject: (name, fn) => { fn() }, register: (def, comp) => { registered.push({ def, comp }); return () => {} } },
+  })
+  const panel = registered.find((r) => r.def && r.def.name === 'settings.section')
+  assert.ok(panel, '必须有 settings.section 注册（设置 → 论文伴读）')
+  const card = findNode(panel.comp(), (n) => typeof n.type === 'function' && n.type.name === 'SyncScrollCard')
+  assert.ok(card, '设置面板里必须有「同步滚动」这一项（卡片）')
+  let mounted = false
+  const render = () => {
+    begin()
+    const out = card.type(card.props)
+    if (!mounted) { mounted = true; for (const fn of effects) if (typeof fn === 'function') fn() }   // 挂 storage 监听
+    return {
+      out,
+      input: findNode(out, (n) => n.props && 'data-dpr-sync-input' in n.props),
+      stateKey: findNode(out, (n) => n.props && 'data-dpr-sync-state' in n.props)?.props.children,
+      texts: collectStrings(out),
+    }
+  }
+  return { render, win, store }
+}
+
+test('G4 设置面板那一项是真的（真跑组件渲染）：默认勾上、可取消、与阅读器同一键、改了立即反映', () => {
+  const store = new Map()
+  const P = loadSettingsPanel({ store })
+  // ① 面板里确实有这一项（与 MinerU/嵌入同款 settings-card），缺省 = 开（默认开）
+  let v = P.render()
+  assert.equal(v.input.props.type, 'checkbox')
+  assert.equal(v.input.props.checked, true, '缺省必须勾上（默认开）')
+  assert.equal(v.stateKey, 'setSyncScrollOnHint', '缺省状态文案必须是「开」那一句')
+  assert.ok(v.texts.includes('setSyncScrollTitle') && v.texts.includes('setSyncScrollDesc') && v.texts.includes('setSyncScrollLabel'), `卡片文案必须走 i18n：${v.texts.join(' | ')}`)
+  // ② 面板里取消 → 写进阅读器读的那个键
+  v.input.props.onChange({ target: { checked: false } })
+  assert.equal(store.get('dpr.syncScroll'), '0', '面板必须写 dpr.syncScroll（阅读器读的就是它）')
+  v = P.render()
+  assert.equal(v.input.props.checked, false)
+  assert.equal(v.stateKey, 'setSyncScrollOffHint')
+  // ③ 阅读器里点开关（另一个文档写同一个键）→ 面板经 storage 事件**立即**反映
+  store.set('dpr.syncScroll', '1')                       // 模拟 /paper-reader/ iframe 里 setItem
+  P.win.dispatch('storage', { key: 'dpr.syncScroll', newValue: '1' })
+  v = P.render()
+  assert.equal(v.input.props.checked, true, '另一处改了 → 面板必须立即反映（否则两处开关不同步）')
+  assert.equal(v.stateKey, 'setSyncScrollOnHint')
+  // ④ 无关键不影响
+  P.win.dispatch('storage', { key: 'dpr.variant.T/P', newValue: '' })
+  assert.equal(P.render().input.props.checked, true)
+  // ⑤ 重新挂载时读的是当前值（不是硬编码）
+  const P2 = loadSettingsPanel({ store: new Map([['dpr.syncScroll', '0']]) })
+  assert.equal(P2.render().input.props.checked, false, '挂载必须读持久化的当前值')
+})
+
+test('G5 两处读同一个键、同一套编码：缺省/脏值逐值对照，写出去的值也一致', () => {
+  const pure = loadClientSyncPure()
+  assert.equal(pure.key, 'dpr.syncScroll')
+  for (const [raw, want] of [['1', true], ['0', false], [undefined, true], ['', true], ['off', true]]) {
+    const store = new Map()
+    if (raw !== undefined) store.set('dpr.syncScroll', raw)
+    const R = loadReader({ store })
+    assert.equal(R.t.getSyncScroll(), want, `阅读器：${JSON.stringify(raw)} → ${want}`)
+    assert.equal(R.t.SYNC_SCROLL_KEY, 'dpr.syncScroll')
+    assert.equal(pure.fromRaw(raw === undefined ? null : raw), want, `设置面板（lib/client.js 纯函数）：${JSON.stringify(raw)} → ${want}`)
+  }
+  assert.equal(pure.raw(true), '1')
+  assert.equal(pure.raw(false), '0')
+  // 面板写出去的值，阅读器必须读回同一个语义（跨实现往返）
+  for (const on of [true, false]) {
+    const s = new Map([['dpr.syncScroll', pure.raw(on)]])
+    assert.equal(loadReader({ store: s }).t.getSyncScroll(), on, `往返：面板写 ${pure.raw(on)} → 阅读器读回 ${on}`)
+  }
+})
+
+test('G6 全局偏好（不按篇）：两篇论文共用一个值；改名搬家（migrateLsKeys）不会碰它', () => {
+  // ① 论文 A 里关掉
+  const R1 = loadReader()
+  R1.t.setCurrent({ topic: 'T1', name: 'P1' })
+  enterSplit(R1)
+  R1.els.get('sync-toggle').onclick()
+  assert.equal(R1.t.getSyncScroll(), false)
+  // 键里不得有 topic/name（有就是「按篇」了）
+  const syncKeys = [...R1.store.keys()].filter((k) => k.startsWith('dpr.sync'))
+  assert.deepEqual(syncKeys, ['dpr.syncScroll'], `同步滚动的键必须是全局的：${syncKeys.join(', ')}`)
+  // 正对照：视图模式（按篇）的键确实带 topic/name —— 证明「全局 vs 按篇」在本用例下可区分
+  assert.match(R1.t.variantKey('T1', 'P1'), /^dpr\.variant\.T1\/P1$/)
+  assert.notEqual(R1.t.variantKey('T1', 'P1'), R1.t.variantKey('T2', 'P2'))
+  // ② 换一篇论文（另一个阅读器文档，共享同一个 localStorage）→ 偏好不被重置
+  const R2 = loadReader({ store: R1.store })
+  R2.t.setCurrent({ topic: 'T2', name: 'P2' })
+  assert.equal(R2.t.getSyncScroll(), false, '换一篇论文后偏好不得被重置（全局）')
+  assert.equal(R2.store.get(R2.t.variantKey('T2', 'P2')) ?? null, null, '正对照：视图模式是按篇的（换论文不会有值）')
+  // ③ 在论文 B 里改成开 → 回到论文 A 依然是同一个值（全局共用一个值）
+  R2.t.setSyncScroll(true)
+  assert.equal(loadReader({ store: R1.store }).t.getSyncScroll(), true)
+  // ④ 改名搬家：真跑 lib/client.js 的 migrateLsKeys —— 只搬 dpr.variant./dpr.sessionN. 两个前缀，
+  //    全局键原样保留（论文改名、专题改名都不丢偏好）
+  const migrate = loadMigrateLsKeys(R1.store)
+  R1.store.set('dpr.variant.T1/P1', 'split')
+  R1.store.set('dpr.sessionN.T1/P1', '3')
+  migrate('T1', 'T2', 'P1', 'P2')
+  assert.equal(R1.store.get('dpr.syncScroll'), '1', '论文改名不得丢全局偏好')
+  assert.equal(R1.store.get('dpr.variant.T2/P2'), 'split', '既有按篇键照常搬家（正对照）')
+  assert.equal(R1.store.get('dpr.sessionN.T2/P2'), '3')
+  migrate('T2', 'T3', null, null)
+  assert.equal(R1.store.get('dpr.syncScroll'), '1', '专题改名不得丢全局偏好')
+  assert.equal(R1.store.get('dpr.variant.T3/P2'), 'split')
+  assert.equal(R1.store.get('dpr.sessionN.T3/P2'), '3')
+})
+
+test('G7 只涉及模式 B：模式 A/原文/译文下开关不可见、点不到、不报错，滚动完全不受影响', () => {
+  const R = loadReader()
+  R.t.setZhState({ zh: true, dual: true, busy: false })
+  // 模式 A（-dual.pdf：一个 PDF 里并排嵌好，只有一个滚动条）
+  R.t.setView('dual')
+  R.t.updateViewButtons()
+  assert.equal(R.els.get('sync-toggle').style.display, 'none', '模式 A 下开关必须不可见')
+  R.els.get('sync-toggle').onclick()                       // 点它：不得报错
+  assert.equal(R.t.getSyncScroll(), true)
+  assert.equal(R.store.has('dpr.syncScroll'), false, '模式 A 下点开关不得写任何偏好')
+  // 双列不存在时两个分屏入口都不得抛，也不得去动中文列
+  const src = { pane: R.doc.getElementById('pdf-pane'), box: R.doc.getElementById('pdf-pages') }
+  R.t.onSplitScroll(src)
+  R.t.alignSplit(src)
+  assert.equal(R.doc.getElementById('pdf-pane-zh').scrollTop, 0, '模式 A 不得被分屏逻辑碰到')
+  // 原文 / 译文视图同样不可见，只有分屏才出现
+  R.t.setView('zh'); R.t.updateViewButtons()
+  assert.equal(R.els.get('sync-toggle').style.display, 'none')
+  R.t.setView('orig'); R.t.updateViewButtons()
+  assert.equal(R.els.get('sync-toggle').style.display, 'none')
+  R.t.setView('split'); R.t.updateViewButtons()
+  assert.equal(R.els.get('sync-toggle').style.display, '', '只有分屏（模式 B）下才可见')
+  // 退出分屏：监听拆掉、主导列作废（再进分屏回到原文列为基准）
+  R.t.setSplitLead(R.doc.getElementById('pdf-pane-zh'))
+  R.t.teardownSplit()
+  assert.equal(R.t.getSplitLead(), null)
+  assert.equal(R.doc.getElementById('pdf-pane').onscroll, null)
+  assert.equal(R.doc.getElementById('pdf-pane-zh').onscroll, null)
+})
+
+test('G8 结构性红线：开关在 #bar 里（覆盖不到选区）、只加一个 window storage 监听、不碰 textLayer/.eqLayer', () => {
+  // ① 分屏控件旁的一个小按钮：同款 .tbtn、有 title（中文 + 英文），紧跟在 #split-toggle 后面
+  const html = READER_HTML
+  const btn = html.match(/<button id="sync-toggle"[^>]*>([^<]*)<\/button>/)
+  assert.ok(btn, '#sync-toggle 必须是 <button>')
+  assert.match(btn[0], /class="tbtn"/, '必须与既有模式切换控件同风格（.tbtn）')
+  // main 的 5fdc51d 把顶栏统一成 inline SVG 图标集：状态用图标表达，所以这里钉「同一套 data-icon 口径」
+  // （图标由 iconHtml 注入，class="ic" + aria-hidden，与其它图标按钮逐字同款），而不是塞回文字标签。
+  assert.match(btn[0], /data-icon="sync"/, '必须走 main 的图标集（data-icon，图标由 iconHtml 注入）')
+  const title = btn[0].match(/title="([^"]+)"/)?.[1] ?? ''
+  assert.ok(title.length > 0, '必须有 title（无文字标签时 title 就是可访问名）')
+  assert.match(title, /同步滚动/, 'zh 文案必须在 title 里')
+  assert.match(title, /Sync scroll/, 'en 文案必须在 title 里')
+  assert.ok(!/[↻⤓▣≣⚙＋−∑‹›]/.test(btn[0]), '不得引入 Unicode 字形（main 刚统一掉的旧样式）')
+  const splitAt = html.indexOf('<button id="split-toggle"')
+  const syncAt = html.indexOf('<button id="sync-toggle"')
+  assert.ok(splitAt >= 0 && syncAt > splitAt, '开关必须在分屏控件旁（紧跟其后）')
+  assert.ok(!html.slice(splitAt, syncAt).includes('<div'), '中间不得插入别的元素（就在分屏控件旁）')
+  assert.ok(syncAt < html.indexOf('<div id="main">'), '必须在顶栏 #bar 里，绝不覆盖 PDF 区（否则夺走 textLayer 拖拽选区）')
+  // ② 新增的这段代码只加**一个**事件监听，且是 window 的 storage（不做任何鼠标/键盘拦截）
+  const block = SCRIPT_SRC.slice(SCRIPT_SRC.indexOf('const SYNC_SCROLL_KEY'), SCRIPT_SRC.indexOf('/** 滚动同步：主导方'))
+  assert.ok(block.length > 200, '同步滚动代码块必须被取到（否则本守卫是空转）')
+  assert.equal((block.match(/addEventListener\(/g) ?? []).length, 1, '只允许一个监听（storage）')
+  assert.match(block, /window\.addEventListener\('storage'/, '那一个监听必须是 window 的 storage（两处同步的唯一通道）')
+  for (const bad of [/document\.addEventListener/, /mouse(up|down)/, /pointer(down|up|move)/, /selectstart/, /dragstart/, /keydown/, /preventDefault/, /stopPropagation/, /textLayer/, /eqLayer/]) {
+    assert.ok(!bad.test(block), `同步滚动不得碰这些东西（会砸掉选区/热区红线）：${bad}`)
+  }
+  // ③ 全脚本里 'storage' 监听恰好一处（不得在别处再挂一份，回声/双写会打架）
+  assert.equal((SCRIPT_SRC.match(/addEventListener\('storage'/g) ?? []).length, 1)
+  // ④ 既有红线复述（一条都不许放宽）：.eqLayer 仍 pointer-events:none；热区层仍不绑事件
+  assert.match(html, /\.eqLayer\s*\{[^}]*pointer-events:\s*none/)
+  assert.ok(!/\.eqLayer[^\n]*addEventListener|eq-box[^\n]*addEventListener/.test(SCRIPT_SRC))
+  // ⑤ 分屏两列仍是各自的滚动监听（R7：不共用滚动容器）
+  const attach = SCRIPT_SRC.slice(SCRIPT_SRC.indexOf('function attachSplitScroll'), SCRIPT_SRC.indexOf('/* ================= 启动'))
+  assert.match(attach, /col\.pane\.onscroll\s*=/, '两列各自 onscroll（不共用容器）')
+  assert.ok(!/addEventListener\('scroll'/.test(attach), '不得改成共用的 scroll 监听')
+  // ⑥ 本功能的两侧 i18n 文案 zh/en 都要有（新增键不得只写一半；F1 另有全量对齐守卫）
+  const client = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
+  const zhDict = client.match(/const zh = \{([\s\S]*?)\n    \}/)?.[1] ?? ''
+  const enDict = client.match(/const en = \{([\s\S]*?)\n    \}/)?.[1] ?? ''
+  for (const k of ['setSyncScrollTitle', 'setSyncScrollDesc', 'setSyncScrollLabel', 'setSyncScrollOnHint', 'setSyncScrollOffHint']) {
+    assert.match(zhDict, new RegExp(`${k}: '[^']+'`), `zh 缺文案：${k}`)
+    assert.match(enDict, new RegExp(`${k}: '[^']+'`), `en 缺文案：${k}`)
+  }
+  assert.ok(!new RegExp('t\\(\'setSyncScroll\\w+\'\\)').test(zhDict), 'i18n 文案字典里不得出现 t() 调用')
+  // ⑦ 本文件新增的用例不得有未说明的 skip
+  const mine = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const gSection = mine.slice(mine.indexOf('// G. 分屏「同步滚动」开关'))
+  assert.ok(!/\.skip\(/.test(gSection), '新增用例不得有 skip')
+})
+
+/** 执行 lib/client.js 顶层，取「同步滚动」的纯函数（与 reader 的读写必须逐字同义）。 */
+let CLIENT_SYNC_PURE = null
+function loadClientSyncPure() {
+  if (CLIENT_SYNC_PURE) return CLIENT_SYNC_PURE
+  let loaded = null
+  const ctx = { window: { __ModuleLoader__: { load: (m) => { loaded = m } } }, console }
+  vm.createContext(ctx)
+  vm.runInContext(
+    readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
+      + "\n;globalThis.__dprSyncPure = { key: DPR_SYNC_SCROLL_KEY, fromRaw: dprSyncScrollFromRaw, raw: dprSyncScrollRaw };",
+    ctx, { filename: 'client-sync-inline.js' },
+  )
+  assert.ok(loaded && typeof loaded.factory === 'function', 'client.js 必须通过 __ModuleLoader__.load 注册模块')
+  assert.equal(typeof ctx.__dprSyncPure?.fromRaw, 'function', 'client.js 顶层必须有 dprSyncScrollFromRaw')
+  CLIENT_SYNC_PURE = ctx.__dprSyncPure
+  return CLIENT_SYNC_PURE
+}
+
+/** 取 `src[at]`（一个 `{`）起的配对代码块原文（跳过字符串/注释，避免被文案里的括号骗到）。 */
+function braceBlock(src, at) {
+  assert.equal(src[at], '{', 'braceBlock 必须从 { 开始')
+  let depth = 0
+  let i = at
+  let kind = 'code'
+  while (i < src.length) {
+    const c = src[i]
+    const n = src[i + 1]
+    if (kind === 'code') {
+      if (c === '/' && n === '/') { kind = 'line'; i += 2; continue }
+      if (c === '/' && n === '*') { kind = 'block'; i += 2; continue }
+      if (c === '"' || c === "'" || c === '`') { kind = c; i += 1; continue }
+      if (c === '{') depth += 1
+      else if (c === '}') { depth -= 1; if (depth === 0) return src.slice(at, i + 1) }
+    } else if (kind === 'line') {
+      if (c === '\n') kind = 'code'
+    } else if (kind === 'block') {
+      if (c === '*' && n === '/') { kind = 'code'; i += 2; continue }
+    } else {
+      if (c === '\\') { i += 2; continue }
+      if (c === kind) kind = 'code'
+    }
+    i += 1
+  }
+  throw new Error('braceBlock: 代码块没有闭合')
+}
+
+/** 真跑 lib/client.js 里的 `migrateLsKeys`（改名搬家的唯一实现），在给定的 localStorage 上执行。 */
+function loadMigrateLsKeys(store) {
+  const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
+  const at = src.search(/function\s+migrateLsKeys\s*\(/)
+  assert.ok(at >= 0, 'lib/client.js 里必须有 migrateLsKeys（改名搬家的唯一实现）')
+  const ctx = { localStorage: fakeLocalStorage(store), JSON, console }
+  const braceAt = src.indexOf('{', at)
+  const decl = src.slice(at, braceAt) + braceBlock(src, braceAt)   // function 头 + 配对代码块
+  vm.createContext(ctx)
+  vm.runInContext(
+    decl + '\n;globalThis.__migrate = migrateLsKeys;',
+    ctx, { filename: 'migrate-inline.js' },
+  )
+  assert.equal(typeof ctx.__migrate, 'function', 'migrateLsKeys 必须能被取到（否则本用例是空转）')
+  return ctx.__migrate
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H. F1 修（t3）：同步关着时，重渲必须**各自**保住两列的阅读位置
+//
+// 评审 F1 的复现口径：同步关、orig{page2, ratio0.886} / zh{page1, ratio0.501} → 触发一次重渲
+// （zoom / dppx / resize→fitToWidth，三条日常路径都收敛到 renderSplit）→ 中文列的位置被丢弃
+// （两列一起被拉到同一页）。修法：清空前各自记锚点，开关关着时各回各的；开着时行为不变。
+//   H1 #zoom-in/#zoom-out（把修法改回缺陷态 → 红）
+//   H2 resize→fitToWidth（同上 → 红）
+//   H3 dppx（mq change）（同上 → 红）
+//   H4 同步**开着** + zoom 仍统一对齐（把修法套到开着的情形 → 红）
+//   H5 已裁定语义：进分屏一次性对齐不看开关 + paged↔scroll 不可比时统一对齐（闸门放宽 → 红）
+//   H6 关掉后，**在飞的**联动回调不得再拉列（去掉 rAF 体内的开关判定 → 红）
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PAGE_H = 800
+
+/** F1 场景：真跑 renderSplit 的「分屏」+ 两列的真实页几何（假布局 _pageH：每页 800px）。
+ *  滚动范围按「页数 × 页高」给（真实浏览器里由排版算出来）。 */
+async function splitScene({ n = 5, zhN = 5, sync = false, scale = 1.5 } = {}) {
+  const R = loadReader({ store: new Map([['dpr.syncScroll', sync ? '1' : '0']]) })
+  R.t.setView('split')
+  R.t.updateViewButtons()
+  R.t.setPageMode('scroll')
+  R.t.setZoom(scale)
+  R.t.setPdfDoc(docStub(n))
+  R.t.setPdfDocZh(docStub(zhN))
+  const ob = R.doc.getElementById('pdf-pages')
+  const zb = R.doc.getElementById('pdf-pages-zh')
+  ob._pageH = PAGE_H
+  zb._pageH = PAGE_H
+  const opane = R.doc.getElementById('pdf-pane')
+  const zpane = R.doc.getElementById('pdf-pane-zh')
+  opane.clientHeight = PAGE_H
+  zpane.clientHeight = PAGE_H
+  await R.t.renderSplit()          // 进分屏首渲（与 openSplit 同一个入口；中文列这时还没有位置可比）
+  opane.scrollHeight = n * PAGE_H  // 假布局不产出 scrollHeight，按页数给一个口径一致的值
+  zpane.scrollHeight = zhN * PAGE_H
+  R.t.attachSplitScroll()          // 与 openSplit 一致：两列各自挂滚动监听
+  await TICK()                     // 等首渲的「一次性对齐」（rAF）落地：否则 splitSyncing 还挂着 true
+  return { R, ob, zb, opane, zpane }
+}
+
+/** 同步开关的可见状态：main 的图标集下由「图标 + active + title」表达（没有文字标签）。
+ *  icon = 按钮的 data-icon（updateSyncToggle 跟着渲染出来的图标走）；svg = iconHtml 真的注入了 svg。 */
+const syncToggleState = (R) => {
+  const b = R.els.get('sync-toggle')
+  return { icon: b.dataset.icon, svg: /<svg class="ic"/.test(b.innerHTML) }
+}
+
+/** 锚点 = 「顶部页号 + 页内比例」（评审 F1 的测量口径）。 */
+function anchorAt(R, box, pane) { return { ...R.t.anchorOf(R.t.columnPages(box), pane.scrollTop) } }
+const roundAnchor = (a) => ({ page: a.page, ratio: Math.round(a.ratio * 1000) / 1000 })
+
+/** 把两列摆成「读不同位置」——F1 复现用的那组值（原文第 2 页 0.886 / 中文第 1 页 0.501）。 */
+function divergeColumns(S, { origPage = 2, origRatio = 0.886, zhPage = 1, zhRatio = 0.501 } = {}) {
+  S.opane.scrollTop = (origPage - 1) * PAGE_H + origRatio * PAGE_H
+  S.zpane.scrollTop = (zhPage - 1) * PAGE_H + zhRatio * PAGE_H
+  return { orig: anchorAt(S.R, S.ob, S.opane), zh: anchorAt(S.R, S.zb, S.zpane) }
+}
+
+test('H1 【F1】同步关 + #zoom-in/#zoom-out：两列各自保住阅读位置（中文列不再被拉走）', async () => {
+  const S = await splitScene({ sync: false })
+  assert.equal(S.R.t.getSyncScroll(), false)
+  const before = divergeColumns(S)
+  assert.deepEqual(roundAnchor(before.orig), { page: 2, ratio: 0.886 }, '前置：原文列在第 2 页 0.886（评审那组实测值）')
+  assert.deepEqual(roundAnchor(before.zh), { page: 1, ratio: 0.501 }, '前置：中文列在第 1 页 0.501')
+  // 真回调：#zoom-in → exitFitMode() + setZoom(+0.25) → rerender() → renderSplit()
+  S.R.els.get('zoom-in').onclick()
+  await TICK()
+  assert.deepEqual(anchorAt(S.R, S.ob, S.opane), before.orig, '同步关：原文列必须回到自己的位置')
+  assert.deepEqual(anchorAt(S.R, S.zb, S.zpane), before.zh, '同步关：中文列必须保住自己的位置（F1 的复现点）')
+  assert.notDeepEqual(anchorAt(S.R, S.zb, S.zpane), anchorAt(S.R, S.ob, S.opane), '两列不得被拉到同一页')
+  // 反向缩放同样各回各的
+  S.R.els.get('zoom-out').onclick()
+  await TICK()
+  assert.deepEqual(anchorAt(S.R, S.ob, S.opane), before.orig)
+  assert.deepEqual(anchorAt(S.R, S.zb, S.zpane), before.zh)
+  assert.equal(S.R.t.getSyncScroll(), false, '缩放不得改开关')
+})
+
+test('H2 【F1】同步关 + resize→fitToWidth：两列各自保住阅读位置', async () => {
+  const S = await splitScene({ sync: false })
+  // 真实 resize 路径的前置条件：fitMode = true（点击「适宽」就是把它置真；分屏下 fitMode 本来就是真）
+  S.R.els.get('zoom-fit').onclick()
+  await TICK()
+  const before = divergeColumns(S, { origPage: 3, origRatio: 0.25, zhPage: 2, zhRatio: 0.75 })
+  assert.deepEqual(roundAnchor(before.orig), { page: 3, ratio: 0.25 })
+  assert.deepEqual(roundAnchor(before.zh), { page: 2, ratio: 0.75 })
+  // 真回调：window resize → fitMode ⇒ fitToWidth() → setZoom → rerender() → renderSplit()
+  S.R.win.dispatch('resize')
+  await TICK()
+  assert.deepEqual(anchorAt(S.R, S.ob, S.opane), before.orig, 'resize：原文列回到自己的位置')
+  assert.deepEqual(anchorAt(S.R, S.zb, S.zpane), before.zh, 'resize：中文列必须保住自己的位置')
+})
+
+test('H3 【F1】同步关 + dppx（设备像素比）变化：两列各自保住阅读位置', async () => {
+  const S = await splitScene({ sync: false })
+  const before = divergeColumns(S)
+  const mqsBefore = S.R.win._mqs.length
+  // 真回调：watchDpr 的 matchMedia change → dpr = window.devicePixelRatio → rerender() → renderSplit()
+  S.R.win.devicePixelRatio = 2
+  S.R.win._mqs.at(-1).fire('change')
+  await TICK()
+  assert.deepEqual(anchorAt(S.R, S.ob, S.opane), before.orig, 'dppx：原文列回到自己的位置')
+  assert.deepEqual(anchorAt(S.R, S.zb, S.zpane), before.zh, 'dppx：中文列必须保住自己的位置')
+  assert.equal(S.R.win._mqs.length, mqsBefore + 1, 'watchDpr 必须在 change 后重建 mq（否则下一次 dpr 变化追不上）')
+})
+
+test('H4 【防回归】同步开着 + zoom：仍然统一对齐（既有语义不变，不得各回各的）', async () => {
+  const S = await splitScene({ sync: true })
+  assert.equal(S.R.t.getSyncScroll(), true)
+  const before = divergeColumns(S)
+  S.R.els.get('zoom-in').onclick()
+  await TICK()
+  const oa = anchorAt(S.R, S.ob, S.opane)
+  const za = anchorAt(S.R, S.zb, S.zpane)
+  assert.deepEqual(oa, before.orig, '同步开着：原文列仍是自己的位置（既有语义）')
+  assert.deepEqual(za, oa, '同步开着：中文列必须与原文列统一对齐（不得各回各的）')
+  assert.notDeepEqual(za, before.zh, '同步开着：中文列不该停在自己那个旧位置（否则等于把开关偷偷关了）')
+})
+
+test('H5 【已裁定语义】进分屏的一次性对齐不看开关；paged↔scroll 形态变化时仍统一对齐', async () => {
+  // ① 「刚进分屏」（中文列还没有可比的位置：openSplit → renderSplit 时 zh 列是空的）：
+  //    即使同步关着，也必须先把两列摆到同一页 —— t2 评审已裁定这条必要，本修法不得动它。
+  const S = await splitScene({ sync: false })
+  S.opane.scrollTop = 2 * PAGE_H          // 原文列停在第 3 页
+  S.zb.innerHTML = ''                     // 中文列清空 = 「还没有自己的位置」（等价于刚进分屏）
+  await S.R.t.renderSplit()
+  await TICK()                            // 统一对齐走 rAF（alignSplit），等它落地
+  assert.deepEqual(anchorAt(S.R, S.zb, S.zpane), anchorAt(S.R, S.ob, S.opane),
+    '刚进分屏：中文列必须先对齐到原文列（一次性对齐不看开关）')
+  assert.equal(S.R.t.getSyncScroll(), false, '一次性对齐不得改开关')
+  // ② 形态变化（翻页 → 滚动）：重渲前中文列只有 1 页，与这次要渲的 5 页不可比 ⇒ 沿用统一对齐
+  //    （否则「关着同步从翻页切回滚动」会留下两列停在不同页的表象）。两列在单页内先摆成不同的位置，
+  //    这样「统一对齐」与「各回各的」才可区分。
+  S.R.t.setPageMode('paged')
+  S.R.t.setCurPage(2)
+  await S.R.t.renderSplit()
+  assert.equal(S.R.t.columnPages(S.zb).length, 1, '翻页模式两列各 1 页')
+  S.zpane.scrollHeight = PAGE_H
+  S.opane.scrollTop = 0.375 * PAGE_H      // 原文列：这一页滚到 37.5%
+  S.zpane.scrollTop = 0                   // 中文列：这一页顶部（两列位置不同）
+  S.R.t.setPageMode('scroll')
+  await S.R.t.renderSplit()
+  await TICK()                            // 同上：统一对齐是 rAF 的
+  const oa = anchorAt(S.R, S.ob, S.opane)
+  assert.deepEqual(roundAnchor(oa), { page: 1, ratio: 0.375 }, '原文列按滚动比例回位（既有口径）')
+  assert.deepEqual(anchorAt(S.R, S.zb, S.zpane), oa,
+    'paged→scroll：形态不可比 ⇒ 仍统一对齐到原文列（不得各回各的、停在两页上）')
+})
+
+test('H6 【同一族】关掉同步后，在飞的联动回调不得再把中文列拉走', async () => {
+  const S = await splitScene({ sync: true })
+  S.zpane.scrollTop = 0
+  S.opane.scrollTop = 2 * PAGE_H
+  S.opane.onscroll()                      // 用户滚原文列：排了一个 rAF 跟随回调
+  S.R.t.setSyncScroll(false)              // 同一帧内关掉（按钮点击/面板同步都走这一条）
+  await TICK()                            // 排队的回调在这一帧执行
+  assert.equal(S.zpane.scrollTop, 0, '关掉后，在飞的回调也不得再拉列（否则「各自独立」在下一帧被自己打破）')
+  assert.equal(S.R.t.getSyncScroll(), false)
+})
+
+test('H7 锚点捕获/恢复的保真度：几何变了（页高缩放）也必须回到**同一页**，不按比例漂移', () => {
+  const R = loadReader()
+  const box = R.doc.getElementById('pdf-pages')
+  const pane = R.doc.getElementById('pdf-pane')
+  pane.clientHeight = 800
+  // 重渲前：5 页 × 800px，原文列在第 3 页 0.886
+  const paint = (h) => {
+    box.innerHTML = ''
+    for (let i = 0; i < 5; i++) {
+      const d = R.doc.createElement('div')
+      d.className = 'page'
+      d.dataset.page = String(i + 1)
+      d.offsetTop = i * h
+      d.offsetHeight = h
+      box.appendChild(d)
+    }
+    pane.scrollHeight = 5 * h
+  }
+  paint(800)
+  pane.scrollTop = 2 * 800 + 0.886 * 800
+  const a = R.t.captureScrollAnchor(pane, box)
+  assert.deepEqual(roundAnchor(a), { page: 3, ratio: 0.886 }, '捕获必须是「页号 + 页内比例」')
+  // 缩放后（页高变大、滚动范围随之变化）：恢复必须落在同一页同一比例
+  paint(933)
+  R.t.restoreScrollAnchor(pane, box, a)
+  assert.deepEqual(roundAnchor(R.t.anchorOf(R.t.columnPages(box), pane.scrollTop)), { page: 3, ratio: 0.886 },
+    '几何变化后必须回到同一页（纯按比例回位会漂到别的页）')
+  // 页节点不可用时退回滚动比例锚点（并发重渲刚好清空过容器）：绝不把锚点归零成「回到第一页」
+  const box2 = R.doc.getElementById('pdf-pages-zh')
+  const empty = R.t.captureScrollAnchor(pane, box2)
+  assert.equal(empty.page, undefined, '空容器只能给比例锚点')
+  assert.ok(empty.ratio > 0, `空容器也要保住比例（不得归零）：${JSON.stringify(empty)}`)
 })
