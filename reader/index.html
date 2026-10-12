@@ -24,11 +24,16 @@
   #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 6px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex: none; }
   #bar button { font: inherit; }
   /* flex:none —— 列被拖窄时按钮不许被压缩（否则文字竖排、按钮变窄条） */
-  .tbtn { flex: none; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
+  /* inline-flex + 固定高：图标/文字统一垂直居中，按钮高度不再随各家字体字形漂移 */
+  .tbtn { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 28px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
   .tbtn:hover { background: var(--bg); }
   .tbtn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .tbtn:disabled { opacity: .45; cursor: default; }
-  #zh-toggle { font-weight: 700; }
+  /* 统一 SVG 图标：stroke=currentColor，active/disabled 的变色自动继承到图标 */
+  .tbtn svg.ic { width: 16px; height: 16px; flex: none; }
+  .tbtn svg.spin { transform-origin: center; animation: dpr-spin 1s linear infinite; }
+  @keyframes dpr-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .tbtn svg.spin { animation-duration: 2.4s; } }
   #zoom-label { flex: none; min-width: 44px; text-align: center; color: var(--text-2); }
   #bar .spacer { flex: 1; }
   /* min-width:0 —— flex 项默认 min-width:auto 会拒绝收缩，空间不够时转而去挤按钮；
@@ -52,7 +57,9 @@
 
   /* ---------- 翻页控件 ---------- */
   #pager { display: flex; align-items: center; gap: 4px; flex: none; }
-  #page-input { width: 3.5em; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px; text-align: right; }
+  /* 数字居中：text-align:right 会让单页码贴右框边、左侧空一块；
+     上 padding 多 1px —— 数字无下伸部，光字心本就偏高，对称内边距看起来反而偏上 */
+  #page-input { width: 3.5em; padding: 4px 6px 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px; line-height: 20px; text-align: center; }
   #page-total { flex: none; color: var(--text-2); font-size: 12px; white-space: nowrap; }
   /* 插件版本号（host 注入；未被替换时隐藏——比如旧 host 配新页面的错位场景） */
   #ver { flex: none; font-size: 10.5px; color: var(--text-2); opacity: .65; user-select: none; }
@@ -143,23 +150,23 @@
 <div id="bar">
   <span id="status">论文伴读</span>
   <button id="pdf-path" style="display:none" title="点击复制文件路径"></button>
-  <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none">中</button>
-  <button id="zh-regen" class="tbtn" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none">↻</button>
-  <button id="dl-btn" class="tbtn" title="下载 PDF" style="display:none">⤓</button>
+  <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none" data-icon="translate"></button>
+  <button id="zh-regen" class="tbtn" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none" data-icon="regen"></button>
+  <button id="dl-btn" class="tbtn" title="下载 PDF" style="display:none" data-icon="download"></button>
   <span class="spacer"></span>
-  <button id="mode-toggle" class="tbtn" title="切换 滚动/翻页模式" style="display:none">▣</button>
+  <button id="mode-toggle" class="tbtn" title="切换 滚动/翻页模式" style="display:none" data-icon="paged"></button>
   <span id="pager" style="display:none">
-    <button id="page-prev" class="tbtn" title="上一页">‹</button>
+    <button id="page-prev" class="tbtn" title="上一页" data-icon="prev"></button>
     <input id="page-input" type="text" inputmode="numeric" title="页码，回车跳转">
     <span id="page-total">/ ?</span>
-    <button id="page-next" class="tbtn" title="下一页">›</button>
+    <button id="page-next" class="tbtn" title="下一页" data-icon="next"></button>
   </span>
-  <button id="cfg-open" class="tbtn" title="翻译端点设置">⚙</button>
-  <button id="zoom-out" class="tbtn">−</button>
+  <button id="cfg-open" class="tbtn" title="翻译端点设置" data-icon="settings"></button>
+  <button id="zoom-out" class="tbtn" title="缩小" data-icon="minus"></button>
   <span id="zoom-label">100%</span>
-  <button id="zoom-in" class="tbtn">＋</button>
+  <button id="zoom-in" class="tbtn" title="放大" data-icon="plus"></button>
   <button id="zoom-fit" class="tbtn">适宽</button>
-  <button id="eq-toggle" class="tbtn" title="公式引用（MinerU LaTeX）">∑ 公式</button>
+  <button id="eq-toggle" class="tbtn" title="公式引用（MinerU LaTeX）" data-icon="sigma">公式</button>
   <span id="ver" title="插件版本">__DPR_VERSION__</span>
 </div>
 
@@ -211,6 +218,25 @@
 'use strict';
 /* ================= 基础 ================= */
 const $ = (id) => document.getElementById(id);
+/* 顶栏图标：统一的 24×24 描边图标集（stroke=currentColor，active/disabled 变色自动跟随按钮）。
+   曾经混用 Unicode 字符（↻/⤓/▣/⚙/＋…）——各自渲染自不同字体，粗细、大小、基线互不一致。 */
+const ICONS = {
+  translate: '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/>',
+  regen: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+  paged: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
+  scroll: '<path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
+  prev: '<path d="m15 18-6-6 6-6"/>',
+  next: '<path d="m9 18 6-6-6-6"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  minus: '<path d="M5 12h14"/>',
+  plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  sigma: '<path d="M18 7V5H6l6 7-6 7h12v-2"/>',
+  spin: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+};
+const iconHtml = (name) => `<svg class="ic${name === 'spin' ? ' spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+// 静态按钮按 data-icon 注入一次；动态按钮（翻译/重翻/模式切换）在状态变化时用同一函数换图标
+document.querySelectorAll('#bar [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
 const api = (p, opts) => fetch('/paper-reader/api' + p, opts).then(async (r) => {
   if (!r.ok) {
     // 服务端错误体有两种：{error}（参数/权限）与 {reason}（zh/generate 的未启动原因，带完整说明）
@@ -313,7 +339,7 @@ async function refreshZhState() {
   const btn = $('zh-toggle');
   btn.style.display = '';
   btn.disabled = zhState.busy;
-  btn.textContent = zhState.busy ? '译' : '中';
+  btn.innerHTML = iconHtml(zhState.busy ? 'spin' : 'translate'); // busy：旋转弧图标（原「译」字）
   btn.title = zhState.busy ? (zhState.phase || `翻译进行中${zhState.model ? `（${zhState.model}）` : ''}…`)
     : (zhState.zh || zhState.dual) ? '切换中文译文'
     : '还没有中文版，点击生成（babeldoc，需要几分钟）';
@@ -326,7 +352,7 @@ async function refreshZhState() {
     delete statusEl.dataset.phaseShown;
     if (statusMeta) statusEl.textContent = statusMeta;
   }
-  // ↻ 只在「已有译文且空闲」时出现；状态变化时顺手拆掉两击确认的待确认态
+  // 重翻按钮只在「已有译文且空闲」时出现；状态变化时顺手拆掉两击确认的待确认态
   const regen = $('zh-regen');
   const canRegen = (zhState.zh || zhState.dual) && !zhState.busy;
   regen.style.display = canRegen ? '' : 'none';
@@ -366,7 +392,7 @@ async function startGenerate(force) {
     if (e.code === 'no-endpoint') { cfgRetryForce = force; openCfgPop(true); return; }
     toast(e.message, 8000); return;
   }
-  $('zh-toggle').disabled = true; $('zh-toggle').textContent = '译';
+  $('zh-toggle').disabled = true; $('zh-toggle').innerHTML = iconHtml('spin');
   $('zh-regen').style.display = 'none';
   const timer = setInterval(async () => {
     await refreshZhState();
@@ -383,14 +409,14 @@ async function startGenerate(force) {
   }, 5000);
 }
 
-/* ================= 重新翻译（↻，两击确认） ================= */
+/* ================= 重新翻译（重翻按钮，两击确认） ================= */
 // 不用原生 confirm：阅读器跑在 dsh 桌面壳的 iframe 里，原生对话框行为不可靠。
 // 第一击把按钮变成「重翻?」待确认态（3 秒有效），第二击才真删真跑。
 let regenArmTimer = null;
 function disarmRegen() {
   clearTimeout(regenArmTimer); regenArmTimer = null;
   const btn = $('zh-regen');
-  btn.textContent = '↻'; btn.classList.remove('active');
+  btn.innerHTML = iconHtml('regen'); btn.classList.remove('active');
 }
 $('zh-regen').onclick = async () => {
   if (!current || zhState.busy) return;
@@ -435,9 +461,9 @@ const providerOf = (baseUrl) => PROVIDERS.find((p) => p.id !== 'custom' && normU
   };
 })();
 
-// 保存成功后是否自动接着生成：点「中」/「↻」发现没配 → 弹本表单 → 填完直接开跑
+// 保存成功后是否自动接着生成：点「中译」/「重翻」发现没配 → 弹本表单 → 填完直接开跑
 let cfgRetryGenerate = false;
-let cfgRetryForce = false;   // 待重试的是不是「重翻」（↻ 进来时旧译文还在，zh-toggle 点击语义不对，必须带 force）
+let cfgRetryForce = false;   // 待重试的是不是「重翻」（重翻进来时旧译文还在，zh-toggle 点击语义不对，必须带 force）
 
 async function openCfgPop(retryGenerate) {
   cfgRetryGenerate = Boolean(retryGenerate);
@@ -497,7 +523,7 @@ $('cfg-save').onclick = async () => {
   }
   closeCfgPop();
   await refreshZhState();
-  if (retry) startGenerate(force);  // 沿用触发来源的语义：「中」=生成，「↻」=重翻
+  if (retry) startGenerate(force);  // 沿用触发来源的语义：「中译」=生成，「重翻」=重翻
   else toast('翻译端点已保存');
 };
 
@@ -749,10 +775,10 @@ $('page-input').addEventListener('blur', () => {
 });
 
 /** 模式切换：paged→scroll 先全量渲染再跳回当前页；scroll→paged 用观察器最近回写的 curPage。
-    图标显示「当前模式」：▣ 单页翻页（active）/ ≣ 连续滚动。 */
+    图标显示「当前模式」：书本 = 单页翻页（active）/ 卷轴 = 连续滚动。 */
 function updateModeToggle() {
   const btn = $('mode-toggle');
-  btn.textContent = pageMode === 'paged' ? '▣' : '≣';
+  btn.innerHTML = iconHtml(pageMode === 'paged' ? 'paged' : 'scroll');
   btn.classList.toggle('active', pageMode === 'paged');
   btn.title = pageMode === 'paged' ? '当前：单页翻页，点击切回连续滚动' : '当前：连续滚动，点击切到单页翻页';
   updatePager();
@@ -1123,7 +1149,7 @@ async function transcribeWithMineru(btn) {
     toast('MinerU 转录完成');
     await loadFormulas();
     // 新索引到手：按**当前模式**重渲一次把热区铺上去（翻页模式下必须仍是 renderPaged，
-    // 否则会把全量页渲出来、摘掉 #pdf-pages 的 paged 类，与顶栏 ▣ 的 active 状态脱节）
+    // 否则会把全量页渲出来、摘掉 #pdf-pages 的 paged 类，与顶栏模式切换按钮的 active 状态脱节）
     if (pdfDoc) await rerender();
   } catch (e) {
     toast('MinerU 转录失败：' + e.message, 6000);
