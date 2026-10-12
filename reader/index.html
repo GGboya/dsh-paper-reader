@@ -8,6 +8,11 @@
      不用 <script type="module">：module 是 defer 语义（整页解析完 + 458KB 拉取编译完才执行），
      而底部经典脚本在解析期就开跑 bootstrap()，库里有论文时先到 loadPdf，此刻 window.pdfjsLib
      还没就绪 → "pdfjsLib is not defined"。改为经典脚本里动态 import()（见 ensurePdfjs），顺序有保证。 -->
+<!-- KaTeX 0.16.22 本地 vendor（数学渲染；论文伴读是**离线场景**，绝不引 CDN）。
+     经典脚本：页面解析期同步设置 window.katex；缺失时渲染路径会**降级**为原始 LaTeX（见 trRenderBody）。
+     体积与来源见 reader/vendor/katex/NOTICE.md。 -->
+<link rel="stylesheet" href="/paper-reader/vendor/katex/katex.min.css">
+<script src="/paper-reader/vendor/katex/katex.min.js"></script>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #e2e5ea; --text: #24292f;
@@ -151,6 +156,11 @@
   #tr-body { font-size: 13px; white-space: pre-wrap; word-break: break-word; }
   #tr-note { font-size: 12px; color: var(--text-2); margin-top: 6px; line-height: 1.5; }
   #tr-note:empty { display: none; }
+  /* 公式段：KaTeX 渲染进我们新建的元素（.tr-math / .tr-math-block）；渲染失败时该段落回原始 LaTeX
+     文本并加 .tr-math-fallback（可读可复制，绝不留白）。 */
+  #tr-body .tr-math-block { margin: 6px 0; overflow-x: auto; }
+  #tr-body .tr-math-block .katex-display { margin: 0; }
+  #tr-body .tr-math-fallback { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--text-2); word-break: break-all; }
 
   /* ---------- 翻译端点设置浮层 ---------- */
   /* 阅读器在窄 iframe 里，宽度要能收缩 */
@@ -1515,12 +1525,102 @@ function invalidateTranslate() {
 
 function hideTrPop() { trPop.style.display = 'none'; }
 
-/** 展示译文气泡。用 textContent（译文是模型输出，当不可信数据处理，**绝不 innerHTML**）。
+/* ── 译文里的公式渲染（vendored KaTeX，离线）────────────────────────────────────────────
+   译文是**模型输出，当不可信数据**处理，所以这里绝不 innerHTML：
+     · 文本段：一律 textContent；
+     · 数学段：KaTeX 渲染进**我们新建的**元素（trust:false → 不产原始 HTML；strict:'ignore'）；
+     · 渲染失败：该段**降级**为原始 LaTeX 文本（可读可复制），并在 #tr-note 如实提示第几个失败。
+   `splitTranslatedMath` / `trComposeNote` 是纯函数，可在 vm 里单测。 */
+
+/** 把译文切成 [{kind:'text'|'math', text, display}]。
+ *  `$$…$$` 独立成行（可跨行）；`$…$` 行内（不跨行，避免把整段散文吞进公式）；`\$` 是字面美元号；
+ *  定界符没有闭合时按普通字符处理（绝不产生"半个公式"）。 */
+function splitTranslatedMath(input) {
+  const s = String(input ?? '');
+  const out = [];
+  let buf = '';
+  const flush = () => { if (buf) { out.push({ kind: 'text', text: buf }); buf = ''; } };
+  for (let i = 0; i < s.length;) {
+    if (s[i] === '\\' && s[i + 1] === '$') { buf += '$'; i += 2; continue; }
+    if (s[i] !== '$') { buf += s[i]; i += 1; continue; }
+    const display = s[i + 1] === '$';
+    const open = display ? 2 : 1;
+    let j = i + open;
+    let close = -1;
+    while (j < s.length) {
+      if (s[j] === '\\') { j += 2; continue; }
+      if (display ? (s[j] === '$' && s[j + 1] === '$') : (s[j] === '$')) { close = j; break; }
+      if (!display && s[j] === '\n') break;          // 行内公式不跨行
+      j += 1;
+    }
+    if (close === -1) { buf += s.slice(i, i + open); i += open; continue; }
+    const tex = s.slice(i + open, close);
+    if (!tex.trim()) { buf += s.slice(i, close + open); i = close + open; continue; }
+    flush();
+    out.push({ kind: 'math', text: tex, display });
+    i = close + open;
+  }
+  flush();
+  return out;
+}
+
+/** 把一段 LaTeX 渲染进**我们新建的**元素（KaTeX，vendored 离线）。
+ *  · 先 `renderToString` + `throwOnError:true` 探一次：非法 LaTeX 在这里抛，交给调用方降级
+ *    （既满足契约参数 `throwOnError:false`，又不会把 KaTeX 自己画的红色错误当成功）；
+ *  · 真正渲染用契约参数：`throwOnError:false` / `trust:false` / `strict:'ignore'`。
+ *  **不写 innerHTML**：KaTeX 自己建 DOM 节点，模型输出只作为待转义的 LaTeX 文本传入。 */
+function renderMathSegment(el, tex, display) {
+  const k = typeof window !== 'undefined' ? window.katex : null;
+  if (!k || typeof k.renderToString !== 'function' || typeof k.render !== 'function') throw new Error('katex 不可用');
+  k.renderToString(tex, { displayMode: display, throwOnError: true, trust: false, strict: 'ignore' });
+  k.render(tex, el, { displayMode: display, throwOnError: false, trust: false, strict: 'ignore' });
+}
+
+/** 渲染译文到 #tr-body：文本段 textContent，数学段 KaTeX → 新建元素；渲染失败的段落回原始 LaTeX
+ *  文本（绝不空白）。返回未能渲染的公式序号（1 起，供 #tr-note 提示）。 */
+function trRenderBody(body) {
+  const host = $('tr-body');
+  host.textContent = '';
+  const failed = [];
+  let n = 0;
+  for (const seg of splitTranslatedMath(body)) {
+    if (seg.kind === 'text') {
+      const el = document.createElement('span');
+      el.textContent = seg.text;                       // ← 模型输出的文本：只用 textContent
+      host.appendChild(el);
+      continue;
+    }
+    n += 1;
+    const el = document.createElement(seg.display ? 'div' : 'span');
+    el.className = seg.display ? 'tr-math tr-math-block' : 'tr-math';
+    let ok = true;
+    try { renderMathSegment(el, seg.text, seg.display); } catch { ok = false; }
+    if (!ok) {
+      el.className += ' tr-math-fallback';
+      const delim = seg.display ? '$$' : '$';
+      el.textContent = delim + seg.text + delim;        // 降级：原始 LaTeX 原样可见、可复制
+      failed.push(n);
+    }
+    host.appendChild(el);
+  }
+  return failed;
+}
+
+/** #tr-note 文案（**仍是纯文本**）：原有提示 + 渲染失败提示，如「第 2、5 个公式未能渲染（已按原样显示 LaTeX）」。 */
+function trComposeNote(note, failed) {
+  const base = String(note ?? '');
+  if (!failed || !failed.length) return base;
+  const which = failed.length === 1 ? `第 ${failed[0]} 个公式` : `第 ${failed.join('、')} 个公式`;
+  const hint = `${which}未能渲染（已按原样显示 LaTeX）`;
+  return base ? `${base} ${hint}` : hint;
+}
+
+/** 展示译文气泡。**绝不 innerHTML 模型输出**：文本段 textContent，数学段交 trRenderBody 渲染进新建元素。
  *  定位照 openCfgPop：先显示再量尺寸，不写死宽高常量。 */
 function showTrPop(status, body, note) {
   $('tr-status').textContent = status || '';
-  $('tr-body').textContent = body || '';
-  $('tr-note').textContent = note || '';
+  const failed = trRenderBody(body || '');
+  $('tr-note').textContent = trComposeNote(note, failed);
   trPop.style.display = 'block';
   let rect = { left: 16, bottom: 16 };
   try { if (askSelection && askSelection.range) rect = askSelection.range.getBoundingClientRect(); } catch { /* 选区失效用兜底锚点 */ }

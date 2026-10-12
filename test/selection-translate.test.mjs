@@ -763,7 +763,7 @@ function matchesSel(el, sel) {
 function makeEl(tag = 'div') {
   const el = {
     tagName: String(tag).toUpperCase(), id: '', dataset: {}, children: [], childNodes: [],
-    textContent: '', value: '', disabled: false, onclick: null, _classes: new Set(), _handlers: {},
+    value: '', disabled: false, onclick: null, _classes: new Set(), _handlers: {}, _innerHTMLWrites: 0,
     style: { setProperty(k, v) { this[k] = v }, removeProperty(k) { delete this[k] }, getPropertyValue: (k) => el.style[k] ?? '' },
     classList: {
       add: (...c) => c.forEach((x) => el._classes.add(x)),
@@ -771,7 +771,11 @@ function makeEl(tag = 'div') {
       toggle: (c, on) => { const v = on === undefined ? !el._classes.has(c) : !!on; if (v) el._classes.add(c); else el._classes.delete(c); return v },
       contains: (c) => el._classes.has(c),
     },
-    appendChild(c) { el.children.push(c); el.childNodes.push(c); c.parentNode = el; c.parentElement = el; return c },
+    appendChild(c) {
+      // DocumentFragment（nodeType 11）appendChild 时展平（真实 DOM 语义；KaTeX 用它建子树）
+      if (c && c.nodeType === 11) { for (const k of c.children.slice()) el.appendChild(k); c.children = []; return c }
+      el.children.push(c); el.childNodes.push(c); c.parentNode = el; c.parentElement = el; return c
+    },
     append(...cs) { cs.forEach((c) => el.appendChild(c)) },
     remove() { const p = el.parentNode; if (p) { p.children = p.children.filter((x) => x !== el); p.childNodes = p.childNodes.filter((x) => x !== el) } },
     closest(sel) { let n = el; while (n) { if (matchesSel(n, sel)) return n; n = n.parentNode } return null },
@@ -786,11 +790,18 @@ function makeEl(tag = 'div') {
     clientHeight: 0, clientWidth: 0, scrollTop: 0, scrollHeight: 0, offsetTop: 0, offsetHeight: 0,
   }
   let inner = ''
+  let ownText = ''
+  // textContent 语义对齐真实 DOM：**读**是「自身文本 + 所有后代文本」的拼接，**写**会先清空子节点。
+  // （译文气泡改成「文本段/数学段各自成元素」之后，`$('tr-body').textContent` 必须仍能读到完整可见文本。）
+  Object.defineProperty(el, 'textContent', {
+    get: () => (el.children.length ? el.children.map((c) => c.textContent ?? '').join('') : ownText),
+    set: (v) => { el.children = []; el.childNodes = []; ownText = v == null ? '' : String(v) },
+  })
   Object.defineProperty(el, 'className', {
     get: () => [...el._classes].join(' '),
     set: (v) => { el._classes = new Set(String(v || '').split(/\s+/).filter(Boolean)) },
   })
-  Object.defineProperty(el, 'innerHTML', { get: () => inner, set: (v) => { inner = v; if (v === '') { el.children = []; el.childNodes = [] } } })
+  Object.defineProperty(el, 'innerHTML', { get: () => inner, set: (v) => { inner = v; el._innerHTMLWrites += 1; if (v === '') { el.children = []; el.childNodes = [] } } })
   Object.defineProperty(el, 'firstChild', { get: () => el.children[0] ?? null })
   Object.defineProperty(el, 'lastChild', { get: () => el.children[el.children.length - 1] ?? null })
   Object.defineProperty(el, 'parentNode', { get: () => el._parent ?? null, set: (v) => { el._parent = v } })
@@ -802,9 +813,21 @@ function textNode(data) {
   const n = makeEl('#text')
   n._nodeType = 3
   n.data = data
+  n.textContent = data
   Object.defineProperty(n, 'length', { get: () => data.length })
   return n
 }
+
+/** 真实 vendored KaTeX（`reader/vendor/katex/katex.min.js`，与浏览器同一个文件）：
+ *  在 vm 里跑它的 UMD，取到 `katex` 对象（renderToString 纯函数、render 建 DOM 节点）。 */
+function loadVendoredKatex() {
+  const kctx = { console, setTimeout, clearTimeout }
+  kctx.globalThis = kctx; kctx.window = kctx; kctx.self = kctx
+  vm.createContext(kctx)
+  vm.runInContext(readFileSync(join(REPO, 'reader', 'vendor', 'katex', 'katex.min.js'), 'utf8'), kctx)
+  return kctx
+}
+const KCTX = loadVendoredKatex()   // UMD 只跑一次；每次 loadReader 把当次的 document 绑给它（KaTeX.render 要建节点）
 
 /** 跑真实 reader 脚本 + 可观测 DOM stub。 */
 function loadReader({ innerWidth = 1200 } = {}) {
@@ -816,9 +839,14 @@ function loadReader({ innerWidth = 1200 } = {}) {
   body.appendChild(named)
   const doc = {
     body, activeElement: null, _handlers: {},
+    // KaTeX 在 quirks 模式下拒绝渲染（`<meta charset>` 之外它就认 compatMode）；stub 要跟标准页面对齐
+    compatMode: 'CSS1Compat',
     getElementById(id) { if (!els.has(id)) { const e = makeEl('div'); e.id = id; named.appendChild(e); els.set(id, e) } return els.get(id) },
     createElement(tag) { const e = makeEl(tag); created.push(e); return e },
+    // KaTeX 用 createElementNS 建 MathML 子树（'http://www.w3.org/1998/Math/MathML'）
+    createElementNS(_ns, tag) { const e = makeEl(tag); created.push(e); return e },
     createTextNode(t) { return textNode(t) },
+    createDocumentFragment() { const f = makeEl('#document-fragment'); f._nodeType = 11; return f },
     createRange() {
       let s = 0, e = 0
       return {
@@ -848,7 +876,12 @@ function loadReader({ innerWidth = 1200 } = {}) {
     holdMeta: false,                               // true = 挂起 /api/paper 的响应（N-01 用）
     releaseMeta: null,
   }
+  // KaTeX 的 render 要在**同一个** vm 上下文里拿 document 建节点；每次 harness 把当次的 doc 绑过去
+  // （node:test 同文件内顺序执行，不会并发打架）。renderToString 是纯函数，不依赖 DOM。
+  KCTX.document = doc
   const win = {
+    // 真实 vendored KaTeX（离线，与浏览器加载的是同一个文件）；渲染路径的用例靠它跑真渲染
+    katex: KCTX.katex,
     devicePixelRatio: 1, innerWidth, innerHeight: 900,
     addEventListener() {}, getSelection: () => null,
     matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }),
@@ -920,6 +953,7 @@ function loadReader({ innerWidth = 1200 } = {}) {
       setTrResp: (r) => { ctrl.trResp = r },
       openSplit, getPdfDocZh: () => pdfDocZh,
       openPaper, invalidateTranslate, getTrBusy: () => trBusy, getTrSeq: () => trSeq,
+      splitTranslatedMath, trRenderBody, trComposeNote, showTrPop,
       // F3：把 pdf.js 置成「未就绪」，只有 ensurePdfjs 能把它装上 —— 复现刷新后恢复分屏的时序
       armColdPdfjs: (lib) => { pdfjsLib = undefined; ensurePdfjs = async () => { pdfjsLib = lib; }; },
       // R-02：pdf.js 视为「已就绪」（装上 lib 但不改动 pdfjsLib 的现值），让 openPaper 能跑完
@@ -1277,8 +1311,11 @@ test('E11 端到端（DOM stub）：划词 → 「译」→ 气泡只显示译�
   assert.equal(R.els.get('ask-translate').style.display, 'inline-block', '原文视图的纯文字选区必须出现「译」')
   assert.equal(R.els.get('ask-copy').style.display, 'none', '文字选区不得显示复制 LaTeX')
 
-  // 点「译」
+  // 点「译」（记下 innerHTML 写入基线：只有渲染期间的写入才算数。stub 的 innerHTML setter 会累加计数）
+  const htmlWritesBefore = [...R.els.values(), ...R.created].reduce((a, e) => a + (e._innerHTMLWrites || 0), 0)
   await R.els.get('ask-translate').onclick()
+  const htmlWritesAfter = [...R.els.values(), ...R.created].reduce((a, e) => a + (e._innerHTMLWrites || 0), 0)
+  assert.equal(htmlWritesAfter - htmlWritesBefore, 0, '气泡渲染期间绝不允许写 innerHTML')
   const req = R.requests.find((r) => r.url.endsWith('/api/translate-selection'))
   assert.ok(req, '必须走 /api/translate-selection')
   assert.equal(req.body.topic, 'lib')
@@ -1288,10 +1325,19 @@ test('E11 端到端（DOM stub）：划词 → 「译」→ 气泡只显示译�
   assert.ok(!Object.keys(req.body).some((k) => /key|baseUrl|endpoint/i.test(k)), `请求体不得含 key/端点：${Object.keys(req.body)}`)
   assert.equal(R.els.get('ask-pop').style.display, 'none', '点「译」后既有气泡必须隐藏')
   assert.equal(R.els.get('tr-pop').style.display, 'block')
-  // 气泡正文**只有**译文本身（提示走独立的 #tr-note，且本响应的公式全部保留 ⇒ 无提示）
-  assert.equal(R.els.get('tr-body').textContent, '这是译文（含 $x_t$）')
+  // 气泡正文**只有**译文本身（提示走独立的 #tr-note，且本响应的公式全部保留 ⇒ 无提示）。
+  // 新契约：译文切成文本段/数学段 —— 文本段仍逐字进 textContent，数学段渲染成 .tr-math 元素（vendored KaTeX）。
+  const trBody = R.els.get('tr-body')
+  const trSegs = trBody.children
+  const mathSegs = trSegs.filter((e) => e._classes.has('tr-math'))
+  assert.equal(mathSegs.length, 1, `公式段必须渲染成 .tr-math 元素：${trSegs.map((e) => e.className)}`)
+  assert.ok(!mathSegs[0]._classes.has('tr-math-fallback'), '合法 LaTeX 不得走降级分支')
+  assert.ok(/katex/.test(String(mathSegs[0].children[0]?.className ?? '')), 'KaTeX 必须真的往这个元素里建了 DOM')
+  assert.equal(trSegs.filter((e) => !e._classes.has('tr-math')).map((e) => e.textContent).join(''), '这是译文（含 ）',
+    '数学段之外的文字必须逐字保留在 textContent 里（顺序与原文一致）')
   assert.equal(R.els.get('tr-status').textContent, '', '成功时不得残留「翻译中…」')
-  assert.equal(R.els.get('tr-note').textContent, '', '公式全部保留时不显示提示')
+  assert.equal(R.els.get('tr-note').textContent, '', '公式全部保留且渲染成功时不显示提示')
+  assert.equal(htmlWritesAfter - htmlWritesBefore, 0, '气泡渲染路径绝不允许写 innerHTML（模型输出不可信）')
   // 译文气泡内部零 button（结构）+ 没有把说明文字混进正文
   assert.ok(!/button/i.test(String(R.els.get('tr-pop').innerHTML ?? '')))
   assert.ok(!String(R.els.get('tr-body').textContent).includes('⚠'))
