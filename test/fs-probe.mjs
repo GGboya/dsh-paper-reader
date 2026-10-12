@@ -7,11 +7,12 @@
 //     契约是 500 trash-move-failed；Windows EPERM → 契约是 409 file-busy 的占用语义）。
 // 所以这里全都实测一次，结果按目录缓存。
 
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const caseCache = new Map()
+let chmodCache
 let renameErrnoCache
 
 /**
@@ -75,4 +76,50 @@ export function isTrashRelPath(p) {
   if (p.startsWith('/') || p.startsWith('\\') || /^[A-Za-z]:/.test(p)) return false // 必须是相对路径
   const segs = p.split(/[\\/]/)
   return segs.length >= 2 && segs[0] === '.trash' && segs.every((x) => x.length > 0)
+}
+
+/**
+ * 实测「把目录设为只读（chmod 0o555）之后，里面的文件还能不能被 rename 走」。
+ *   · POSIX（ext4/APFS）：不能 → 可用于「回收站移动失败」的注入；
+ *   · Windows：chmod 只映射「只读位」，不阻止 rename → 不能。
+ * 调用方据此选注入方式（而不是硬编码平台）。
+ */
+export function chmodBlocksRename(dir = tmpdir()) {
+  if (chmodCache !== undefined) return chmodCache
+  const d = mkdtempSync(join(dir, 'dpr-chmodprobe-'))
+  try {
+    const sub = join(d, 'sub')
+    mkdirSync(sub)
+    writeFileSync(join(sub, 'f.txt'), 'x')
+    chmodSync(sub, 0o555)
+    try {
+      renameSync(join(sub, 'f.txt'), join(d, 'moved.txt'))
+      chmodCache = false
+    } catch {
+      chmodCache = true
+    } finally {
+      try { chmodSync(sub, 0o755) } catch { /* 已不可改也无需恢复 */ }
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true })
+  }
+  return chmodCache
+}
+
+/**
+ * 实测「当前文件系统能否把 0x00-0x1F 控制字符放进文件名」。
+ *   · Win32 路径层禁止 → false（历史遗留的控制字符名在那类平台根本造不出来）；
+ *   · POSIX → true。
+ * 探针建在给定目录的**子目录**里并即时清理，不留残留。
+ */
+export function canStoreControlName(dir = tmpdir()) {
+  const probe = mkdtempSync(join(dir, 'dpr-ctrlprobe-'))
+  try {
+    mkdirSync(join(probe, 'weird\u0001name'))
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(probe, { recursive: true, force: true })
+  }
 }

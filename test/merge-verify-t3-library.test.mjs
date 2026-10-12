@@ -19,6 +19,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { canStoreControlName, chmodBlocksRename } from './fs-probe.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
@@ -258,7 +259,14 @@ test('V3 删除语义：整批产物进 .trash、.pdf 最后移、manifest 可�
   assert.ok(body.moved.includes('Attention-dual.pdf') && body.moved.includes('Attention.mineru.json'), '派生产物整批移走')
   assert.ok(body.moved.some((f) => f.includes('.tmp-')), '在途临时文件也要移走')
   // 精确 stem：同前缀的其他文献一个字节都不许变
-  const isAttention = (p) => /\/Attention([.-]|$)/.test(p)
+  // 快照 key 是**绝对路径**：win32 上是反斜杠，原先写死 '/' 的正则在 Windows 上永不命中 ⇒ 过滤不掉
+  // 本文件的产物、断言必红（CI run 38193897047 的 V3）。改用 basename（跨平台且更严格）。
+  const isAttention = (p) => /^Attention([.-]|$)/.test(String(p).split(/[\\/]/).pop())
+  // 回归护栏：过滤器不得依赖路径分隔符（快照 key 在 win32 上是反斜杠。CI run 38193897047 的 V3 就是
+  // 写死 '/' 的版本在 Windows 上永不命中）。这两行在任何平台都能把「改回写死 '/'」的变异判红。
+  assert.ok(isAttention('C:\\data\\t\\Attention-dual.pdf'), 'isAttention 必须认 win32 反斜杠绝对路径')
+  assert.ok(!isAttention('C:\\data\\t\\Attention Is All You Need.pdf'), '同前缀的其它文献不得被误过滤')
+  assert.ok(!isAttention('/data/t/Attention2.mineru.json'), 'Attention2 不得被误过滤')
   const afterRest = Object.fromEntries(Object.entries(snap(join(DATA, 't'))).filter(([k]) => !isAttention(k)))
   const beforeRest = Object.fromEntries(Object.entries(before).filter(([k]) => !isAttention(k)))
   assert.deepEqual(afterRest, beforeRest, '精确 stem：不得连带 Attention Is All You Need / Attention2')
@@ -339,7 +347,9 @@ test('V4 规范化路由名上的 409/503：运行中会话、无法确认的会
   writeFileSync(join(txData, 'tx', 'paper.txt'), 'cache')
   const binPath = join(TX, '.venv-pdf2zh', 'bin', 'babeldoc')
   mkdirSync(join(TX, '.venv-pdf2zh', 'bin'), { recursive: true })
-  writeFileSync(binPath, '#!/bin/sh\ncase "$1" in\n  --version) echo "babeldoc fake 1.0"; exit 0 ;;\n  --help) echo "--no-watermark --skip-figure-text"; exit 0 ;;\n  *) echo $$ > "$MV3_TX_PIDFILE"; exec sleep 120 ;;\nesac\n')
+  // 假 babeldoc：`sleep 30`（不是 120）是**兜底**——pidfile 竞态导致 kill 打空时，文件也能在 30s 内
+  // 自行退出（< 60s 的 --test-timeout），不会像 CI run 38193897047 的 macOS 那样整文件超时。
+  writeFileSync(binPath, '#!/bin/sh\ncase "$1" in\n  --version) echo "babeldoc fake 1.0"; exit 0 ;;\n  --help) echo "--no-watermark --skip-figure-text"; exit 0 ;;\n  *) echo $$ > "$MV3_TX_PIDFILE"; exec sleep 30 ;;\nesac\n')
   chmodSync(binPath, 0o755)
   const txBase = await boot(txData)
   const { startTranslation, zhStatus } = await import(pathToFileURL(dist('translate.js')).href)
@@ -360,11 +370,31 @@ test('V4 规范化路由名上的 409/503：运行中会话、无法确认的会
   assert.equal(tren2.status, 409, tren2.text); assert.equal(tren2.body.code, 'translation-busy')
   assert.ok(existsSync(join(txData, 'tx', 'paper.pdf')), '被拒后文献仍在')
   assert.ok(!existsSync(join(txData, 'tx', 'paper-zh.pdf')), '不得产出译文')
-  if (existsSync(pidFile)) { const pid = readFileSync(pidFile, 'utf8').trim(); if (/^\d+$/.test(pid)) { try { process.kill(+pid, 'SIGKILL') } catch { /* 已退出 */ } } }
+  // 等 pidfile 出现再 kill：脚本「先写 pid 再 exec sleep」，但 spawn→shell→落盘要几毫秒；macOS 上这个
+  // 竞态会让 kill 打空 → sleep 子进程留下来把整个文件的 event loop 撑到 60s 超时（CI run 38193897047
+  // 的 macOS「所有子用例 ok 但文件 timeout」正是它）。这里轮询最多 5s。
+  const killTxChild = () => {
+    if (!existsSync(pidFile)) return false
+    const pid = readFileSync(pidFile, 'utf8').trim()
+    if (!/^\d+$/.test(pid)) return false
+    try { process.kill(+pid, 'SIGKILL') } catch { /* 已退出 */ }
+    return true
+  }
+  const deadline = Date.now() + 5000
+  while (!killTxChild() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
+  assert.ok(existsSync(pidFile), '假 babeldoc 必须已启动并写下 pid（否则上面的 busy 断言无从谈起）')
+})
+
+// 文件级兜底：任何用例失败都不许把翻译子进程留下撑住 event loop
+test.after(() => {
+  const pidFile = process.env.MV3_TX_PIDFILE
+  if (!pidFile || !existsSync(pidFile)) return
+  const pid = readFileSync(pidFile, 'utf8').trim()
+  if (/^\d+$/.test(pid)) { try { process.kill(+pid, 'SIGKILL') } catch { /* 已退出 */ } }
 })
 
 /* ── 入口 5：创建/删除对称 + 畸形体 + 历史遗留名（PR-1 三处收口） ──────────── */
-test('V5 创建/删除对称（规范化路由名）、畸形 JSON 体 4xx、历史遗留专题名可删，`.trash` 是保留名', async () => {
+test('V5 创建/删除对称（规范化路由名）、畸形 JSON 体 4xx、历史遗留专题名可删，`.trash` 是保留名', async (t) => {
   const DATA = mkdtempSync(join(tmpdir(), 'dpr-mv3-data5-'))
   const base = await boot(DATA)
   const post = async (p, obj, raw) => {
@@ -401,9 +431,13 @@ test('V5 创建/删除对称（规范化路由名）、畸形 JSON 体 4xx、历
   }
   // 历史遗留（写入路径造不出来）的专题名必须能删；`.trash` 不能当专题删/改名
   mkdirSync(join(DATA, '.legacy'), { recursive: true })
-  mkdirSync(join(DATA, 'weird\u0001name'), { recursive: true })
+  // 0x00-0x1F 能否落在文件名里是**文件系统能力**（Win32 路径层直接 ENOENT）→ 实测决定跑不跑这半段，
+  // 不硬编码平台（CI run 38193897047 的 V5 就是这条 mkdir 报 ENOENT）。
+  const ctrlName = canStoreControlName(DATA) ? 'weird\u0001name' : null
+  if (ctrlName) mkdirSync(join(DATA, ctrlName), { recursive: true })
+  else t.diagnostic('本机文件系统禁止 0x01 出现在文件名里（Win32 路径层）→ 跳过「控制字符历史专题名」半段，其余断言照跑')
   assert.equal((await post(CANON.deleteTopic, { topic: '.legacy', confirmName: '.legacy' })).status, 200)
-  assert.equal((await post(CANON.deleteTopic, { topic: 'weird\u0001name', confirmName: 'weird\u0001name' })).status, 200)
+  if (ctrlName) assert.equal((await post(CANON.deleteTopic, { topic: ctrlName, confirmName: ctrlName })).status, 200)
   mkdirSync(join(DATA, '.trash'), { recursive: true })
   const tr = await post(CANON.deleteTopic, { topic: '.trash', confirmName: '.trash' })
   assert.equal(tr.status, 400); assert.equal(tr.body.code, 'bad-name')
@@ -431,16 +465,27 @@ test('V6 回收站移动失败：报错且**一个文件都不少**（绝不回�
   scaffold(DATA, 'ro', 'Locked')
   const base = await boot(DATA)
   const before = snap(join(DATA, 'ro'))
-  chmodSync(join(DATA, 'ro'), 0o555) // 目录不可写 → rename 进回收站必然失败
+  // 注入方式按**本机实测**能力选（不硬编码平台）：
+  //   · chmod 0o555 真能挡住 rename 的平台（POSIX）：保留「中途失败」这条真实路径（原断言不变）；
+  //   · chmod 只映射只读位、挡不住 rename 的平台（Windows，CI run 38193897047 的 V6 就是它）：
+  //     换成**平台中立**注入 —— 把 `.trash` 写成普通文件，bundle 的 mkdir 必然 ENOTDIR 失败。
+  const chmodBlocks = chmodBlocksRename(DATA)
+  if (chmodBlocks) chmodSync(join(DATA, 'ro'), 0o555) // 目录不可写 → rename 进回收站必然失败
+  else {
+    t.diagnostic('本机 chmod 不阻止 rename（Windows 只读位语义）→ 改用「.trash 是普通文件」的平台中立注入')
+    writeFileSync(join(DATA, '.trash'), 'not-a-directory')
+  }
   try {
     const r = await fetch(base + CANON.deletePaper, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ topic: 'ro', name: 'Locked' }),
     })
     const text = await r.text()
     assert.ok(r.status >= 400, `移动失败必须报错而不是假装成功：${r.status} ${text.slice(0, 160)}`)
-    await r.text().catch(() => {})
+    let body = null
+    try { body = JSON.parse(text) } catch { /* 非 JSON 时上面的断言已经说话 */ }
+    assert.equal(body?.code, 'trash-move-failed', `失败必须带机器可读 code：${text.slice(0, 200)}`)
   } finally {
-    chmodSync(join(DATA, 'ro'), 0o755)
+    if (chmodBlocks) chmodSync(join(DATA, 'ro'), 0o755)
   }
   assert.deepEqual(diffSnap(before, snap(join(DATA, 'ro'))), [], '失败路径上任何文件都不许消失/被改（不得回退成 unlink）')
   assert.ok(existsSync(join(DATA, 'ro', 'Locked.pdf')), '文献本体必须还在')
