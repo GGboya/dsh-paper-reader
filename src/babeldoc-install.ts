@@ -220,13 +220,18 @@ const CN_MIRRORS = [
   'https://mirrors.cloud.tencent.com/pypi/simple',
 ]
 
+// babeldoc 依赖 bitstring>=4.3.0 无上界，而 bitstring 5.0（2026-10 发布）删除了 BitStream，
+// babeldoc 的 pdf_creater.py 仍在 `from bitstring import BitStream` —— 裸装必装出残缺 venv。
+// 上游修掉该 import 或锁上界后可移除此 pin。
+const BITSTRING_PIN = 'bitstring<5'
+
 async function pipInstallBabeldoc(py: string): Promise<void> {
   await run(py, ['-m', 'ensurepip', '--upgrade'], { timeout: 5 * 60_000 })
   let lastErr: unknown = null
   for (const m of CN_MIRRORS) {
     try {
       await run(py, [
-        '-m', 'pip', 'install', '--no-cache-dir', '--timeout', '120', '--retries', '3', '-i', m, 'babeldoc',
+        '-m', 'pip', 'install', '--no-cache-dir', '--timeout', '120', '--retries', '3', '-i', m, 'babeldoc', BITSTRING_PIN,
       ], { timeout: 30 * 60_000 })
       return
     } catch (e) {
@@ -262,7 +267,7 @@ async function installBabeldoc(uv: string, venvDir: string, onPhase: PhaseFn): P
   if (process.env.DSH_PR_FORCE_PIP_CHANNEL === '1') await viaPipFallback(null)
   else {
     try {
-      await run(uv, ['pip', 'install', '--python', py, 'babeldoc'], { timeout: 20 * 60_000 })
+      await run(uv, ['pip', 'install', '--python', py, 'babeldoc', BITSTRING_PIN], { timeout: 20 * 60_000 })
     } catch (uvErr) {
       await viaPipFallback(uvErr)
     }
