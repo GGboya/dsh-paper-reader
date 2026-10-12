@@ -7,7 +7,7 @@
 
 **中文**: [README.md](README.md)
 
-A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin: a **paper reading workbench** — paper library + PDF reader + AI companion. Every answer cites page numbers, and clicking a page jumps back to the exact highlighted passage. Current version: **v1.4.0**.
+A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin: a **paper reading workbench** — paper library + PDF reader + AI companion. Every answer cites page numbers, and clicking a page jumps back to the exact highlighted passage. Current version: **v1.4.1**.
 
 > 💬 **QQ group: 1127244508** — questions, feature requests, and bug reports are all welcome.
 

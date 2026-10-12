@@ -6,7 +6,7 @@
 //   B. 非空专题「批量清空」（产品决策第 10 条）：topic/clear-plan + topic/clear——逐篇列清单、
 //      一次确认、逐篇走同一套回收站、仍受会话/翻译前置 409、失败**整体回滚**并如实报。
 //   C. MinerU 激活门槛文案（应修 7）：设置卡片人话 + 两份 README 三步指引（不夸大），
-//      以及 README 版本标签（1.4.0）不再残留旧版本号。
+//      以及 README 版本标签跟随 package.json（不再残留旧版本号）。
 //
 // 只 import dist/*.js（跑前 `npm run build`）；破坏性实验一律在 mkdtemp 临时库，绝不碰真实文献库。
 
@@ -791,10 +791,13 @@ test('C4 【F-J】content_list 形态按通道区分：本地 legacy = JSON 字�
   assert.match(m, /vlm[^\n]*未(实测|验证)|未(实测|验证)[^\n]*vlm/, 'src 注释也要列出未验证项')
 })
 
-test('C3 README 版本标签已同步到 1.4.0（不再残留 1.5.0/1.6.0）', () => {
+test('C3 README 版本标签与 package.json 同步（不再残留 1.5.0/1.6.0）', () => {
+  // 期望值跟着 package.json 走：发版只改三处（package.json + 两个 README），本测试不再逐版手写
+  const v = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version
+  const vEsc = v.replaceAll('.', '\\.')
   for (const f of ['README.md', 'README_EN.md']) {
     const t = readFileSync(join(REPO, f), 'utf8')
     assert.ok(!/1\.5\.0|1\.6\.0/.test(t), `${f} 残留旧版本号：${(t.match(/1\.[56]\.0/g) || []).join(', ')}`)
-    assert.match(t, /v1\.4\.0|@1\.4\.0/, `${f} 必须出现 v1.4.0 / @1.4.0`)
+    assert.match(t, new RegExp(`v${vEsc}|@${vEsc}`), `${f} 必须出现 v${v} / @${v}`)
   }
 })
