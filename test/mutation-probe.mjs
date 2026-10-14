@@ -113,11 +113,34 @@ const MUTATIONS = [
   { id: 'E-paper-cap-removed', file: 'src/scope.ts', needsBuild: true, pattern: 'E1 ',
     from: '        const limit = Math.max(0, Math.min(MAX_PER_DOC, budget() - 200))', to: '        const limit = body.text.length',
     why: '单篇正文上限被去掉（超长文档直接全塞）' },
+  // ── I t9（repair-round-2）验收点 ──
+  { id: 'I-no-COPYFILE-EXCL', file: 'src/migrate.ts', needsBuild: true, pattern: 'C18',
+    from: '  const copyImpl = opts.copyImpl ?? ((from: string, to: string) => copyFileSync(from, to, fsConstants.COPYFILE_EXCL))',
+    to: '  const copyImpl = opts.copyImpl ?? copyFileSync',
+    why: '去掉结构护栏：默认复制不再 EXCL（判定层一旦回归就会静默覆盖已有常规文件）' },
+  { id: 'I-rmSync-target-restored', file: 'src/migrate.ts', needsBuild: true, pattern: 'C18',
+    from: '        const link = readlinkSync(fromAbs)\n        symlinkSync(link, toAbs)',
+    to: '        const link = readlinkSync(fromAbs)\n        try { rmSync(toAbs, { force: true }) } catch { /* 不存在 */ }\n        symlinkSync(link, toAbs)',
+    why: 'F-A 的祸根回归：符号链接分支先 rmSync(force) 目标（会删掉论文夹里的常规文件）' },
+  { id: 'I-symlink-source-bypass', file: 'src/migrate.ts', needsBuild: true, pattern: 'C10 ',
+    from: '        if (targetKind === \'none\') {', to: '        if (targetKind === \'none\' || st.isSymbolicLink()) {',
+    why: 'F-A 原始缺陷：符号链接源绕过占位判定 ⇒ 阶段 1 覆盖论文夹里的常规文件' },
+  { id: 'I-unreadable-silent', file: 'src/migrate.ts', needsBuild: true, pattern: 'C16 ',
+    from: '      if (rel) unreadable.push({ dir: rel, cause: (err as NodeJS.ErrnoException).code ?? \'unknown\' })',
+    to: '      void rel',
+    why: '读不进去的子树被静默忽略（用户以为全迁完了）' },
+  { id: 'I-rollback-trash-kept', file: 'src/migrate.ts', needsBuild: true, pattern: 'C17 ',
+    from: '  try {\n    rmdirSync(join(root, TRASH_DIR))\n  } catch { /* 非空 / 不存在 / 权限：留着无害（文案亦说明「失败会留下空回收站目录」） */ }',
+    to: '  void TRASH_DIR',
+    why: '回滚收尾不清空的回收站根（留一个空目录）' },
+  { id: 'I-clearplan-single-segment', file: 'src/host.ts', needsBuild: true, testFile: 'test/library-traversal-verification.test.mjs', pattern: 'V12b',
+    from: '      const topic = badTopicPath(res, rawTopic, true)\n      if (topic === null) return', to: '      const topic = rawTopic',
+    why: 'clear-plan 的 topic 绕过路径门（topic 类路由分工被破坏）' },
+  { id: 'I-paper-name-path-gate', file: 'src/host.ts', needsBuild: true, testFile: 'test/library-traversal-verification.test.mjs', pattern: 'V12b',
+    from: '      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }\n      if (badEntryBoundary(res, body.name)) return\n      if (rejectWritePath(body, res)) return\n      const topicPath = badTopicPath(res, body.topic, true)',
+    to: '      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }\n      if (badTopicPath(res, body.name, true) === null) return\n      if (rejectWritePath(body, res)) return\n      const topicPath = badTopicPath(res, body.topic, true)',
+    why: '论文名类入参改走路径门（分工被破坏；路径门会放过 `a/b` 这类带分隔符的论文名）' },
   // ── H 队长裁定与 t4 评审的 blocker/medium（F-A/F-B/F-C + 裁定 1/2）──
-  { id: 'HA-symlink-bypasses-conflict', file: 'src/migrate.ts', needsBuild: true, pattern: 'C10 ',
-    from: '        if (targetIsFile || targetIsLink) {',
-    to: '        if (targetIsFile && !st.isSymbolicLink()) {',
-    why: 'F-A：符号链接源绕过冲突判定 ⇒ 阶段 1 把论文夹里的常规文件覆盖成链接（内容不可恢复）' },
   { id: 'HB-subtopic-dir-conflict', file: 'src/migrate.ts', needsBuild: true, pattern: 'C11 ',
     from: "      if (targetKind === 'dir-other') {", to: '      if (false) {',
     why: 'F-B：把同名平铺论文塞进已有子专题目录 ⇒ 该目录同时是专题与论文（子专题内论文从列表/树消失、clearTopic 永久 409）' },
@@ -145,8 +168,8 @@ const MUTATIONS = [
     from: '      unlinked.push(e.from)', to: '      void e.from',
     why: 'F1b：阶段 2 中断时不报「哪些源已删」（可复跑判断失去依据）' },
   { id: 'F2-silent-overwrite', file: 'src/migrate.ts', needsBuild: true, pattern: 'C8 ',
-    from: '            : (!targetIsLink && sizeOf(toAbs) === st.size && sha256Of(toAbs) === sha256Of(fromAbs))',
-    to: '            : (!targetIsLink && sizeOf(toAbs) === st.size)',
+    from: '            ? (!st.isSymbolicLink() && sizeOf(toAbs) === st.size && sha256Of(toAbs) === sha256Of(fromAbs))',
+    to: '            ? (!st.isSymbolicLink() && sizeOf(toAbs) === st.size)',
     why: 'F2：只比 size 不比内容 ⇒ 同名不同内容被静默覆盖（与裁定的「文件夹赢」相反）' },
   { id: 'F3-flat-trash-bundle', file: 'src/library-manage.ts', needsBuild: true, pattern: 'C9 ',
     from: '  const sub = { abs: join(bundle.abs, plan.name), rel: join(bundle.rel, plan.name) }',
@@ -185,8 +208,8 @@ function build() {
   const r = sh('npm', ['run', 'build'])
   if (r.status !== 0) throw new Error(`build 失败：${r.stdout}${r.stderr}`)
 }
-function runTest(pattern) {
-  const r = sh('node', ['--test', `--test-name-pattern=${pattern}`, FEAT])
+function runTest(pattern, testFile = FEAT) {
+  const r = sh('node', ['--test', `--test-name-pattern=${pattern}`, testFile])
   return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` }
 }
 function sameAs(abs, original) {
@@ -213,12 +236,12 @@ for (const m of MUTATIONS) {
   try {
     writeFileSync(abs, mutated)
     if (m.needsBuild) build()
-    red = runTest(m.pattern)
+    red = runTest(m.pattern, m.testFile ?? FEAT)
     if (red.code === 0) note.push('注入后仍全绿（用例空转）')
   } catch (e) { note.push(String(e.message)) } finally {
     writeFileSync(abs, original)
     if (m.needsBuild) build()
-    green = runTest(m.pattern)
+    green = runTest(m.pattern, m.testFile ?? FEAT)
     restoreDirty = !sameAs(abs, original)
   }
   const ok = red?.code !== 0 && green?.code === 0 && restoreDirty === false && note.length === 0

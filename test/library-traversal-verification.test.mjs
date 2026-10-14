@@ -757,6 +757,38 @@ test('V12 防护是结构性的：realpath 规范化 + 严格子路径包含（�
   assert.match(host, /const badEntry = \(res: Res, raw: unknown\): boolean =>/, 'badEntry 必须做类型检查')
 })
 
+test('V12b 路由入参门分工：topic 类必须走路径门（badTopicPath/validateTopicPath），论文名类必须走边界门 badEntryBoundary', () => {
+  // 为什么单独一条：F4 把 rename-topic 的 `to` 从单段门换成路径门之后，V12 的「必须调用 badEntry」
+  // 断言被放宽成「badEntry/badEntryBoundary/badTopicPath 三者之一」——强度掉了。这里把**分工**钉死：
+  // topic 类入参只能走路径门（逐段词法 + 编码变形 + 深度/段长/总长上限），论文名类只能走边界门。
+  const host = readFileSync(join(REPO, 'src', 'host.ts'), 'utf8')
+  const block = (anchorText, len) => {
+    const at = host.indexOf(anchorText)
+    assert.ok(at >= 0, `找不到路由锚点：${anchorText}`)
+    return host.slice(at, at + len)
+  }
+  const topicRoutes = [
+    ['topic 创建', "sub === '/api/library/topic' && req.method === 'POST'", /validateTopicPath\(body\.name, false\)/],
+    ['upload', "sub === '/api/library/upload' && req.method === 'POST'", /validateTopicPath\(topic, false\)/],
+    ['delete-topic', "sub === '/api/library/delete-topic'", /badTopicPath\(res, rawName, true\)/],
+    ['rename-topic', "sub === '/api/library/rename-topic'", /badTopicPath\(res, rawName, true\)[\s\S]{0,900}badTopicPath\(res, rawTo, false\)/],
+    ['topic/clear', "sub === '/api/library/topic/clear' && req.method === 'POST'", /badTopicPath\(res, rawTopic, true\)/],
+    ['topic/clear-plan', "sub === '/api/library/topic/clear-plan' && req.method === 'GET'", /badTopicPath\(res, rawTopic, true\)/],
+  ]
+  for (const [name, anchorText, want] of topicRoutes) {
+    const seg = block(anchorText, 1200)
+    assert.match(seg, want, `${name} 的 topic 入参必须走路径门`)
+    // 路径门内部才用单段原语；路由层自己直接调单段原语 = 绕过路径校验（F4 的老毛病）
+    const head = seg.slice(0, seg.indexOf('await withInflight') === -1 ? seg.length : seg.indexOf('await withInflight'))
+    assert.ok(!/validateEntryName\(/.test(head), `${name} 不得在路由层直接用单段原语绕过路径门`)
+  }
+  for (const [name, anchorText] of [['delete-paper', "sub === '/api/library/delete-paper'"], ['rename-paper', "sub === '/api/library/rename-paper'"]]) {
+    const seg = block(anchorText, 600)
+    assert.match(seg, /badEntryBoundary\(res, body\.name\)/, `${name} 的论文名必须走边界门`)
+    assert.ok(!/validateEntryName\(/.test(seg.slice(0, seg.indexOf('await withInflight') === -1 ? seg.length : seg.indexOf('await withInflight'))), `${name} 不得在路由层直接用单段原语`)
+  }
+})
+
 test('V13 真实文献库在本次验证期间零改动（指纹）', () => {
   if (REAL_LIB_BEFORE === null) return
   assert.equal(existsSync(REAL_LIB), true)
