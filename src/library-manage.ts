@@ -1004,6 +1004,11 @@ export function clearTopic(dataDir: string, topic: unknown, renameImpl: RenameIm
         }
         try { rmSync(join(b.abs, 'manifest.json'), { force: true }); rmdirSync(b.abs) } catch { /* 留着无害 */ }
       }
+      // R2-3（顺手，第一轮 F-E，基线同）：把**空的** `.trash` 根也收掉 —— 否则一次失败的清空会在库里
+      // 留下一个空回收站目录。**非空一律不动**（那是用户可恢复的数据），rmdir 非递归天然保证这一点。
+      try {
+        rmdirSync(join(realDataDir(dataDir), TRASH_DIR))
+      } catch { /* 非空 / 不存在 / 权限：留着无害 */ }
     }
     const failedPaperRolledBack = (Array.isArray(base.rolledBack) ? (base.rolledBack as string[]) : [])
       .map((n) => `${failedPaper || '?'}/${n}`)

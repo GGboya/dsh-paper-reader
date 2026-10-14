@@ -172,7 +172,10 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
     } catch (err) {
       // 无权限/IO 错误的子树**单列 unreadable**（不静默当作「什么都没有」）：本次不处理它，
       // 但报告与成功响应里都要显式提示「有子树未处理」。
-      if (rel) unreadable.push({ dir: rel, cause: (err as NodeJS.ErrnoException).code ?? 'unknown' })
+      // R2-2：**根也要进 unreadable**。chmod 300（可写可进、不可读）时 readdir 会失败，
+      // 若只记 `rel`（根为 ''）就会漏掉 ⇒ plan.moves=0 / unreadable=[] ⇒ 写 .done = **假成功**
+      //（论文其实全在旧布局，用户却看到「迁移完成」）。根用 '.' 表示。
+      unreadable.push({ dir: rel || '.', cause: (err as NodeJS.ErrnoException).code ?? 'unknown' })
       return
     }
     // 本层收集「论文 stem → 命中文件」。stem 有三个来源（并集）：
@@ -512,6 +515,11 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
       // 有跳过项 ⇒ **绝不**写「全部完成」标记（用户会以为迁完了）
       writeFileSync(join(root, PARTIAL_MARKER), JSON.stringify(marker, null, 2) + '\n', 'utf8')
     } else {
+      // R2-1：全量成功必须**清掉旧的 .partial** —— 否则跳过项修好之后，每次干跑报告都会
+      // 永久谎报「上次有跳过项」，而那份报告正是用户点头迁移前唯一要读的东西（谎报=欺骗用户）。
+      // 顺序刻意是「先清 .partial、再写 .done」：中途死掉时两个标记都不在 ⇒ 报告只会保守地说
+      // 「没有完成标记」，绝不会出现「.done 与 .partial 同时在场」的谎报（复跑幂等，会重新写）。
+      rmSync(join(root, PARTIAL_MARKER), { force: true })
       writeFileSync(join(root, DONE_MARKER), JSON.stringify(marker, null, 2) + '\n', 'utf8')
     }
     return {
@@ -673,6 +681,15 @@ export function rollbackMigration(dataDir: string, logPath: string): { ok: true;
  * CLI：`node dist/migrate.js [--data-dir <dir>] [--dry-run|--apply|--rollback [<log>]] [--yes] [--no-hash]`
  * 默认 **--dry-run**（只读）：绝不在没有显式 `--apply` 的情况下动用户数据。
  */
+/**
+ * 迁移 CLI。**退出码（队长裁定，脚本化调用者据此分支）**：
+ *   · **0** = 全部迁移完成（没有跳过项/冲突/未处理子树）
+ *   · **2** = **部分完成**：有跳过项（不合规名 / 冲突 / 读不进去的子树）或运行被中断
+ *           ⇒ 库已部分迁移、源文件未丢，处理完那些篇再跑一次即可（幂等）
+ *   · **1** = **硬失败**：迁移过程出错（校验失败 / IO 错误…），库状态由日志与标记如实反映
+ *   · **64** = 用法错误（缺 `--yes` / 回滚缺日志路径 / 未知参数）
+ * `--dry-run`（默认）永远返回 0（它只是打印报告，不改任何东西）。
+ */
 export function migrateMain(argv: string[] = process.argv.slice(2)): number {
   const arg = (name: string): string | undefined => {
     const i = argv.indexOf(name)
@@ -681,12 +698,16 @@ export function migrateMain(argv: string[] = process.argv.slice(2)): number {
   const dataDir = arg('--data-dir')
   const mode = argv.includes('--apply') ? 'apply' : argv.includes('--rollback') ? 'rollback' : 'dry-run'
   const home = arg('--home')
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(USAGE)
+    return 0
+  }
   try {
     if (mode === 'rollback') {
       const logPath = arg('--rollback') ?? lastMigrationLog()
       if (!logPath) {
         console.error('回滚需要日志路径：--rollback <migration-log.jsonl>')
-        return 2
+        return 64
       }
       const r = rollbackMigration(dataDir ?? resolveDataDir(), logPath)
       console.log(`已回滚 ${r.restored} 个文件；删除空目录 ${r.dirsRemoved.length} 个。`)
@@ -697,7 +718,7 @@ export function migrateMain(argv: string[] = process.argv.slice(2)): number {
     if (mode === 'dry-run') return 0
     if (!argv.includes('--yes')) {
       console.error('执行迁移需要显式 --yes（先人工核对上面的干跑报告）')
-      return 2
+      return 64
     }
     const r = runMigration(dataDir ?? resolveDataDir(), { hash: !argv.includes('--no-hash'), ...(home ? { home } : {}) })
     if (r.partial) {
@@ -708,21 +729,40 @@ export function migrateMain(argv: string[] = process.argv.slice(2)): number {
       console.log(`迁移完成：复制 ${r.copied}，跳过 ${r.skipped}，删除源 ${r.removed}，删空目录 ${r.dirsRemoved.length}，重写学习档案 ${r.studyRewrites}。`)
     }
     console.log(`日志：${r.logPath}`)
-    return 0
+    console.log(r.partial ? '退出码 2：部分完成（有跳过项/未处理的子树）' : '退出码 0：全部迁移完成')
+    return r.partial ? 2 : 0
   } catch (err) {
     if (err instanceof MigrationAborted) {
       console.error(err.message)
       console.error(`日志：${err.detail.logPath}`)
-      return 3
+      console.error('退出码 2：运行被中断（部分完成，源文件未丢；可安全复跑）')
+      return 2
     }
     if (err instanceof MigrationError) {
       console.error(`迁移失败（${err.code}）：${err.message}`)
       return 1
     }
     console.error(err instanceof Error ? err.message : String(err))
+    console.error('退出码 1：硬失败（库状态见日志与标记）')
     return 1
   }
 }
+
+/** CLI 用法与**退出码**说明（`--help` 打印；也是脚本化调用者的契约文档）。 */
+export const USAGE = `用法：node dist/migrate.js [--data-dir <目录>] [--home <dsh home>] [--dry-run|--apply|--rollback <日志>] [--yes] [--no-hash]
+
+  --dry-run（默认）  只打印干跑报告，**不改任何东西**
+  --apply --yes      执行迁移（必须先人工核对干跑报告）
+  --rollback <日志>  按日志回滚到迁移前
+  --help             打印本说明
+
+退出码：
+  0   全部迁移完成（无跳过项/冲突/未处理子树）
+  2   部分完成：有跳过项（不合规论文名 / 冲突 / 读不进去的子树）或运行被中断
+      —— 库已部分迁移、源文件未丢，处理完那些篇再跑一次即可（幂等）
+  1   硬失败：迁移过程出错（校验失败 / IO 错误…）
+  64  用法错误（缺 --yes / 回滚缺日志路径）
+注意：「--dry-run」永远返回 0（它只是报告）；「--apply」后请按退出码分支，不要只看 stdout。`
 
 // 直接 `node dist/migrate.js` 时进入 CLI；被 import 时不执行。
 if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {
