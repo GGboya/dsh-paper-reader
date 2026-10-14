@@ -964,6 +964,9 @@ export function clearTopic(dataDir: string, topic: unknown, renameImpl: RenameIm
     const rollbackFailed: string[] = []
     for (const m of [...moved].reverse()) {
       try {
+        // ⚠️ 清空时每篇论文的文件夹会被（非递归）rmdir 收口 —— 回滚要把**父目录先建回来**，
+        // 否则 rename 目标不存在（ENOENT），文件只能留在回收站里、库里看起来「白了」（实测：D6 抓到）。
+        mkdirSync(dirname(m.toAbs), { recursive: true, mode: 0o700 })
         renameImpl(m.fromAbs, m.toAbs)
         rolledBack.push(m.label)
       } catch {

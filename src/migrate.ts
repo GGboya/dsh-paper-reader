@@ -535,7 +535,9 @@ export function rollbackMigration(dataDir: string, logPath: string): { ok: true;
     renameSync(toAbs, fromAbs)
     restored++
   }
-  const dirsRemoved = removeEmptyDirs(root, touchedDirs(entries.map((e) => e.from)))
+  // 候选目录要同时含**源**与**副本**的父目录：迁移时新建的论文文件夹（`T/P1/`）在搬回后是空的，
+  // 不收口就会在库里留下一堆空目录（实测：回滚后形状与迁移前不一致）。
+  const dirsRemoved = removeEmptyDirs(root, touchedDirs([...entries.map((e) => e.from), ...entries.map((e) => e.to)]))
   // 回滚完成后清掉完成标记（库已回到旧布局）
   try { rmSync(join(root, DONE_MARKER), { force: true }) } catch { /* 不存在 */ }
   return { ok: true, restored, dirsRemoved }

@@ -128,12 +128,14 @@ function readStudyBrief(file: string): string {
   }
 }
 
-/** 把范围内的论文列出来（kind='paper' 只有一篇）。 */
-export function scopePapers(dataDir: string, scope: AskScope): PaperRef[] {
+/** 把范围内的论文列出来（kind='paper' 只有一篇；不带 topic/name 时 = 当前这篇）。 */
+export function scopePapers(dataDir: string, scope: AskScope, current: PaperRef): PaperRef[] {
   if (scope.kind === 'paper') {
     const args: { topic?: string; name?: string } = {}
     if (scope.topic !== undefined) args.topic = scope.topic
     if (scope.name !== undefined) args.name = scope.name
+    // `{kind:'paper'}` 不带 topic/name = 「本篇」（默认范围的语义）；带则按给定的那篇
+    if (args.topic === undefined && args.name === undefined) return [current]
     return [resolvePaper(dataDir, args)]
   }
   // 专题/子专题：**整棵子树**内的全部论文（listPapers 已递归；论文目录不递归）
@@ -152,7 +154,7 @@ export function scopePapers(dataDir: string, scope: AskScope): PaperRef[] {
  * `question` 用于 kind='topic' 时的范围内检索（每篇 top-k）。
  */
 export function buildScopeContext(dataDir: string, current: PaperRef, scope: AskScope, question: string): ScopeContext {
-  const refs = scopePapers(dataDir, scope)
+  const refs = scopePapers(dataDir, scope, current)
   const scopePath = scope.kind === 'paper' ? `${refs[0]?.topic ?? current.topic}/${refs[0]?.name ?? current.name}` : scope.topic
   const papers: ScopePaper[] = []
   let omitted = 0
@@ -169,6 +171,9 @@ export function buildScopeContext(dataDir: string, current: PaperRef, scope: Ask
       papers.push({ topic: ref.topic, name: ref.name, path: label, pages, artifacts, study, coverage: 'omitted-no-room', source: null, chars: 0 })
       continue
     }
+    // 范围内的**每一篇**都进 papers[]（含清单里也是全量）：coverage 先给占位，
+    // 正文阶段再按「给了正文 / 被截断 / 没正文 / 没位置」更新 —— 否则统计与断言只覆盖被省略的那几篇。
+    papers.push({ topic: ref.topic, name: ref.name, path: label, pages, artifacts, study, coverage: 'no-body', source: null, chars: 0 })
     manifestLines.push(`- ${label}｜${pages != null ? `${pages} 页` : '页数未知'}｜${artifacts.join(' ')}｜学习档案：${study}`)
   }
   // 清单超上限时按行截断（仍显式说明）
