@@ -846,11 +846,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // 形状与 /api/library/paper/delete-plan 对齐（files/totalBytes/notDeleted），逐篇额外给
     // sessions/translation，让 UI 在用户点确认**之前**就能提示「第 7 篇正在翻译」。
     if (sub === '/api/library/topic/clear-plan' && req.method === 'GET') {
-      const topic = url.searchParams.get('topic') ?? ''
+      const rawTopic = url.searchParams.get('topic') ?? ''
       if (url.searchParams.get('path')) {
         json(res, 400, { error: '不接受 path 参数，请用 topic', code: 'escape-rejected' })
         return
       }
+      // topic 类路由统一入参门（与 delete/rename/clear 同一条）：逐段词法 + 编码变形 + 深度/长度上限
+      const topic = badTopicPath(res, rawTopic, true)
+      if (topic === null) return
       try {
         const plan = planTopicClear(dataDir, topic)
         const papers = []

@@ -13,13 +13,13 @@
 // 本模块不依赖 Cordis，可直接被测试 import（dist/migrate.js）。
 
 import {
-  copyFileSync, existsSync, lstatSync, mkdirSync, openSync, closeSync, fsyncSync, readdirSync, readFileSync,
+  constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, closeSync, fsyncSync, readdirSync, readFileSync,
   readlinkSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync, appendFileSync, rmSync,
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { dshHome, isPaperDir, isPaperPDF, resolveDataDir } from './library.ts'
-import { matchArtifactName, PAPER_STEM_SUFFIXES } from './library-manage.ts'
+import { matchArtifactName, PAPER_STEM_SUFFIXES, TRASH_DIR } from './library-manage.ts'
 
 export const DONE_MARKER = '.migration-v1.done'
 /** 有跳过项时写的**部分完成**标记（队长裁定 1：绝不写「全部完成」的假成功标记）。 */
@@ -53,6 +53,8 @@ export interface MigrationPlan {
   conflicts: Array<{ paper: string; target: string; reason: string }>
   /** 能识别成论文但**建不出**同名目录（前导点/保留名/超长） */
   quarantine: Array<{ paper: string; reason: string }>
+  /** 读不进去的子树（无权限 / IO 错误）：单列，绝不假装「库里只有这些」 */
+  unreadable: Array<{ dir: string; cause: string }>
   /** 已存在的论文目录（已迁移完成，跳过） */
   paperDirs: string[]
   totals: { papers: number; files: number; bytes: number; needBytes: number }
@@ -82,8 +84,10 @@ export interface MigrationResult {
   studyRewrites: number
   /** 有跳过项 = true（本次**不是**整体完成；用户须看 skippedPapers） */
   partial: boolean
-  /** 被跳过的论文（不合规名 / 冲突）：源文件一律原地未动 */
+  /** 被跳过的论文 / 未处理的子树（不合规名 / 冲突 / 读不进去）：源文件一律原地未动 */
   skippedPapers: Array<{ paper: string; code: string; reason: string }>
+  /** 本次**未处理**的子树（权限/IO）：成功响应里显式提示，别让用户以为全迁完了 */
+  unreadable: Array<{ dir: string; cause: string }>
   aborted?: false
 }
 
@@ -157,6 +161,7 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
   const hidden: string[] = []
   const conflicts: MigrationPlan['conflicts'] = []
   const quarantine: MigrationPlan['quarantine'] = []
+  const unreadable: MigrationPlan['unreadable'] = []
   const paperDirs: string[] = []
 
   const walk = (rel: string) => {
@@ -164,7 +169,10 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
     let entries
     try {
       entries = readdirSync(dir, { withFileTypes: true })
-    } catch {
+    } catch (err) {
+      // 无权限/IO 错误的子树**单列 unreadable**（不静默当作「什么都没有」）：本次不处理它，
+      // 但报告与成功响应里都要显式提示「有子树未处理」。
+      if (rel) unreadable.push({ dir: rel, cause: (err as NodeJS.ErrnoException).code ?? 'unknown' })
       return
     }
     // 本层收集「论文 stem → 命中文件」。stem 有三个来源（并集）：
@@ -243,28 +251,39 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
         const entry: MigrationEntry = { from: fromRel, to: toRel, bytes: st.size, symlink: st.isSymbolicLink() }
         const toAbs = join(root, toRel)
         const fromAbs = join(root, fromRel)
-        let targetIsFile = false
-        let targetIsLink = false
+        // 目标占位判定：**只要目标已存在就绝不进 moves**（比「只判常规文件」更严：已存在的链接/目录
+        // 同样不能交给阶段 1 —— 复制会**跟随链接写到库外**、目录会 EISDIR）。
+        //   · 目标是常规文件：内容相同（size+sha256）⇒ alreadyDone；不同 ⇒ conflict（先报告、零改动、源不动）
+        //   · 目标是符号链接：与源是同一份链接 ⇒ alreadyDone；否则 ⇒ conflict
+        //   · 目标既不是常规文件也不是链接（目录/设备…）⇒ conflict
+        // 只有**目标不存在**才进 moves。
+        let targetKind: 'none' | 'file' | 'link' | 'other' = 'none'
         try {
           const tst = lstatSync(toAbs)
-          targetIsFile = tst.isFile()
-          targetIsLink = tst.isSymbolicLink()
-        } catch { /* 目标不存在 */ }
-        // F-A：**符号链接源也要走冲突判定**。原先 `!st.isSymbolicLink() && targetIsFile` 让链接源绕过判定，
-        // 阶段 1 的 `rmSync(toAbs, {force:true})` 会把论文夹里那份**常规文件**换成链接（内容不可恢复、不进回收站）。
-        if (targetIsFile || targetIsLink) {
-          const sameEntry = st.isSymbolicLink()
-            ? (targetIsLink && readlinkOf(fromAbs) === readlinkOf(toAbs))         // 链接 ↔ 链接：同目标 = 同一份
-            : (!targetIsLink && sizeOf(toAbs) === st.size && sha256Of(toAbs) === sha256Of(fromAbs))
+          targetKind = tst.isSymbolicLink() ? 'link' : tst.isFile() ? 'file' : 'other'
+        } catch { targetKind = 'none' }
+        if (targetKind === 'none') {
+          moves.push(entry)
+        } else {
+          const sameEntry = targetKind === 'file'
+            ? (!st.isSymbolicLink() && sizeOf(toAbs) === st.size && sha256Of(toAbs) === sha256Of(fromAbs))
+            : targetKind === 'link'
+              ? (st.isSymbolicLink() && readlinkOf(fromAbs) === readlinkOf(toAbs))   // 链接 ↔ 链接：同目标 = 同一份
+              : false
           if (sameEntry) {
             alreadyDone.push(entry)
           } else {
-            // F2/F-A：目标已存在且与源不是同一份内容 ⇒ **绝不静默覆盖**（与裁定的「文件夹赢」相反、且是静默数据替换）。
+            // F2/F-A：目标已存在且与源不是同一份 ⇒ **绝不静默覆盖**（与裁定的「文件夹赢」相反、且是静默数据替换）。
             // 判冲突：先报告、源一律不动；该篇本次不迁移（队长裁定 1：跳过该篇继续，绝不整库中止）。
-            conflicts.push({ paper: targetRel, target: toRel, reason: st.isSymbolicLink() ? '论文夹内已有同名文件，与符号链接源不是同一份（绝不覆盖）' : '论文夹内已有同名文件且内容不同（文件夹赢：不覆盖、不删源）' })
+            const why = targetKind === 'file'
+              ? (st.isSymbolicLink()
+                ? '论文夹内已有同名常规文件，与符号链接源不是同一份（绝不覆盖）'
+                : '论文夹内已有同名文件且内容不同（文件夹赢：不覆盖、不删源）')
+              : targetKind === 'link'
+                ? '论文夹内已有同名符号链接，与源不是同一份（绝不覆盖）'
+                : '目标已存在且既不是常规文件也不是符号链接（绝不覆盖）'
+            conflicts.push({ paper: targetRel, target: toRel, reason: why })
           }
-        } else {
-          moves.push(entry)
         }
       }
     }
@@ -283,6 +302,7 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
     hidden,
     conflicts,
     quarantine,
+    unreadable,
     paperDirs,
     totals: {
       papers: new Set(all.map((e) => dirname(e.to))).size,
@@ -315,7 +335,7 @@ export function formatMigrationReport(plan: MigrationPlan): string {
     L.push(`孤儿文件（既不匹配任何论文也不是目录，**原地不动**）：${plan.orphans.length} 个`)
     for (const o of plan.orphans) L.push(`  ${o}`)
   }
-  const skippedTotal = plan.conflicts.length + plan.quarantine.length
+  const skippedTotal = plan.conflicts.length + plan.quarantine.length + plan.unreadable.length
   if (plan.conflicts.length > 0) {
     L.push('')
     L.push(`⚠️ 冲突（本次**跳过该篇**、源文件原地不动，其余照常迁移）：${plan.conflicts.length} 个`)
@@ -329,6 +349,12 @@ export function formatMigrationReport(plan: MigrationPlan): string {
   if (skippedTotal > 0) {
     L.push('')
     L.push(`注意：有 ${skippedTotal} 篇会被跳过 ⇒ 本次**不会**写「全部完成」标记，只会写 ${PARTIAL_MARKER}（含跳过清单）。`)
+  }
+  if (plan.unreadable.length > 0) {
+    L.push('')
+    L.push(`⚠️ 有 ${plan.unreadable.length} 棵子树**读不进去**（权限/IO），本次**未处理**：`)
+    for (const u of plan.unreadable) L.push(`  ${u.dir}（${u.cause}）`)
+    L.push('（请检查权限后重跑；这不会阻塞其它子树）')
   }
   if (plan.hidden.length > 0) {
     L.push('')
@@ -400,11 +426,14 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
   const skippedPapers = [
     ...plan.quarantine.map((q) => ({ paper: q.paper, code: 'migrate-quarantine', reason: q.reason })),
     ...plan.conflicts.map((c) => ({ paper: c.paper, code: 'migrate-conflict', reason: c.reason })),
+    // 读不进去的子树：本次**未处理**（不是「迁移失败」，但也绝不能当成「已完成」）
+    ...plan.unreadable.map((u) => ({ paper: u.dir, code: 'migrate-unreadable', reason: `子树读不进去（${u.cause}），本次未处理` })),
   ]
   const logPath = opts.logPath ?? newMigrationLogPath(home)
   lastLogPath = logPath
   const useHash = opts.hash !== false
-  const copyImpl = opts.copyImpl ?? copyFileSync
+  // COPYFILE_EXCL：目标已存在直接失败（结构上杜绝「覆盖已有常规文件」——判定层再严也不如内核层兜底）
+  const copyImpl = opts.copyImpl ?? ((from: string, to: string) => copyFileSync(from, to, fsConstants.COPYFILE_EXCL))
   const done: MigrationLogEntry[] = []
   /** 阶段 2 已删掉的源（catch 里要如实上报，所以声明在 try 之外） */
   const unlinked: string[] = []
@@ -416,9 +445,10 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
       const toAbs = join(root, m.to)
       mkdirSync(dirname(toAbs), { recursive: true })
       if (m.symlink) {
-        // 符号链接：只搬链接本身（绝不跟随复制目标内容）
+        // 符号链接：只搬链接本身（绝不跟随复制目标内容）。
+        // ⚠️ 这里**绝不**先 `rmSync(toAbs, {force:true})`：那会把目标处已有的条目删掉（正是 F-A 的祸根）。
+        // 目标已存在时 `symlinkSync` 自己会 EEXIST 失败 ⇒ 如实报错、不删源，由上层复跑/人工处理。
         const link = readlinkSync(fromAbs)
-        try { rmSync(toAbs, { force: true }) } catch { /* 不存在 */ }
         symlinkSync(link, toAbs)
         statSync(fromAbs)  // 悬空链接会抛：如实失败，不假装成功
       } else {
@@ -487,6 +517,7 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
     return {
       ok: true, copied: done.length, skipped: plan.alreadyDone.length, removed, dirsRemoved, logPath,
       doneMarker: partial ? '' : join(root, DONE_MARKER), studyRewrites, partial, skippedPapers,
+      unreadable: plan.unreadable,
     }
   } catch (err) {
     if (err instanceof MigrationError && err.code === 'migrate-interrupted') {
@@ -627,6 +658,11 @@ export function rollbackMigration(dataDir: string, logPath: string): { ok: true;
   // 候选目录要同时含**源**与**副本**的父目录：迁移时新建的论文文件夹（`T/P1/`）在搬回后是空的，
   // 不收口就会在库里留下一堆空目录（实测：回滚后形状与迁移前不一致）。
   const dirsRemoved = removeEmptyDirs(root, touchedDirs([...entries.map((e) => e.from), ...entries.map((e) => e.to)]))
+  // 回滚收尾：best-effort 清掉**空**的回收站根（迁移不用回收站；只是别留空目录）。
+  // 非空的 `.trash` 一律不动 —— 那是用户可恢复的数据。
+  try {
+    rmdirSync(join(root, TRASH_DIR))
+  } catch { /* 非空 / 不存在 / 权限：留着无害（文案亦说明「失败会留下空回收站目录」） */ }
   // 回滚完成后清掉完成/部分完成标记（库已回到旧布局）
   try { rmSync(join(root, DONE_MARKER), { force: true }) } catch { /* 不存在 */ }
   try { rmSync(join(root, PARTIAL_MARKER), { force: true }) } catch { /* 不存在 */ }
