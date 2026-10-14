@@ -1045,8 +1045,9 @@ test('VB1[B2] 前缀误删对抗：删 `Attention` 后 `Attention Is All You Nee
   }
   // 回收站里是 Attention 自己的产物（可恢复）
   const bundle = join(DATA, del.body.trashRel)
-  for (const n of planned) assert.ok(existsSync(join(bundle, n)), `回收站缺少 ${n}`)
-  assert.ok(existsSync(join(bundle, 'manifest.json')))
+  // F3：论文名层级（<bundle>/<论文名>/<文件>）——与 clearTopic 口径一致
+  for (const n of planned) assert.ok(existsSync(join(bundle, 'Attention', n)), `回收站缺少 ${n}（论文名层级下）`)
+  assert.ok(existsSync(join(bundle, 'manifest.json')), 'bundle 根必须有 manifest.json')
   // 库里：Attention 消失，兄弟文献还在（把 Attention-zh.txt 这种隐藏变体排除）
   const lib = await api('/api/library')
   const names = lib.body.papers.filter((p) => p.topic === topic).map((p) => p.name).sort()
@@ -1092,8 +1093,10 @@ test('VB2[B1/B3/B4] 全库快照对照：产物集合精确、不该删的一个
   assert.equal(bundles.size, 1, `只应新增一个回收站目录：${[...bundles]}`)
   const [bundle] = bundles
   assert.match(bundle, /^\.trash\/\d{8}T\d{6}Z-[0-9a-f]{6}$/, `回收站目录命名必须符合契约：${bundle}`)
+  // F3：回收站条目 = 论文名子目录 + 子目录内的产物 + bundle 根/子目录各一份 manifest.json
   assert.deepEqual(added.filter((k) => k.startsWith(bundle + '/')).map((k) => k.slice(bundle.length + 1)).sort(),
-    [...planned, 'manifest.json'].sort(), '回收站里必须恰好是被移走的文件 + manifest.json')
+    ['Target', ...planned.map((n) => `Target/${n}`), 'manifest.json', 'Target/manifest.json'].sort(),
+    '回收站里必须恰好是「论文名层级下的产物 + manifest」')
   // 专题目录本身仍在
   assert.equal(after['del2'], 'dir')
   // 共享资源一字未动
@@ -1342,8 +1345,8 @@ test('VB5[B7] 符号链接逃逸：只动链接本身，库外内容不变；符
     assert.equal(readFileSync(join(outside, 'precious.txt'), 'utf8'), 'precious-data', '库外目标必须原封不动')
     assert.ok(!existsSync(join(DATA, topic, 'Link.txt')))
     const bundle = join(DATA, del.body.trashRel)
-    assert.ok(lstatSync(join(bundle, 'Link.txt')).isSymbolicLink(), '回收站里保存的应是链接本身')
-    assert.equal(readlinkSync(join(bundle, 'Link.txt')), join(outside, 'precious.txt'))
+    assert.ok(lstatSync(join(bundle, 'Link', 'Link.txt')).isSymbolicLink(), '回收站里保存的应是链接本身（论文名层级下）')
+    assert.equal(readlinkSync(join(bundle, 'Link', 'Link.txt')), join(outside, 'precious.txt'))
 
     const del2 = await postJson('/api/library/paper/delete', { topic, name: 'LinkDir' })
     assert.equal(del2.status, 200, del2.text)

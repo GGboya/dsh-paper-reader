@@ -403,7 +403,7 @@ test('T9 不变式未回退：穿越输入全 4xx、`.pdf` 最后移、回收站
   assert.equal(del.body.moved[del.body.moved.length - 1], 'Victim.pdf', '`.pdf` 必须最后移')
   const bundle = join(DATA, '.trash', String(del.body.trashRel).replace(/^\.trash[\\/]/, ''))
   assert.ok(existsSync(join(bundle, 'manifest.json')))
-  assert.ok(existsSync(join(bundle, 'Victim.pdf')), '回收站里应能找到被删的 PDF（可恢复）')
+  assert.ok(existsSync(join(bundle, 'Victim', 'Victim.pdf')), '回收站里应能找到被删的 PDF（论文名层级，可恢复）')
   assert.deepEqual(readdirSync(dir), [])
   assert.deepEqual(diffSnap(beforeOut, snap(OUTSIDE)), [], '库外目录零变化')
   assert.equal(readFileSync(sentinelOut, 'utf8'), 'untouched')

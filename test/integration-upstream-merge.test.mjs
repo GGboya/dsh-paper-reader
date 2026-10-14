@@ -134,7 +134,8 @@ test('G1 上游 delete-paper / 我们的 paper/delete 别名：一批产物全�
   // 可恢复：回收站里真有这些文件 + manifest.json
   const trash = join(DATA, r.body.trashRel)
   assert.ok(existsSync(trash), '回收站目录必须存在')
-  assert.ok(r.body.moved.every((f) => existsSync(join(trash, f))), '响应里 moved 的每个文件都要真的在回收站里')
+  // F3：回收站保留**论文名层级**（<bundle>/<论文名>/<文件>，与 clearTopic 口径一致）
+  assert.ok(r.body.moved.every((f) => existsSync(join(trash, 'Paper One', f))), '响应里 moved 的每个文件都要真的在回收站里（论文名层级下）')
   assert.ok(existsSync(join(trash, 'manifest.json')), '回收站必须有可读的 manifest.json')
   assert.ok(!existsSync(join(dir, 'Paper One.pdf')), '原件必须已移走')
 
@@ -631,7 +632,7 @@ test('G4 .study.json（t4-F1 回归）：改名连带、删除进回收站、清
   assert.equal(del.status, 200, del.text)
   assert.ok(del.body.moved.includes('Renamed.study.json'), `moved 必须含 .study.json：${JSON.stringify(del.body.moved)}`)
   assert.equal(del.body.moved[del.body.moved.length - 1], 'Renamed.pdf', '`.pdf` 仍必须最后移')
-  assert.ok(existsSync(join(DATA, del.body.trashRel, 'Renamed.study.json')), '.study.json 必须真的在回收站里')
+  assert.ok(existsSync(join(DATA, del.body.trashRel, 'Renamed', 'Renamed.study.json')), '.study.json 必须真的在回收站里（论文名层级下）')
   // ③ 清空后删专题不再 409（残留 .study.json 曾永久阻塞删专题）
   const td = await postJson('/api/library/delete-topic', { topic: 'g4', confirmName: 'g4' })
   assert.equal(td.status, 200, `删完文献后专题必须可删（残留 .study.json 曾 409）：${td.text}`)
@@ -738,5 +739,5 @@ test('Q2 端到端（t4 评审 [3]④）：手工放入 .hidden.pdf → 库里�
   assert.equal(del.status, 200, `隐藏名文献必须能删：${del.text}`)
   assert.ok(del.body.moved.includes('.hidden.pdf'))
   assert.ok(!existsSync(join(DATA, 'q2', '.hidden.pdf')), '磁盘上必须消失')
-  assert.ok(existsSync(join(DATA, del.body.trashRel, '.hidden.pdf')), '且必须进回收站（可恢复）')
+  assert.ok(existsSync(join(DATA, del.body.trashRel, '.hidden', '.hidden.pdf')), '且必须进回收站（可恢复；论文名层级）')
 })

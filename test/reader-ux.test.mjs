@@ -511,7 +511,7 @@ test('C5 删除文献：产物进 .trash（含 manifest），不该删的一字�
   assert.ok(existsSync(bundle), '回收站目录应存在')
   // 只对目录名做存在性检查，避免平台相关路径拼错
   assert.ok(existsSync(join(bundle, 'manifest.json')), 'manifest.json 应写入')
-  assert.ok(existsSync(join(bundle, 'book.pdf')), '被删的 PDF 应在回收站里（可恢复）')
+  assert.ok(existsSync(join(bundle, 'book', 'book.pdf')), '被删的 PDF 应在回收站里（论文名层级，可恢复）')
   const mani = JSON.parse(readFileSync(join(bundle, 'manifest.json'), 'utf8'))
   assert.equal(mani.kind, 'paper')
   assert.equal(mani.name, 'book')
@@ -858,7 +858,7 @@ test('E5 deletePaper：函数层同样保证 .pdf 最后移 + 回收站可恢复
     assert.deepEqual(res.moved, ['p.mineru.json', 'p.pdf'])
     assert.ok(!existsSync(join(root, 't', 'p.pdf')))
     assert.ok(existsSync(join(root, 't', 'q.pdf')), '别的文献必须完好')
-    assert.ok(existsSync(join(root, '.trash', res.trashRel.replace(/^\.trash[\\/]/, ''), 'p.pdf')))
+    assert.ok(existsSync(join(root, '.trash', res.trashRel.replace(/^\.trash[\\/]/, ''), 'p', 'p.pdf')))
     assert.deepEqual(res.skipped, [])
     // 再删一次 → 404（文献已不在）
     assert.throws(() => deletePaper(root, 't', 'p'), (e) => e.status === 404)

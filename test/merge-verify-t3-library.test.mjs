@@ -276,11 +276,12 @@ test('V3 删除语义：整批产物进 .trash、.pdf 最后移、manifest 可�
   assert.ok(existsSync(join(trash, 'manifest.json')), '回收站必须有 manifest.json')
   const manifest = JSON.parse(readFileSync(join(trash, 'manifest.json'), 'utf8'))
   assert.ok(Array.isArray(manifest.files ?? manifest.moved ?? Object.values(manifest)) || typeof manifest === 'object', 'manifest 必须可读')
-  for (const f of body.moved) assert.ok(existsSync(join(trash, f)), `${f} 必须真的在回收站里`)
+  // F3：回收站保留论文名层级（<bundle>/<论文名>/<文件>）
+  for (const f of body.moved) assert.ok(existsSync(join(trash, 'Attention', f)), `${f} 必须真的在回收站里（论文名层级下）`)
   // **搬回来**（恢复）后必须与删除前逐字节一致
   const restored = {}
   for (const f of body.moved) {
-    const src = join(trash, f)
+    const src = join(trash, 'Attention', f)
     const dst = join(DATA, 't', f)
     renameSync(src, dst)
     restored[join(DATA, 't', f)] = 'F:' + createHash('sha256').update(readFileSync(dst)).digest('hex')
