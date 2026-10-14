@@ -7,7 +7,7 @@
 
 **中文**: [README.md](README.md)
 
-A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin: a **paper reading workbench** — paper library + PDF reader + AI companion. Every answer cites page numbers, and clicking a page jumps back to the exact highlighted passage. Current version: **v1.5.0**.
+A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin: a **paper reading workbench** — paper library + PDF reader + AI companion. Every answer cites page numbers, and clicking a page jumps back to the exact highlighted passage. Current version: **v1.6.0**.
 
 > 💬 **QQ group: 1127244508** — questions, feature requests, and bug reports are all welcome.
 
@@ -21,10 +21,14 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 
 - 📚 **Three-pane workbench**: topic library + PDF reader + native chat on the right; installing does not modify the official UI — just one extra toggle in the sidebar
 - 💬 **Page-cited companion**: every answer cites page numbers; click one to jump back and flash the passage; select-to-ask on any text; conversation history supported
+- 🌙 **PDF dark mode** (v1.6.0): when dsh goes dark the PDF follows (follow by default); one shared config for the settings panel and the reader "A" button, four strength presets. It inverts the rendered page and rotates hue back, so **photos/figures become negatives** (a known cost; switch it off in one click); downloads/exports are always the original bytes
+- 🗂️ **Per-paper folders** (v1.6.0): each paper's PDF/translations/transcript/study file live in `<topic>/<paper>/`; an existing flat library migrates with an **idempotent, interruptible, revertible** move (copy-first-then-delete, dry-run report before any change)
+- 🌳 **Nested subtopics** (v1.6.0): create subtopics to any depth, rename them, move them under another parent; deleting a non-empty topic still goes through the clear-plan + typed-confirmation flow
+- 🎯 **Scoped asking** (v1.6.0): pick a scope (this paper / this topic incl. subtopics) and only that scope's directory contents and retrieved passages are given to the model; out-of-scope content never appears, truncation is stated explicitly
 - 🤖 **Tutor mode**: a dedicated preset makes step-by-step reading plans, coaches section by section, and grades quizzes; progress accumulates across sessions
 - 🀄 **One-click Chinese version**: in-place original ↔ Chinese toggle; exportable translation PDFs (Chinese / bilingual); the translation engine auto-installs, zero preinstall
-- 🈯 **Selection translation (formulas preserved)** (v1.5.0): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
-- 🖥️ **Bilingual side-by-side / split view** (v1.5.0): a doubled-width对照 page or a two-pane split with synchronised scrolling — switch any time, remembered per paper
+- 🈯 **Selection translation (formulas preserved)** (v1.6.0): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
+- 🖥️ **Bilingual side-by-side / split view** (v1.6.0): a doubled-width对照 page or a two-pane split with synchronised scrolling — switch any time, remembered per paper
 - 🗂️ **Library management**: rename/delete topics and papers; deletion goes to a recoverable trash
 - ➕ **Optional add-ons** (off by default): MinerU parsing — scanned PDFs become readable, formulas become **Click to cite a formula** and searchable; an embeddings endpoint — plain-language semantic search
 
