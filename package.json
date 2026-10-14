@@ -48,6 +48,7 @@
     "pretest": "npm run build",
     "test": "node --test --test-timeout=60000 --test-concurrency=1 \"test/*.test.mjs\"",
     "smoke:engine": "node scripts/engine-smoke.mjs",
+    "migrate": "node dist/migrate.js",
     "prepublishOnly": "tsc -p tsconfig.json"
   },
   "keywords": [
