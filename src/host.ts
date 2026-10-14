@@ -805,7 +805,10 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       // ——这样「历史遗留的怪名专题 → 改成规范名」这条路不被自己的校验堵死。
       const topicPath = badTopicPath(res, rawName, true)
       if (topicPath === null) return
-      if (badEntry(res, rawTo)) return
+      // F4：`to` 是**路径**（`A/B`）——「移动到另一父」必须能走通。与 topic 创建/清空同一条门：
+      // 逐段命名规范类校验 + 深度/段长/总长上限 + 编码变形拒绝（绝不退回单段的 validateEntryName）。
+      const toPath = badTopicPath(res, rawTo, false)
+      if (toPath === null) return
       if (rejectWritePath(body, res)) return
       await withInflight(`topic\u0000${topicPath}`, res, async () => {
         try {
@@ -825,7 +828,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
             if (zhStatus(ref).busy) busy++
           }
           if (busy > 0) throw new ManageError('translation-busy', 409, '该专题有正在生成译文的文献，请等待完成后再重命名', {})
-          const r = renameTopic(dataDir, plan.name, rawTo)
+          const r = renameTopic(dataDir, plan.name, toPath)
           dropWorkspaceCache(plan.name)
           // 响应补 `topic`（上游 UI/文档读法）——我们的 RenameResult 用 from/to
           json(res, 200, { ...r, topic: r.to, detachedSessions: detached })

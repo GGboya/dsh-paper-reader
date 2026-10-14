@@ -19,6 +19,7 @@ import {
   MAX_TOPIC_DEPTH,
   MAX_TOPIC_PATH,
   MAX_TOPIC_SEG,
+  encodedEscapeError,
   assertInside as assertInsideShared,
   isPaperDir,
   isPaperPDF,
@@ -166,6 +167,9 @@ export function validateTopicPath(raw: unknown, boundaryOnly = false): string {
   if (typeof raw !== 'string') throw new ManageError('bad-name', 400, `${what}不能为空`)
   const trimmed = raw.trim()
   if (!trimmed) throw new ManageError('bad-name', 400, '名字不能为空')
+  // F4 负向：编码变形（`%2E%2E%2F`）解码后才是分隔符/上跳 ⇒ 一律拒（合法含 `%` 的名字不受影响）
+  const enc = encodedEscapeError(trimmed)
+  if (enc) throw new ManageError('bad-name', 400, enc)
   if (trimmed.length > MAX_TOPIC_PATH) throw new ManageError('bad-name', 400, `名字过长（专题路径最多 ${MAX_TOPIC_PATH} 个字符）`)
   const segs = trimmed.split('/')
   if (segs.length > MAX_TOPIC_DEPTH) throw new ManageError('bad-name', 400, `路径越界：专题层级过深（最多 ${MAX_TOPIC_DEPTH} 层）`)
@@ -572,7 +576,19 @@ export function deletePaper(dataDir: string, topic: unknown, name: unknown, rena
   const hidden = plan.layout === 'folder'
     ? managedEntries(paperDirAbs, (n) => n.startsWith('.') && !artifactNames.has(n))
     : []
-  const res = moveToTrash(bundle, paperDirAbs, [...hidden, ...plan.files], renameImpl)
+  // F3：回收站里保留**论文名层级**（`<bundle>/<论文名>/<文件>`），与 clearTopic 的
+  // `<bundle>/<论文标签>/<文件>` 口径一致 —— 用户/脚本按「原相对路径」就能找到并恢复。
+  const sub = { abs: join(bundle.abs, plan.name), rel: join(bundle.rel, plan.name) }
+  mkdirSync(sub.abs, { recursive: true, mode: 0o700 })
+  let res
+  try {
+    res = moveToTrash(sub, paperDirAbs, [...hidden, ...plan.files], renameImpl)
+  } catch (err) {
+    // 干净回滚时把空的回收站记录收掉（与改造前口径一致：失败的删除不留空 bundle）
+    try { rmSync(join(sub.abs, 'manifest.json'), { force: true }); rmdirSync(sub.abs) } catch { /* 非空/权限：留着无害 */ }
+    try { rmdirSync(bundle.abs) } catch { /* 还有别的东西：留着无害 */ }
+    throw err
+  }
   // 论文目录整体收口：非递归 rmdir（绝无 rm -rf）。目录里若还有我们不认识的条目，
   // 就如实保留（`dirRemoved:false`），绝不为了「删干净」去递归删除。
   let dirRemoved = false
@@ -582,24 +598,30 @@ export function deletePaper(dataDir: string, topic: unknown, name: unknown, rena
       dirRemoved = true
     } catch { /* 目录仍非空（用户自放内容）→ 保留，如实回报 */ }
   }
-  writeManifest(bundle.abs, {
+  const manifest = {
     v: 1,
     kind: 'paper',
     topic: plan.topic,
     name: plan.name,
     /** 原论文目录（相对 dataDir）——回收站恢复时的原始位置线索 */
     relativeDir: plan.dirRel,
+    /** 本条目在回收站内的子目录（恢复时把这里的文件搬回 relativeDir） */
+    trashSubdir: plan.name,
     deletedAt: new Date().toISOString(),
     files: plan.files.map((f) => ({ name: f.name, kind: f.kind, bytes: f.bytes, symlink: f.symlink })),
-  })
+  }
+  writeManifest(sub.abs, manifest)     // 论文层级：就近的恢复线索
+  writeManifest(bundle.abs, manifest)  // bundle 根：既有调用方/断言读它
   return {
     ok: true,
     topic: plan.topic,
     name: plan.name,
     moved: res.moved,
     skipped: plan.files.filter((f) => !res.moved.includes(f.name)),
-    trashDir: res.trashDir,
-    trashRel: res.trashRel,
+    // 响应里的回收站线索是**bundle 根**（manifest.json 与论文名子目录所在处），
+    // 不是论文名子目录本身 —— 用户按它进回收站能一眼看到「哪篇、有哪些文件」。
+    trashDir: bundle.abs,
+    trashRel: bundle.rel,
     dirRemoved,
   }
 }

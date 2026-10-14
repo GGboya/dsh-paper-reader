@@ -88,6 +88,8 @@ export function topicSegments(raw: unknown, opts: { boundaryOnly?: boolean } = {
   if (typeof raw !== 'string') throw new Error('名字不能为空')
   const trimmed = raw.trim()
   if (!trimmed) throw new Error('名字不能为空')
+  const enc = encodedEscapeError(trimmed)
+  if (enc) throw new Error(enc)
   if (trimmed.length > MAX_TOPIC_PATH) throw new Error(`名字过长（专题路径最多 ${MAX_TOPIC_PATH} 个字符）`)
   const segs = trimmed.split('/')
   if (segs.length > MAX_TOPIC_DEPTH) throw new Error(`专题层级过深（最多 ${MAX_TOPIC_DEPTH} 层）`)
@@ -97,6 +99,26 @@ export function topicSegments(raw: unknown, opts: { boundaryOnly?: boolean } = {
     if (seg.trim().length > MAX_TOPIC_SEG) throw new Error(`专题名过长（每层最多 ${MAX_TOPIC_SEG} 个字符）`)
   }
   return segs.map((s) => s.trim())
+}
+
+/**
+ * 「编码变形」防护（F4 的负向之一）：`%2e%2e%2f` 这类**解码后才是分隔符/上跳**的输入一律拒。
+ * 只在解码**成功且确实揭示了分隔符或 `..` 段**时拒绝 —— 名字里合法地含 `%`（如 `50% off`）不受影响
+ * （解码失败 = 原样当名字，交词法层处理）。
+ */
+export function encodedEscapeError(raw: string): string | null {
+  if (!raw.includes('%')) return null
+  let dec: string
+  try {
+    dec = decodeURIComponent(raw)
+  } catch {
+    return null   // 不是合法百分号编码：它就是一个普通名字（`%` 是合法文件名字符）
+  }
+  if (dec === raw) return null
+  if (dec.includes('\u0000')) return '名字包含编码后的控制字符，已拒绝'
+  if (/[\\/]/.test(dec)) return '名字包含编码后的路径分隔符（%2F/%5C），已拒绝'
+  if (dec.split('/').includes('..')) return '名字包含编码后的上跳（%2E%2E），已拒绝'
+  return null
 }
 
 /** 规范化后的专题路径（`A/B/C`）。校验失败抛普通 Error。 */

@@ -79,10 +79,12 @@ export interface MigrationResult {
 
 export interface MigrationAbort {
   ok: false
-  /** 已完成复制（**没有删任何源**）的条目 */
+  /** 已完成复制（源此时仍完好）的条目 */
   done: MigrationLogEntry[]
-  /** 尚未处理的条目 */
+  /** 尚未处理的条目（**阶段 1** 的视角） */
   remaining: MigrationEntry[]
+  /** **阶段 2 已经删掉的源**（相对 dataDir）——复跑时这些条目已经收敛，其余仍待收口 */
+  unlinked: string[]
   error: string
   logPath: string
 }
@@ -155,6 +157,9 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
         continue
       }
       if (e.isDirectory()) {
+        // F1/F1b：**已存在的论文文件夹**也算一个 stem。阶段 2 逐条删源时若在「某篇的 `<名>.pdf` 已删、
+        // 同篇其余产物还在」处中断，只认平铺 pdf 会把那些产物误判成 orphan（永远留在旧布局 ⇒ 对插件等于消失）。
+        if (isPaperDir(join(dir, e.name))) byStem.set(e.name, [])
         walk(relPath)
         continue
       }
@@ -195,9 +200,23 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
           continue
         }
         const entry: MigrationEntry = { from: fromRel, to: toRel, bytes: st.size, symlink: st.isSymbolicLink() }
-        if (!st.isSymbolicLink() && existsSync(join(root, toRel)) && sizeOf(join(root, toRel)) === st.size) {
-          // 已完成判定：目标存在且 size 一致（sha256 在阶段 1 校验时再比对一次，双保险）
-          alreadyDone.push(entry)
+        let targetIsFile = false
+        try {
+          targetIsFile = lstatSync(join(root, toRel)).isFile()
+        } catch { /* 目标不存在 */ }
+        if (!st.isSymbolicLink() && targetIsFile) {
+          const toAbs = join(root, toRel)
+          const fromAbs = join(root, fromRel)
+          const sameSize = sizeOf(toAbs) === st.size
+          // 「已完成」必须是**同内容**：size 相同还不够（内容不同 = 静默覆盖，正是 F2）
+          const sameContent = sameSize && sha256Of(toAbs) === sha256Of(fromAbs)
+          if (sameContent) {
+            alreadyDone.push(entry)
+          } else {
+            // F2：目标已存在且内容不同 ⇒ **绝不静默覆盖**（那与队长裁定的「文件夹赢」相反，且是静默数据替换）。
+            // 判冲突：先报告不执行（runMigration 见 conflicts 即中止），源一律不动。
+            conflicts.push({ paper: targetRel, target: toRel, reason: '论文夹内已有同名文件且内容不同（文件夹赢：不覆盖、不删源）' })
+          }
         } else {
           moves.push(entry)
         }
@@ -329,6 +348,8 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
   const useHash = opts.hash !== false
   const copyImpl = opts.copyImpl ?? copyFileSync
   const done: MigrationLogEntry[] = []
+  /** 阶段 2 已删掉的源（catch 里要如实上报，所以声明在 try 之外） */
+  const unlinked: string[] = []
   const todo = [...plan.moves]
   try {
     // ── 阶段 1：只复制（源完好）──
@@ -390,6 +411,7 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
         throw new MigrationError('migrate-unlink-failed', `删除源文件失败（目标副本完好，数据不丢）：${e.from}：${(err as Error).message}`)
       }
       removed++
+      unlinked.push(e.from)
       void i
     }
     // 自底向上 rmdir 空目录（**非递归**，空即删，绝不 rm -rf）
@@ -402,7 +424,7 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
   } catch (err) {
     if (err instanceof MigrationError && err.code === 'migrate-interrupted') {
       const doneSet = new Set(done.map((d) => d.from))
-      throw new MigrationAborted({ ok: false, done, remaining: todo.filter((m) => !doneSet.has(m.from)), error: err.message, logPath })
+      throw new MigrationAborted({ ok: false, done, remaining: todo.filter((m) => !doneSet.has(m.from)), unlinked, error: err.message, logPath })
     }
     throw err
   }
