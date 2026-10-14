@@ -113,10 +113,24 @@ const MUTATIONS = [
   { id: 'E-paper-cap-removed', file: 'src/scope.ts', needsBuild: true, pattern: 'E1 ',
     from: '        const limit = Math.max(0, Math.min(MAX_PER_DOC, budget() - 200))', to: '        const limit = body.text.length',
     why: '单篇正文上限被去掉（超长文档直接全塞）' },
+  // ── L t15（PR #8 macOS 红点：符号链接路径下入口判定失守）──
+  { id: 'L1-guard-plain-resolve', file: 'src/migrate.ts', needsBuild: true, pattern: 'C23',
+    from: `  try {
+    const a = statSync(argv1)
+    const b = statSync(self)
+    // ino 为 0 的平台上（某些 Windows 文件系统）这条判据无意义，退回路径比较
+    if (a.ino !== 0 && b.ino !== 0 && a.dev === b.dev && a.ino === b.ino) return true
+  } catch { /* 目标不可达：继续按路径比 */ }
+  const canon = (p: string): string => {
+    try { return realpathSync(p) } catch { return resolve(p) }
+  }
+  return canon(argv1) === canon(self)`,
+    to: `  return resolve(argv1) === resolve(self)`,
+    why: 'macOS 形态：/var/folders→/private/var 符号链接下 import.meta.url 是真实路径、argv[1] 是符号路径 ⇒ 朴素比较失守 ⇒ CLI 静默零输出' },
   // ── K t13（PR #8 Windows CI 红点）──
   { id: 'K1-cli-guard-url-pathname', file: 'src/migrate.ts', needsBuild: true, pattern: 'C23',
-    from: 'if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {',
-    to: 'if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {',
+    from: '  const self = fileURLToPath(metaUrl)',
+    to: '  const self = new URL(metaUrl).pathname',
     why: 'win32 的 URL.pathname 形如 /D:/... ⇒ resolve 后判不出入口 ⇒ CLI 静默什么都不做（Windows CI 上 C22 拿到空 stdout）' },
   { id: 'K2-theme-no-tighten', file: 'src/theme-config.ts', needsBuild: true, pattern: 'A2 ',
     from: '  await writeFile(file, JSON.stringify(cfg, null, 2) + \'\\n\', { encoding: \'utf8\', mode: 0o600 })\n  await chmod(file, 0o600)',

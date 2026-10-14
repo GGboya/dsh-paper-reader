@@ -14,7 +14,7 @@
 
 import {
   constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, closeSync, fsyncSync, readdirSync, readFileSync,
-  readlinkSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync, appendFileSync, rmSync,
+  readlinkSync, realpathSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync, appendFileSync, rmSync,
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { basename, dirname, join, relative, resolve } from 'node:path'
@@ -765,12 +765,40 @@ export const USAGE = `用法：node dist/migrate.js [--data-dir <目录>] [--hom
   64  用法错误（缺 --yes / 回滚缺日志路径）
 注意：「--dry-run」永远返回 0（它只是报告）；「--apply」后请按退出码分支，不要只看 stdout。`
 
+/**
+ * 判断「本次是不是直接跑这个文件」（而不是被 import）。
+ *
+ * 三个平台各有一种让**朴素字符串比较**失手的形态，全是同一类 bug：
+ *   · win32：`new URL(import.meta.url).pathname` 得到 `/D:/a/b/dist/migrate.js`，`path.resolve()`
+ *     会拼成 `D:\D:\a\...` ⇒ 与 `process.argv[1]` **永不相等** ⇒ CLI 静默零输出；
+ *   · POSIX：路径含空格/非 ASCII 时 pathname 是 %-转义形式（`%20`）⇒ 同样判不出；
+ *   · macOS：`os.tmpdir()` 是 `/var/folders/...`，它是 `/private/var/folders/...` 的**符号链接**，
+ *     而 Node 默认对主模块做 realpath ⇒ `import.meta.url` 派生出 `/private/...`，`process.argv[1]`
+ *     还是 `/var/...` ⇒ 两边字符串永不相等 ⇒ CLI **静默零输出**（CI job 115759573564 实测：
+ *     用例 C23 在含空格的临时目录下拿到空 stdout）。
+ * 所以判据按**实测能力**分层，绝不按平台名分支：
+ *   ① **同一实体**：`statSync` 的 (dev, ino) 相同 ⇒ 就是同一个文件 —— 符号链接、大小写、分隔符、
+ *      8.3 短名……全都影响不到它（`ino === 0` 的文件系统上这条无意义，自动跳过）；
+ *   ② 退化：两边各自 `realpathSync` 后再比（解开符号链接拿到规范路径）；
+ *   ③ 再退化（目标不可达时的最保守判断）：`resolve` 后直接比。
+ */
+export function isDirectRun(argv1: string | undefined, metaUrl: string): boolean {
+  if (!argv1) return false
+  const self = fileURLToPath(metaUrl)
+  try {
+    const a = statSync(argv1)
+    const b = statSync(self)
+    // ino 为 0 的平台上（某些 Windows 文件系统）这条判据无意义，退回路径比较
+    if (a.ino !== 0 && b.ino !== 0 && a.dev === b.dev && a.ino === b.ino) return true
+  } catch { /* 目标不可达：继续按路径比 */ }
+  const canon = (p: string): string => {
+    try { return realpathSync(p) } catch { return resolve(p) }
+  }
+  return canon(argv1) === canon(self)
+}
+
 // 直接 `node dist/migrate.js` 时进入 CLI；被 import 时不执行。
-// ⚠️ 必须用 `fileURLToPath`（平台感知）而不是 `new URL(import.meta.url).pathname`：
-//   · win32：pathname 形如 `/D:/a/b/dist/migrate.js`，`path.resolve()` 会拼成 `D:\D:\a\...` ⇒ 永不相等
-//     ⇒ CLI **静默什么都不做**（PR #8 Windows CI 上 C22 拿到空 stdout 就是这个）；
-//   · 任何平台：路径里有空格/非 ASCII 时 pathname 是 %-转义形式（`%20`），同样判不出。
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+if (isDirectRun(process.argv[1], import.meta.url)) {
   process.exitCode = migrateMain()
 }
 

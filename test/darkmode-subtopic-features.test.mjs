@@ -1121,7 +1121,7 @@ test('C22 【CLI 退出码】0=全迁完 / 2=部分完成 / 1=硬失败 / 64=用
   for (const code of ['0', '1', '2', '64']) assert.match(help.stdout, new RegExp('^  ' + code + '\\s', 'm'), `--help 必须写明退出码 ${code}`)
 })
 
-test('C23 【Windows CI 根因】CLI 入口判定必须用 fileURLToPath：带空格/win32 路径下 URL.pathname 判不出入口', async () => {
+test('C23 【入口判定】CLI 入口判定必须对空格路径/符号链接路径/win32 形态都成立（三种平台形态本机等价判别）', async () => {
   // win32 的 `new URL(import.meta.url).pathname` 形如 `/D:/a/b/dist/migrate.js`，`path.resolve()` 会拼成
   // `D:\D:\a\...` ⇒ 与 process.argv[1] 永不相等 ⇒ **CLI 静默什么都不做**（PR #8 Windows CI 上 C22 拿到
   // 空 stdout、`/退出码 0/` 匹配空串，就是这个）。同一缺陷在 POSIX 上也能复现：路径含空格/非 ASCII 时
@@ -1137,6 +1137,37 @@ test('C23 【Windows CI 根因】CLI 入口判定必须用 fileURLToPath：带�
     const plain = spawnSync(process.execPath, [join(REPO, 'dist', 'migrate.js'), '--help'], { encoding: 'utf8' })
     assert.match(plain.stdout, /退出码/)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+
+  // 符号链接形态（macOS `os.tmpdir()` = `/var/folders/...` → `/private/var/folders/...` 的等价物）：
+  // Node 默认对**主模块**做 realpath ⇒ `import.meta.url` 得到真实路径，而 `process.argv[1]` 仍是
+  // 「经由符号链接」的那条路径 ⇒ 朴素的字符串/`resolve` 比较必然失手（CI job 115759573564 实测：
+  // macOS 上 C23 拿到空 stdout）。本机用 fs.symlinkSync 造出完全同形的现场。
+  const REAL_DIST_MJS = join(REPO, 'dist', 'migrate.js')
+  const real = mkdtempSync(join(tmpdir(), 'dpr-cli-real-'))
+  const link = `${real}-link`
+  try {
+    cpSync(join(REPO, 'dist'), join(real, 'dist'), { recursive: true })
+    symlinkSync(real, link, 'dir')
+    const rl = spawnSync(process.execPath, [join(link, 'dist', 'migrate.js'), '--help'], { encoding: 'utf8' })
+    assert.equal(rl.status, 0, `符号链接路径下 CLI 必须正常跑：${rl.stdout}${rl.stderr}`)
+    assert.match(rl.stdout, /退出码/,
+      `入口判定必须在**符号链接路径**下成立（macOS /var→/private 同形）；空输出=守卫失守：${JSON.stringify(rl.stdout)}`)
+    // 同一份 CLI 经**真实路径**调用也必须正常（两条都必须成立）
+    const rr = spawnSync(process.execPath, [join(real, 'dist', 'migrate.js'), '--help'], { encoding: 'utf8' })
+    assert.match(rr.stdout, /退出码/)
+    // 直接对判据本身做对照（比子进程更细：覆盖「同一实体」判据与两个 false 分支）
+    const { isDirectRun } = await import(pathToFileURL(join(REPO, 'dist', 'migrate.js')).href)
+    // selfUrl 取**拷贝后的真实路径**（Node 就是这么给 import.meta.url 做 realpath 的）
+    const selfUrl = pathToFileURL(join(real, 'dist', 'migrate.js')).href
+    assert.equal(isDirectRun(join(link, 'dist', 'migrate.js'), selfUrl), true, '符号路径 ↔ 真实路径 = 同一入口')
+    assert.equal(isDirectRun(join(real, 'dist', 'migrate.js'), selfUrl), true, '真实路径 = 同一入口')
+    assert.equal(isDirectRun(join(REPO, 'dist', 'host.js'), selfUrl), false, '不同文件绝不得判成同一入口')
+    assert.equal(isDirectRun(REAL_DIST_MJS, selfUrl), false, '另一份同名文件（内容相同但不同实体）也不得算同一入口')
+    assert.equal(isDirectRun(undefined, selfUrl), false, 'argv[1] 缺失时不得执行')
+  } finally {
+    rmSync(link, { recursive: true, force: true })   // 只删链接本身（rmSync 不跟随符号链接）
+    rmSync(real, { recursive: true, force: true })
+  }
 })
 
 test('D7 【F4 靶子】路由层支持多段 to（移动到另一父）；.. / 绝对路径 / 编码变形 / 超深 / NUL 一律拒', async () => {
