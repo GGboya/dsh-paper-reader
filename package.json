@@ -1,6 +1,6 @@
 {
   "name": "@ggboy123/dsh-paper-reader",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "DeepSeek Harness 插件：论文伴读工作台 — PDF 转录 / 检索 / 原生对话伴读 + 内置阅读器页面。",
   "license": "MIT",
   "type": "module",
@@ -48,6 +48,7 @@
     "pretest": "npm run build",
     "test": "node --test --test-timeout=60000 --test-concurrency=1 \"test/*.test.mjs\"",
     "smoke:engine": "node scripts/engine-smoke.mjs",
+    "migrate": "node dist/migrate.js",
     "prepublishOnly": "tsc -p tsconfig.json"
   },
   "keywords": [

@@ -22,7 +22,7 @@ import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { normalizeEol, extractModuleScript } from './reader-script.mjs' // 行尾无关的 <script> 提取（Windows CRLF 检出）
-import { caseInsensitiveFs as caseInsensitiveFsOf, isBusyErrno, isTrashRelPath, renameOntoNonEmptyDirErrno } from './fs-probe.mjs'
+import { chmodBlocksRename, caseInsensitiveFs as caseInsensitiveFsOf, isBusyErrno, isTrashRelPath, renameOntoNonEmptyDirErrno } from './fs-probe.mjs'
 import vm from 'node:vm'
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 
@@ -1045,8 +1045,9 @@ test('VB1[B2] 前缀误删对抗：删 `Attention` 后 `Attention Is All You Nee
   }
   // 回收站里是 Attention 自己的产物（可恢复）
   const bundle = join(DATA, del.body.trashRel)
-  for (const n of planned) assert.ok(existsSync(join(bundle, n)), `回收站缺少 ${n}`)
-  assert.ok(existsSync(join(bundle, 'manifest.json')))
+  // F3：论文名层级（<bundle>/<论文名>/<文件>）——与 clearTopic 口径一致
+  for (const n of planned) assert.ok(existsSync(join(bundle, 'Attention', n)), `回收站缺少 ${n}（论文名层级下）`)
+  assert.ok(existsSync(join(bundle, 'manifest.json')), 'bundle 根必须有 manifest.json')
   // 库里：Attention 消失，兄弟文献还在（把 Attention-zh.txt 这种隐藏变体排除）
   const lib = await api('/api/library')
   const names = lib.body.papers.filter((p) => p.topic === topic).map((p) => p.name).sort()
@@ -1092,8 +1093,10 @@ test('VB2[B1/B3/B4] 全库快照对照：产物集合精确、不该删的一个
   assert.equal(bundles.size, 1, `只应新增一个回收站目录：${[...bundles]}`)
   const [bundle] = bundles
   assert.match(bundle, /^\.trash\/\d{8}T\d{6}Z-[0-9a-f]{6}$/, `回收站目录命名必须符合契约：${bundle}`)
+  // F3：回收站条目 = 论文名子目录 + 子目录内的产物 + bundle 根/子目录各一份 manifest.json
   assert.deepEqual(added.filter((k) => k.startsWith(bundle + '/')).map((k) => k.slice(bundle.length + 1)).sort(),
-    [...planned, 'manifest.json'].sort(), '回收站里必须恰好是被移走的文件 + manifest.json')
+    ['Target', ...planned.map((n) => `Target/${n}`), 'manifest.json', 'Target/manifest.json'].sort(),
+    '回收站里必须恰好是「论文名层级下的产物 + manifest」')
   // 专题目录本身仍在
   assert.equal(after['del2'], 'dir')
   // 共享资源一字未动
@@ -1107,6 +1110,15 @@ test('VB2[B1/B3/B4] 全库快照对照：产物集合精确、不该删的一个
     assert.ok(!after[`del2/${n}`], `${n} 必须已被移走`)
   }
 })
+
+/**
+ * 递归收集目录下的**文件名**（不含目录名）。
+ * 为什么必须递归：新布局把产物放在 `<topic>/<paper>/` 里，非递归 readdir 只会看到论文目录名 `p`
+ * 一个条目 ⇒ 会把「文件都好好地在论文夹里」误判成「文件都不见了」（PR #8 的 Windows CI，
+ * job 115752032053，VB3[B5] 正是 `['p']` vs `['p-zh.pdf','p.pdf','p.txt']` 的红）。
+ */
+const collectFileNames = (abs) => readdirSync(abs, { withFileTypes: true }).flatMap((e) =>
+  e.isDirectory() ? collectFileNames(join(abs, e.name)) : [e.name])
 
 test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没有文件被销毁', async (t) => {
   if (process.getuid && process.getuid() === 0) return t.skip('root 会绕过权限检查，本用例无意义')
@@ -1189,6 +1201,10 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     registerRoutes(makeCtx(), { dataDir: dataRO })
     const srv1 = createServer((req, res) => spec.handler(req, res))
     const base1 = (await listen(srv1)) + '/paper-reader'
+    // 注入能力按**实测**决定（chmodBlocksRename：本平台 chmod 是否真能挡住 rename），
+    // 而不是硬编码 `process.platform === 'win32'`：Windows 上 chmod 只映射「只读位」，挡不住 rename；
+    // 但同样的事实也可能出现在别的平台/文件系统上（例如容器里的某些 overlay），实测才靠谱。
+    const canInject = chmodBlocksRename(dataRO)
     chmodSync(join(dataRO, 't'), 0o500)
     const r = await fetch(`${base1}/api/library/paper/delete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ topic: 't', name: 'p' }) })
     const body = await r.json().catch(() => ({}))
@@ -1196,15 +1212,25 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
     spec = spec1
     writeProbe('vb3-move-failed.json', JSON.stringify({ status: r.status, body }, null, 2))
     // P-1（docs/pr5-review.md）：win32 的 chmod 只映射「只读位」，目录只读属性**不**阻止 rename
-    // ⇒ 本注入在 windows 上不生效（本机与 CI 均未跑过 win32）。win32 只校验**零销毁**不变量：
-    // 三个文件要么仍在专题里、要么在回收站里，一个都不能少（状态码 500/200 都合法）。
-    if (process.platform === 'win32') {
-      const inTopic = readdirSync(join(dataRO, 't')).sort()
+    // ⇒ 该注入在 win32 上不生效（CI job 115752032053 实测 status=200、文件其实**全都成功移动了**）。
+    // 这时只校验**零销毁**不变量：三个文件要么仍在专题里、要么在回收站里，一个都不能少（500/200 都合法）。
+    //
+    // ⚠️ 这里必须**递归**收集：新布局把产物放在 `<topic>/<paper>/` 里，非递归 readdir 只会看到论文
+    // 目录名 `p` 一个条目 ⇒ 会把「文件都在论文夹里」误判成「文件都不见了」（Windows CI 上正是
+    // `['p']` vs `['p-zh.pdf','p.pdf','p.txt']` 的红）。
+    const survivors = () => {
+      const inTopic = existsSync(join(dataRO, 't')) ? collectFileNames(join(dataRO, 't')).sort() : []
       const rel = typeof body.trashRel === 'string' ? body.trashRel : ''
-      const inTrash = rel && existsSync(join(dataRO, rel)) ? readdirSync(join(dataRO, rel)).filter((n) => n !== 'manifest.json').sort() : []
-      t.diagnostic(`P-1 win32：chmod 注入不生效（status=${r.status}），只校验零销毁不变量`)
+      const trashAbs = rel ? join(dataRO, rel) : ''
+      const inTrash = trashAbs && existsSync(trashAbs)
+        ? collectFileNames(trashAbs).filter((n) => n !== 'manifest.json').sort() : []
+      return { inTopic, inTrash }
+    }
+    if (!canInject) {
+      const { inTopic, inTrash } = survivors()
+      t.diagnostic(`注入不生效（实测 chmodBlocksRename=false；status=${r.status}），只校验零销毁不变量`)
       assert.deepEqual([...new Set([...inTopic, ...inTrash])].sort(), ['p-zh.pdf', 'p.pdf', 'p.txt'],
-        `win32：文件一个都不能被销毁（topic=${inTopic} trash=${inTrash}）`)
+        `文件一个都不能被销毁（topic=${inTopic} trash=${inTrash}）`)
     } else {
       assert.equal(r.status, 500, `移动失败必须 500：${r.status} ${JSON.stringify(body)}`)
       assert.equal(body.code, 'trash-move-failed', `必须带机器可读 code（S15）：${JSON.stringify(body)}`)
@@ -1218,6 +1244,35 @@ test('VB3[B5] 回收站移动失败：绝不回退 unlink，`.pdf` 仍在，没�
       assert.ok(!body.moved.includes('p.pdf'), '`.pdf` 必须最后移')
     }
   } finally { chmodSync(join(dataRO, 't'), 0o700); rmSync(dataRO, { recursive: true, force: true }) }
+
+  // ②b 平台无关地覆盖**移动成功**那一路的零销毁不变量：不做注入 ⇒ 200，三个产物必须**全在回收站里**、
+  // 一个都不丢、也不许留在专题目录里。这条在任何平台都跑（Windows CI 上 !canInject 分支断言的就是这套
+  // 逻辑），因此它同时是本机可判别的「递归收集」守卫：非递归读法会只看到论文目录名 `p` 而变红。
+  const dataOK = mkdtempSync(join(tmpdir(), 'dpr-ver-trash-ok-'))
+  try {
+    mkdirSync(join(dataOK, 't'))
+    writeFileSync(join(dataOK, 't', 'p.pdf'), PDF())
+    writeFileSync(join(dataOK, 't', 'p.txt'), 'cache')
+    writeFileSync(join(dataOK, 't', 'p-zh.pdf'), 'zh')
+    const spec2 = spec
+    registerRoutes(makeCtx(), { dataDir: dataOK })
+    const srv2 = createServer((req, res) => spec.handler(req, res))
+    const base2 = (await listen(srv2)) + '/paper-reader'
+    const r2 = await fetch(`${base2}/api/library/paper/delete`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ topic: 't', name: 'p' }),
+    })
+    const body2 = await r2.json().catch(() => ({}))
+    spec = spec2
+    assert.equal(r2.status, 200, `正常删除必须 200：${r2.status} ${JSON.stringify(body2)}`)
+    const rel2 = typeof body2.trashRel === 'string' ? body2.trashRel : ''
+    const trashAbs2 = rel2 ? join(dataOK, rel2) : ''
+    const inTrash2 = trashAbs2 && existsSync(trashAbs2)
+      ? collectFileNames(trashAbs2).filter((n) => n !== 'manifest.json').sort() : []
+    assert.deepEqual(inTrash2, ['p-zh.pdf', 'p.pdf', 'p.txt'],
+      `零销毁：三个产物必须都在回收站里（递归收集；实测 ${JSON.stringify(inTrash2)}）`)
+    assert.deepEqual(collectFileNames(join(dataOK, 't')), [],
+      '成功移动后专题里不该再残留产物（都在回收站）')
+  } finally { rmSync(dataOK, { recursive: true, force: true }) }
 
   // ③ 路由级（回收站目录本身无法创建）：观察真实响应（⚠️ 见 docs/reader-ux-verification.md 的 F1）
   const dataDir = mkdtempSync(join(tmpdir(), 'dpr-ver-trash2-'))
@@ -1342,8 +1397,8 @@ test('VB5[B7] 符号链接逃逸：只动链接本身，库外内容不变；符
     assert.equal(readFileSync(join(outside, 'precious.txt'), 'utf8'), 'precious-data', '库外目标必须原封不动')
     assert.ok(!existsSync(join(DATA, topic, 'Link.txt')))
     const bundle = join(DATA, del.body.trashRel)
-    assert.ok(lstatSync(join(bundle, 'Link.txt')).isSymbolicLink(), '回收站里保存的应是链接本身')
-    assert.equal(readlinkSync(join(bundle, 'Link.txt')), join(outside, 'precious.txt'))
+    assert.ok(lstatSync(join(bundle, 'Link', 'Link.txt')).isSymbolicLink(), '回收站里保存的应是链接本身（论文名层级下）')
+    assert.equal(readlinkSync(join(bundle, 'Link', 'Link.txt')), join(outside, 'precious.txt'))
 
     const del2 = await postJson('/api/library/paper/delete', { topic, name: 'LinkDir' })
     assert.equal(del2.status, 200, del2.text)
@@ -1715,6 +1770,8 @@ test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作
     { file: 'test/library-traversal-verification.test.mjs', case: 'V11① -en 变体 / V11⑤ 大小写改名', why: '① 我们的产物清单把 -en/-zh/-dual 都算作该文献的产物（不留删不掉的孤儿，上游报告 F3「已修复」）；⑤ 大小写-only 改名按**实测**的文件系统大小写敏感性分支：敏感 FS 成功、不敏感 FS（APFS/NTFS）→ 409 target-exists（上游口径「源码返回 409 是对的，补平台分支即可」）' },
     { file: 'test/library-traversal-verification.test.mjs', case: 'V14 F3 -en 残留', why: '同 V11①：-en.pdf 一并进回收站，断言反转为「不得残留」' },
     { file: 'test/library-traversal.test.mjs', case: '大小写改名平台分支', why: '同 V11⑤：按实测的大小写敏感性分支（敏感 FS → 成功；不敏感 FS → 409 target-exists）' },
+    { file: 'test/library-symmetry.test.mjs', case: 'R7 upload 落点/删除收口', why: '布局改造（按论文分文件夹）：upload 落点从 <topic>/<名>.pdf 变为 <topic>/<名>/<名>.pdf；删除后整个论文文件夹消失。断言强度不降（仍然两向断言「落盘可见 / 删除后消失」）' },
+    { file: 'test/library-topic-symmetry.test.mjs', case: 'R14 改名 / R7 上传→删除复核', why: '同布局改造：改名 = 论文文件夹改名 + 内部文件名改名；上传/删除断言改到新落点。断言强度不降' },
   ]
   // 登记表完整性：评审点名的 7 例一个都不能少（V11①⑤ 记为一条，含两个子例）
   const registered = documentedTestEdits.map((d) => d.case).join(' | ')

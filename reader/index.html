@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh" data-dpr-pdf="pending">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -135,6 +135,16 @@
   #ask-copy { background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--text-2); cursor: pointer; margin-right: auto; }
 
   /* ---------- 选中即问浮层 ---------- */
+  #ask-scope-row { display: flex; align-items: center; gap: 6px; margin: 2px 0 4px; font-size: 12px; color: var(--text-2); }
+  #ask-scope-row select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text); max-width: 60%; }
+  #ask-scope-hint { opacity: .75; font-size: 11px; }
+  #cfg-pop hr { border: none; border-top: 1px solid var(--border); margin: 12px 0 8px; }
+  #cfg-theme-hint { font-size: 11.5px; color: var(--text-2); line-height: 1.5; margin-top: 4px; }
+  #ask-scope-row { display: flex; align-items: center; gap: 6px; margin: 2px 0 4px; font-size: 12px; color: var(--text-2); }
+  #ask-scope-row select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text); max-width: 60%; }
+  #ask-scope-hint { opacity: .75; font-size: 11px; }
+  #cfg-pop hr { border: none; border-top: 1px solid var(--border); margin: 12px 0 8px; }
+  #cfg-theme-hint { font-size: 11.5px; color: var(--text-2); line-height: 1.5; margin-top: 4px; }
   #ask-pop { position: fixed; z-index: 50; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: 320px; }
   #ask-quote { font-size: 12px; color: var(--text-2); max-height: 64px; overflow: hidden; margin-bottom: 8px; border-left: 3px solid var(--accent-soft); padding-left: 8px; }
   #ask-input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; resize: none; }
@@ -177,6 +187,26 @@
   #cfg-cancel { background: none; border: none; color: var(--text-2); cursor: pointer; }
 
   #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: rgba(30,30,30,.92); color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; display: none; z-index: 99; max-width: 70%; }
+  /* ---------- 深色模式（方案 §A2.1；设置项 §A2.3）----------
+     ⚠️ 滤镜只挂 `canvas`，**绝不挂 `.page`**：挂 .page 会连 `.eqLayer` 的热区描边与
+     `.textLayer ::selection` 一起反转（热区框变怪色、选中高亮从蓝变橙），
+     并可能影响命中判定所在的层叠上下文。挂 canvas 时文本层/热区层/浮层颜色一律不受影响。 */
+  html[data-dpr-pdf="dark"] #pdf-pages .page > canvas,
+  html[data-dpr-pdf="dark"] #pdf-pages-zh .page > canvas {
+    filter: invert(1) hue-rotate(180deg)
+            brightness(var(--dpr-dark-b, 0.92)) contrast(var(--dpr-dark-c, 0.95));
+  }
+  html[data-dpr-pdf="dark"] .page { background: #1b1b1c; box-shadow: none; }
+  /* 深色下阅读器自身 UI（pdfDarkChrome）：**只覆写我们的自有变量**，绝不碰 --dsw-*（那是 dsh 的） */
+  html[data-dpr-pdf="dark"][data-dpr-chrome="on"] {
+    color-scheme: dark;
+    --bg: #16181d; --panel: #1e2127; --border: #333a45; --text: #e6e8ec; --text-2: #9aa3b2;
+    --accent: #4c9aff; --accent-soft: rgba(76,154,255,.18); --hl: rgba(255,196,0,.45);
+  }
+  /* 首帧防白闪（§A2.5 R15）：主题判定完成前藏住页面区。判定是 <head> 里的**同步**读属性，
+     无网络、无 await ⇒ 正常路径下这个状态在首帧前就被覆盖；JS 完全不跑时阅读器本来就是空白。 */
+  html[data-dpr-pdf="pending"] #pdf-pages,
+  html[data-dpr-pdf="pending"] #pdf-pages-zh { visibility: hidden; }
 </style>
 </head>
 <body>
@@ -206,6 +236,8 @@
   <span id="zoom-label">100%</span>
   <button id="zoom-in" class="tbtn" title="放大" data-icon="plus"></button>
   <button id="zoom-fit" class="tbtn">适宽</button>
+  <button id="theme-toggle" class="tbtn" title="PDF 深色模式：跟随 dsh 主题（点击切换 关/跟随/强制深色）">A</button>
+  <button id="scope-chip" class="tbtn" title="提问范围：本篇（点击切换 本篇/所在专题含子专题）">范围：本篇</button>
   <button id="eq-toggle" class="tbtn" title="公式引用（MinerU LaTeX）" data-icon="sigma">公式</button>
   <span id="ver" title="插件版本">__DPR_VERSION__</span>
 </div>
@@ -231,6 +263,15 @@
 
 <div id="ask-pop">
   <div id="ask-quote"></div>
+  <!-- 提问范围（方案 §B3.3 入口 1）：默认「本篇」＝改造前行为；「所在专题」会带上整棵子专题的目录内容 -->
+  <div id="ask-scope-row">
+    <span id="ask-scope-label">范围</span>
+    <select id="ask-scope" title="提问时只提供该范围内的目录内容">
+      <option value="paper">本篇（默认）</option>
+      <option value="topic">所在专题（含子专题）</option>
+    </select>
+    <span id="ask-scope-hint">范围外内容不会提供给模型</span>
+  </div>
   <textarea id="ask-input" rows="2" placeholder="围绕选中内容提问…"></textarea>
   <div id="ask-actions">
     <button id="ask-copy" style="display:none">复制 LaTeX</button>
@@ -265,12 +306,61 @@
     <button id="cfg-cancel">取消</button>
     <button id="cfg-save">保存</button>
   </div>
+  <hr>
+  <!-- 深色模式（方案 §A2.3 入口 2）：与 dsh 设置面板**共用同一个后端配置**（/api/theme/config），
+       两处不各存一份；改动即时生效，无需点保存。 -->
+  <h3>PDF 深色模式</h3>
+  <label for="cfg-theme-mode">模式</label>
+  <select id="cfg-theme-mode">
+    <option value="follow">跟随 dsh 主题（默认）</option>
+    <option value="off">关闭（PDF 保持原色）</option>
+    <option value="light">强制浅色</option>
+    <option value="dark">强制深色</option>
+  </select>
+  <label for="cfg-theme-strength">强度（越往下越柔和）</label>
+  <select id="cfg-theme-strength">
+    <option value="0">最黑</option>
+    <option value="1">近黑（默认）</option>
+    <option value="2">柔和</option>
+    <option value="3">纸感</option>
+  </select>
+  <label for="cfg-theme-chrome" style="display:flex;align-items:center;gap:6px">
+    <input id="cfg-theme-chrome" type="checkbox"> 阅读器界面也切深色
+  </label>
+  <div id="cfg-theme-hint">深色是整页反色 + 色相回正：图片/照片会明显褪色偏色（实测纯红 → 浅粉 [229,134,134]，不是真负片）；下载/导出的 PDF 始终是原文，不受影响。</div>
 </div>
 
 <div id="toast"></div>
 
 <script>
 'use strict';
+/* 深色首帧判定（方案 §A2.2 的四级降级链 + §A2.5「朝亮色回退」）——必须在首帧**之前**同步完成，
+   否则会出现「先白后黑」的白闪（Firefox/pdf.js #18680 同款公开案例）。放在模块脚本最前面：
+   解析期同步执行、早于首帧，且**不新增第二个 <script> 块**（test/reader-script.mjs 的提取约定）。
+   ① 宿主 body[data-ds-dark-theme] ② 宿主 html[data-ds-theme-source] ③ 自身 prefers-color-scheme
+   ④ 以上全失败 ⇒ **判亮色**（宁可该黑没黑，绝不误黑）；任何异常同样朝亮色回退，绝不冒泡。 */
+var __dprDarkMq = null;   // 复用的 (prefers-color-scheme: dark) MediaQueryList（只建一个，见下）
+(function firstFrameTheme() {
+  var mode = 'light';
+  try { if (!__dprDarkMq && window.matchMedia) __dprDarkMq = window.matchMedia('(prefers-color-scheme: dark)'); } catch (e) { /* 无 matchMedia：走降级链下一级 */ }
+  try {
+    var pref = 'follow';
+    try { pref = localStorage.getItem('dpr.pdfTheme') || 'follow'; } catch (e) { pref = 'follow'; }
+    if (pref === 'dark') mode = 'dark';
+    else if (pref === 'off' || pref === 'light') mode = 'light';
+    else {
+      var d = null;
+      try { d = window.parent && window.parent !== window ? window.parent.document : null; } catch (e) { d = null; }
+      var src = null;
+      try { src = d && d.documentElement ? d.documentElement.getAttribute('data-ds-theme-source') : null; } catch (e) { src = null; }
+      if (d && d.body && d.body.hasAttribute && d.body.hasAttribute('data-ds-dark-theme')) mode = 'dark';
+      else if (src === 'dark') mode = 'dark';
+      else if (src === 'light') mode = 'light';
+      else if (__dprDarkMq && __dprDarkMq.matches) mode = 'dark';
+    }
+  } catch (e) { mode = 'light'; }
+  try { if (document.documentElement && document.documentElement.setAttribute) document.documentElement.setAttribute('data-dpr-pdf', mode); } catch (e) { /* DOM 异常：保持 pending，不影响其余功能 */ }
+})();
 /* ================= 基础 ================= */
 const $ = (id) => document.getElementById(id);
 /* 顶栏图标：统一的 24×24 描边图标集（stroke=currentColor，active/disabled 变色自动跟随按钮）。
@@ -315,6 +405,170 @@ function toast(msg, ms = 3200) {
   clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display = 'none', ms);
 }
 function esc(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+/* ================= 深色模式（方案 §A2）=================
+   路线：canvas 上打 CSS 滤镜 `invert(1) hue-rotate(180deg)` + 亮度/对比档（实测不破坏几何/选区/热区，
+   见 §A2.1 与 .probe/darkmode-subtopic/e-filter-mechanics-probe.mjs）。
+   主题来源（四级降级链，§A2.2）：① 宿主 body[data-ds-dark-theme] ② 宿主 html[data-ds-theme-source]
+   ③ 自身 prefers-color-scheme ④ 全失败 ⇒ **亮色**（宁可该黑没黑，绝不误黑）。
+   配置是**服务端唯一一份**（/api/theme/config），阅读器只做镜像（localStorage）+ 跨文档同步。 */
+const DARK_STRENGTHS = [[1, 1], [0.92, 0.95], [0.85, 0.9], [0.8, 0.85]];
+const THEME_PREF_KEY = 'dpr.pdfTheme';
+const THEME_MIRROR_KEY = 'dpr.pdfThemeCfg';
+let dprTheme = { mode: 'follow', strength: 1, chrome: true, curve: { brightness: 0.92, contrast: 0.95 } };
+
+/** 宿主（dsh）当前的亮暗：读不到一律返回 null（跨源/沙箱/未写入 ⇒ 交下一级降级）。 */
+function hostThemeSource() {
+  let d = null;
+  try { d = window.parent !== window ? window.parent.document : null; } catch (e) { return null; }
+  if (!d) return null;
+  try {
+    if (d.body && d.body.hasAttribute && d.body.hasAttribute('data-ds-dark-theme')) return 'dark';
+  } catch (e) { /* 继续下一级 */ }
+  try {
+    const src = d.documentElement && d.documentElement.getAttribute('data-ds-theme-source');
+    if (src === 'dark' || src === 'light') return src;
+  } catch (e) { /* 继续下一级 */ }
+  return null;
+}
+
+/** 生效的 PDF 亮暗（配置优先，follow 才探测宿主）。 */
+function effectivePdfTheme() {
+  const pref = dprTheme.mode;
+  if (pref === 'dark') return 'dark';
+  if (pref === 'off' || pref === 'light') return 'light';
+  const host = hostThemeSource();
+  if (host) return host;
+  if (__dprDarkMq && __dprDarkMq.matches) return 'dark';
+  return 'light';
+}
+
+function applyPdfTheme() {
+  const mode = effectivePdfTheme();
+  try {
+    const root = document.documentElement;
+    if (root) {
+      if (typeof root.setAttribute === 'function') {
+        root.setAttribute('data-dpr-pdf', mode);
+        root.setAttribute('data-dpr-chrome', dprTheme.chrome ? 'on' : 'off');
+      }
+      if (root.style && typeof root.style.setProperty === 'function') {
+        root.style.setProperty('--dpr-dark-b', String(dprTheme.curve.brightness));
+        root.style.setProperty('--dpr-dark-c', String(dprTheme.curve.contrast));
+      }
+    }
+  } catch (e) { /* DOM 不可用（测试桩/极端宿主）：只跳过视觉属性写入 */ }
+  const btn = $('theme-toggle');
+  if (btn) {
+    btn.classList.toggle('active', mode === 'dark');
+    const src = dprTheme.mode === 'follow' ? `跟随 dsh（当前 ${mode === 'dark' ? '深色' : '浅色'}）` : dprTheme.mode === 'off' ? '关闭' : `强制${dprTheme.mode === 'dark' ? '深色' : '浅色'}`;
+    btn.title = `PDF 深色模式：${src}（点击切换 关/跟随/强制深色）`;
+  }
+}
+
+/** 本地镜像：让 <head> 的首帧判定（无网络）拿到上一次的偏好。 */
+function mirrorTheme() {
+  try {
+    localStorage.setItem(THEME_PREF_KEY, dprTheme.mode);
+    localStorage.setItem(THEME_MIRROR_KEY, JSON.stringify({ mode: dprTheme.mode, strength: dprTheme.strength, chrome: dprTheme.chrome, curve: dprTheme.curve }));
+  } catch (e) { /* 无痕模式等：镜像失败不影响本次会话 */ }
+}
+
+function setThemeLocal(cfg) {
+  if (cfg.mode) dprTheme.mode = cfg.mode;
+  if (typeof cfg.strength === 'number') dprTheme.strength = cfg.strength;
+  if (typeof cfg.chrome === 'boolean') dprTheme.chrome = cfg.chrome;
+  if (cfg.curve) dprTheme.curve = { brightness: cfg.curve.brightness, contrast: cfg.curve.contrast };
+  else dprTheme.curve = { brightness: DARK_STRENGTHS[dprTheme.strength][0], contrast: DARK_STRENGTHS[dprTheme.strength][1] };
+  mirrorTheme();
+  applyPdfTheme();
+  syncThemeControls();
+}
+
+function syncThemeControls() {
+  const m = $('cfg-theme-mode'); if (m) m.value = dprTheme.mode;
+  const st = $('cfg-theme-strength'); if (st) st.value = String(dprTheme.strength);
+  const ch = $('cfg-theme-chrome'); if (ch) ch.checked = dprTheme.chrome;
+  const chip = $('scope-chip'); if (chip) chip.textContent = '范围：' + (askScopeMode() === 'topic' ? '所在专题' : '本篇');
+}
+
+/** 写后端（两处 UI 共用同一个配置；失败只 toast，不回滚本地显示——以服务端为准的语义靠下次拉取纠正）。 */
+async function saveTheme(patch) {
+  try {
+    const r = await api('/theme/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) });
+    setThemeLocal({ mode: r.pdfTheme, strength: r.pdfDarkStrength, chrome: r.pdfDarkChrome, curve: r.curve });
+  } catch (e) { toast('深色设置保存失败：' + e.message, 5000); }
+}
+
+async function loadThemeConfig() {
+  try {
+    const r = await api('/theme/config');
+    setThemeLocal({ mode: r.pdfTheme, strength: r.pdfDarkStrength, chrome: r.pdfDarkChrome, curve: r.curve });
+  } catch (e) {
+    // 服务端不可用：用镜像（没有镜像就按 follow 探测宿主）——降级，不让深色能力整体失灵
+    try {
+      const mir = JSON.parse(localStorage.getItem(THEME_MIRROR_KEY) || 'null');
+      if (mir && mir.mode) setThemeLocal(mir);
+    } catch (e2) { applyPdfTheme(); }
+  }
+}
+
+// 先用镜像+宿主探测立即上色（首帧就有正确属性），配置到货后再校正
+(function initThemeFromMirror() {
+  try {
+    const mir = JSON.parse(localStorage.getItem(THEME_MIRROR_KEY) || 'null');
+    if (mir && mir.mode) { dprTheme = { ...dprTheme, ...mir }; }
+    else { const p = localStorage.getItem(THEME_PREF_KEY); if (p) dprTheme.mode = p; }
+  } catch (e) { /* 忽略损坏镜像 */ }
+  try { applyPdfTheme() } catch (e) { /* 视觉增强失败绝不影响阅读 */ }
+})();
+
+// 宿主主题变化（dsh 切主题）→ 立刻重算；同一文档内只需挂一次 MutationObserver
+(function watchHostTheme() {
+  let d = null;
+  try { d = window.parent !== window ? window.parent.document : null; } catch (e) { d = null; }
+  if (!d || typeof MutationObserver !== 'function') return;
+  try {
+    const ob = new MutationObserver(() => applyPdfTheme());
+    ob.observe(d.body || d.documentElement, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'data-ds-theme-source'] });
+    if (d.documentElement) ob.observe(d.documentElement, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'data-ds-theme-source'] });
+  } catch (e) { /* 拿不到宿主文档：降级链照常工作 */ }
+})();
+
+// 跨文档同步：**不在这里另挂 storage 监听**——全脚本只允许一个 `window storage` 监听
+// （结构性红线，见 test/selection-translate.test.mjs G8：多处监听会回声/双写打架）。
+// 主题镜像的 storage 分支合并在那个唯一入口里按 key 分派（见文件后半的 storage 监听）。
+window.addEventListener('message', (e) => {
+  const d = e && e.data;
+  if (!d || d.type !== 'dpr:theme' || typeof d !== 'object') return;
+  setThemeLocal({ mode: d.pdfTheme, strength: d.pdfDarkStrength, chrome: d.pdfDarkChrome, curve: d.curve });
+});
+
+$('theme-toggle').onclick = async () => {
+  // 一键切：关 → 跟随 → 强制深色 → 关（用户在阅读器里最常做的就是「太刺眼 / 恢复了」两件事）
+  const next = dprTheme.mode === 'off' ? 'follow' : dprTheme.mode === 'follow' ? 'dark' : 'off';
+  await saveTheme({ pdfTheme: next });
+  toast(`PDF 深色模式：${next === 'off' ? '关闭' : next === 'follow' ? '跟随 dsh 主题' : '强制深色'}`);
+};
+
+$('cfg-theme-mode').onchange = () => saveTheme({ pdfTheme: $('cfg-theme-mode').value });
+$('cfg-theme-strength').onchange = () => saveTheme({ pdfDarkStrength: +$('cfg-theme-strength').value, pdfDarkAdvanced: null });
+$('cfg-theme-chrome').onchange = () => saveTheme({ pdfDarkChrome: $('cfg-theme-chrome').checked });
+
+/* ================= 提问范围（方案 §B3.3）=================
+   默认 = **当前论文**（改造前行为，零回归）；「所在专题」= 该专题及其整棵子树。
+   只给该范围的目录内容由**服务端**装配，客户端只传 scope。 */
+function askScopeKey() { return current ? `dpr.askScope.${current.topic}/${current.name}` : 'dpr.askScope'; }
+function askScopeMode() {
+  try { return localStorage.getItem(askScopeKey()) === 'topic' ? 'topic' : 'paper'; } catch (e) { return 'paper'; }
+}
+function setAskScopeMode(mode) {
+  try { localStorage.setItem(askScopeKey(), mode); } catch (e) { /* 忽略 */ }
+  const sel = $('ask-scope'); if (sel) sel.value = mode;
+  syncThemeControls();
+}
+$('scope-chip').onclick = () => setAskScopeMode(askScopeMode() === 'topic' ? 'paper' : 'topic');
+$('ask-scope').onchange = () => setAskScopeMode($('ask-scope').value);
 
 // 路径复制：与「复制 LaTeX」共用同一个 copyText（剪贴板写入只有一处实现，见文件末尾定义）
 $('pdf-path').onclick = async () => {
@@ -367,6 +621,7 @@ async function openPaper(topic, name, opts = {}) {
   pathBtn.textContent = meta.pdfPath || '';
   pathBtn.title = (meta.pdfPath || '') + '（点击复制）';
   pathBtn.style.display = meta.pdfPath ? '' : 'none';
+  setAskScopeMode(askScopeMode());
   await refreshZhState();
   // 恢复该论文上次的视图模式（持久化复用同一个键，取值域扩到 'split'；见 §4.3）
   const saved = localStorage.getItem(variantKey(topic, name));
@@ -1491,7 +1746,11 @@ $('ask-send').onclick = async () => {
       : {};
     const r = await api('/ask', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...current, question, selectedText: askSelection.text, page: askSelection.page, ...eq, ...(n ? { n } : {}) }),
+      body: JSON.stringify({
+        ...current, question, selectedText: askSelection.text, page: askSelection.page, ...eq, ...(n ? { n } : {}),
+        // 默认「本篇」**不传 scope**（与改造前逐字节一致）；只有明确切到专题时才传
+        ...(askScopeMode() === 'topic' ? { scope: { kind: 'topic', topic: current.topic } } : {}),
+      }),
     });
     askPop.style.display = 'none';
     toast(askSelection.kind === 'equation' ? `已引用公式并发送到 会话${r.n}` : `已发送到 会话${r.n}，回答见对话区`);
@@ -2053,7 +2312,14 @@ $('sync-toggle').onclick = () => {
 /** 设置面板（dsh 设置 → 论文伴读）改了同一个键 → 阅读器立即反映（含重新打开同步时的一次性对齐）。
  *  只在值真的变了的时候动：storage 只对**其他**文档触发，这里也不回写（不回写就不会回声）。 */
 window.addEventListener('storage', (e) => {
-  if (!e || e.key !== SYNC_SCROLL_KEY) return;
+  // 跨文档偏好同步的**唯一**入口（结构性红线：全脚本只挂一个 storage 监听，避免回声/双写）。
+  // 按 key 分派：深色镜像 / 分屏同步滚动。两个分支都只在值真的变了时动，且都不回写。
+  if (!e) return;
+  if (e.key === THEME_MIRROR_KEY) {
+    try { if (e.newValue) setThemeLocal(JSON.parse(e.newValue)); } catch (err) { /* 损坏镜像：忽略 */ }
+    return;
+  }
+  if (e.key !== SYNC_SCROLL_KEY) return;
   const next = e.newValue !== '0';
   if (next === syncScroll) return;
   setSyncScroll(next, { persist: false });
@@ -2253,6 +2519,7 @@ async function bootstrap() {
   // 伴读会话里的跳转链接（[重读第 N 页](…?page=N)）经此直达目标页
   const pPage = +(params.get('page') || 0) || undefined;
   const pQ = params.get('q') || undefined;
+  await loadThemeConfig();          // 深色配置（服务端唯一一份；失败自动降级到镜像）
   const lib = await api('/library');
   if (lib.topics.length === 0) {
     $('empty').style.display = 'block';
@@ -2266,7 +2533,11 @@ async function bootstrap() {
     if (last && lib.papers.some((p) => p.topic === last.topic && p.name === last.name)) target = last;
     else target = lib.papers[0];
   }
-  if (target) await openPaper(target.topic, target.name, { page: pPage, q: pQ });
+  if (target) {
+    current = target;               // 范围记忆的键带 topic/name（避免跨论文串味）
+    setAskScopeMode(askScopeMode());
+    await openPaper(target.topic, target.name, { page: pPage, q: pQ });
+  }
 }
 bootstrap().catch((e) => {
   $('empty').style.display = 'block';
