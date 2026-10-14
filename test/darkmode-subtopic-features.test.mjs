@@ -18,7 +18,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -462,6 +462,7 @@ test('C3 幂等/复跑：第二次 moves=0 且 copied=0，绝不产生 X/X/X 套
   const res2 = MG.runMigration(data, { home, logPath: join(home, 'b.jsonl') })
   assert.equal(res2.copied, 0)
   assert.equal(res2.removed, 0)
+  assert.deepEqual(MG.planMigration(data, home).paperDirs.sort(), ['T/P1', 'T/P2'], '已迁移的论文文件夹要被识别出来（报告字段不能空）')
   // 套娃检测：任何形如 X/X/X 的路径都不许存在
   const all = readdirSync(data, { recursive: true }).map(String)
   for (const p of all) {
@@ -522,10 +523,20 @@ test('C6 冲突/需人工一律**先报告不执行**（绝不半途动数据）
   writeFileSync(join(data, 'T', 'P2'), 'a plain FILE where the paper folder should go') // 目标名被文件占据
   putFlatPaper(data, 'T', 'P2', ['-x']) // 让 P2 成为一篇论文（P2.pdf 存在），但目标目录名被文件占据
   const plan = MG.planMigration(data, home)
-  assert.equal(plan.conflicts.length >= 1, true, `必须报冲突：${JSON.stringify(plan)}`)
-  const before = readdirSync(data, { recursive: true }).sort()
-  assert.throws(() => MG.runMigration(data, { home, logPath: join(home, 'c.jsonl') }), (e) => e.code === 'migrate-conflict')
-  assert.deepEqual(readdirSync(data, { recursive: true }).sort(), before, '冲突时必须零改动')
+  assert.equal(plan.conflicts.length >= 1, true, `干跑必须报冲突：${JSON.stringify(plan)}`)
+  assert.match(MG.formatMigrationReport(plan), /跳过该篇/, '干跑报告必须显著写出「跳过该篇」')
+  // 队长裁定 1：**跳过该篇、继续迁移**（一篇冲突不许挡住整个库），但绝不允许「假成功」
+  const res = MG.runMigration(data, { home, logPath: join(home, 'c.jsonl') })
+  assert.equal(res.partial, true, '有跳过项 ⇒ 必须是 partial')
+  assert.deepEqual(res.skippedPapers.map((x) => `${x.paper}:${x.code}`), ['T/P2:migrate-conflict'])
+  assert.equal(existsSync(join(data, MG.DONE_MARKER)), false, '**绝不**写「全部完成」标记')
+  const part = JSON.parse(readFileSync(join(data, MG.PARTIAL_MARKER), 'utf8'))
+  assert.equal(part.partial, true)
+  assert.deepEqual(part.skipped.map((x) => x.paper), ['T/P2'], '部分完成标记里必须有跳过清单')
+  // 被跳过的那篇一个字都不许动；其余篇照常迁移
+  assert.equal(readFileSync(join(data, 'T', 'P2'), 'utf8'), 'a plain FILE where the paper folder should go')
+  assert.equal(existsSync(join(data, 'T', 'P2.pdf')), true, '被跳过篇的平铺源原地不动')
+  assert.equal(existsSync(join(data, 'T', 'P1', 'P1.pdf')), true, '其余篇照常迁移')
 })
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -894,9 +905,15 @@ test('C8 【F2 靶子】同名并存且内容不同 ⇒ 判冲突、绝不覆盖
   assert.equal(plan.alreadyDone.length, 0, '内容不同 ⇒ 也不许当成 alreadyDone（那会静默删掉平铺源）')
   assert.equal(plan.conflicts.length, 1, `必须报冲突（先报告不执行）：${JSON.stringify(plan.conflicts)}`)
   assert.match(plan.conflicts[0].reason, /内容不同/)
-  const before = readdirSync(data, { recursive: true }).sort()
-  assert.throws(() => MG.runMigration(data, { home, logPath: join(home, 'c8.jsonl') }), (e) => e.code === 'migrate-conflict')
-  assert.deepEqual(readdirSync(data, { recursive: true }).sort(), before, '冲突时零改动')
+  // 只看**用户数据**：`.migration-v1.partial.json` 是我们自己的记账产物（本次运行会新建）
+  const userData = (d) => readdirSync(d, { recursive: true }).map(String).filter((k) => !k.includes('.migration-v1.')).sort()
+  const before = userData(data)
+  const res = MG.runMigration(data, { home, logPath: join(home, 'c8.jsonl') })
+  assert.equal(res.partial, true)
+  assert.deepEqual(res.skippedPapers.map((x) => x.paper), ['T/A'], '冲突篇被跳过')
+  assert.deepEqual(userData(data), before, '冲突篇零改动（源与目标都不动）')
+  assert.equal(existsSync(join(data, MG.DONE_MARKER)), false, '有跳过项时绝不写「全部完成」')
+  assert.equal(existsSync(join(data, MG.PARTIAL_MARKER)), true, '要写部分完成标记 + 跳过清单')
   assert.equal(readFileSync(join(data, 'T', 'A', 'A.pdf'), 'utf8'), FOLDER, '文件夹那份一个字都不能变（文件夹赢）')
   assert.equal(readFileSync(join(data, 'T', 'A.pdf'), 'utf8'), LEGACY, '平铺源不许被删（不静默丢数据）')
   // 反向对照：内容**相同** ⇒ 认「已完成」（只清源），不算冲突
@@ -918,7 +935,8 @@ test('C8 【F2 靶子】同名并存且内容不同 ⇒ 判冲突、绝不覆盖
   assert.equal(plan3.moves.length, 0)
   assert.equal(plan3.alreadyDone.length, 0, '等长但内容不同 ⇒ 绝不能当成「已完成」（那会静默删掉平铺源）')
   assert.equal(plan3.conflicts.length, 1, `等长不同内容也必须报冲突：${JSON.stringify(plan3)}`)
-  assert.throws(() => MG.runMigration(d2, { home: h2, logPath: join(h2, 'c8b.jsonl') }), (e) => e.code === 'migrate-conflict')
+  const resB = MG.runMigration(d2, { home: h2, logPath: join(h2, 'c8b.jsonl') })
+  assert.equal(resB.partial, true)
   assert.equal(readFileSync(join(d2, 'T', 'A.pdf'), 'utf8'), LEGACY_SAME, '平铺源不许被静默删除')
   assert.equal(readFileSync(join(d2, 'T', 'A', 'A.pdf'), 'utf8'), FOLDER_SAME)
 })
@@ -972,6 +990,112 @@ test('D7 【F4 靶子】路由层支持多段 to（移动到另一父）；.. / 
     const self = await postJson('/api/library/rename-topic', { topic: 'A/C2', to: 'A/C2/Sub' })
     assert.equal(self.status, 409, self.text)
     assert.equal(self.body.code, 'bad-request')
+  } finally { srv.close() }
+})
+
+test('C10 【F-A 靶子】符号链接源也必须走冲突判定：绝不把论文夹里的常规文件换成链接', () => {
+  const { data, home } = newLib()
+  const outside = mkdtempSync(join(tmpdir(), 'dpr-t9-out-'))
+  try {
+    const KEEP = 'REGULAR-FILE-IN-PAPER-FOLDER（不可恢复）'
+    putPaper(data, 'T', 'A', [])
+    writeFileSync(join(data, 'T', 'A', 'A.txt'), KEEP)          // 论文夹里那份**常规文件**
+    writeFileSync(join(outside, 'other.txt'), 'OUTSIDE-CONTENT')
+    symlinkSync(join(outside, 'other.txt'), join(data, 'T', 'A.txt'), 'file')  // 平铺源是**符号链接**
+    const plan = MG.planMigration(data, home)
+    assert.equal(plan.moves.some((m) => m.to.endsWith('A.txt')), false, '链接源绝不能被当成普通 move（阶段 1 会覆盖目标）')
+    assert.equal(plan.conflicts.length, 1, `必须报冲突：${JSON.stringify(plan.conflicts)}`)
+    assert.match(plan.conflicts[0].reason, /符号链接/)
+    const res = MG.runMigration(data, { home, logPath: join(home, 'c10.jsonl') })
+    assert.equal(res.partial, true)
+    assert.equal(readFileSync(join(data, 'T', 'A', 'A.txt'), 'utf8'), KEEP, '论文夹里那份常规文件必须逐字未变（不可恢复的内容）')
+    assert.equal(lstatSync(join(data, 'T', 'A.txt')).isSymbolicLink(), true, '链接源原地不动')
+    assert.equal(readFileSync(join(outside, 'other.txt'), 'utf8'), 'OUTSIDE-CONTENT', '库外目标也不许被动')
+    assert.equal(existsSync(join(data, MG.DONE_MARKER)), false)
+  } finally { rmSync(outside, { recursive: true, force: true }) }
+})
+
+test('C11 【F-B 靶子】平铺论文名 == 已有子专题名 ⇒ 判冲突（绝不把子专题变成论文）', () => {
+  const { data, home } = newLib()
+  putPaper(data, 'T/Sub', 'P')                    // 子专题 T/Sub 里有论文
+  putFlatPaper(data, 'T', 'Sub')                  // 平铺论文也叫 Sub（会被搬进 T/Sub）
+  const plan = MG.planMigration(data, home)
+  assert.equal(plan.conflicts.length, 1, `干跑就要报警：${JSON.stringify(plan)}`)
+  assert.match(plan.conflicts[0].reason, /子专题/)
+  const res = MG.runMigration(data, { home, logPath: join(home, 'c11.jsonl') })
+  assert.equal(res.partial, true)
+  // 关键后果：子专题里的论文必须**仍然可见**（列表 + 树），且清空计划仍能找到它
+  assert.deepEqual(L.listPapers(data, 'T').map((p) => `${p.topic}/${p.name}`).sort(), ['T/Sub/P'])
+  const node = L.listTopicTree(data, 'T')[0]
+  assert.deepEqual(node.children.map((c) => c.path), ['T/Sub'], 'T/Sub 必须仍是子专题（不是被吞掉的论文目录）')
+  assert.deepEqual(node.children[0].papers, ['P'], '子专题内的论文必须还在树里')
+  assert.equal(node.papers.includes('Sub'), false, 'T/Sub 绝不能同时被当成论文')
+  assert.equal(M.planTopicClear(data, 'T').papersCount, 1, '清空计划必须能找到子专题里的论文（不会永久 409）')
+  assert.equal(existsSync(join(data, 'T', 'Sub.pdf')), true, '被跳过的平铺源原地不动')
+})
+
+test('C12 【裁定 1】不合规论文名 ⇒ 跳过该篇继续迁移；绝不假成功（不写 done、写 partial + 跳过清单）', () => {
+  const { data, home } = newLib()
+  const longName = 'L'.repeat(120)                 // > MAX_PAPER_DIR_NAME(100) ⇒ 建不出同名目录
+  putFlatPaper(data, 'T', longName, ['.txt'])
+  putFlatPaper(data, 'T', 'Good', ['.txt'])
+  const plan = MG.planMigration(data, home)
+  assert.equal(plan.quarantine.length, 1, `必须进 quarantine：${JSON.stringify(plan.quarantine)}`)
+  assert.equal(plan.quarantine[0].reason.includes('过长'), true)
+  assert.equal(plan.moves.length, 2, '好名字那篇照常规划（一篇坏名字不许挡住整库）')
+  const report = MG.formatMigrationReport(plan)
+  assert.match(report, /跳过该篇/, '干跑报告要显著列出跳过')
+  assert.match(report, /不会.*写.*全部完成/, '干跑报告要明说不会写「全部完成」标记')
+  const res = MG.runMigration(data, { home, logPath: join(home, 'c12.jsonl') })
+  assert.equal(res.ok, true)
+  assert.equal(res.copied, 2, '好名字那篇照常迁移（绝不是整库中止）')
+  assert.equal(res.partial, true)
+  assert.deepEqual(res.skippedPapers.map((x) => x.code), ['migrate-quarantine'])
+  assert.equal(existsSync(join(data, MG.DONE_MARKER)), false, '**绝不**写「全部完成」标记（否则用户以为迁完了）')
+  const part = JSON.parse(readFileSync(join(data, MG.PARTIAL_MARKER), 'utf8'))
+  assert.equal(part.partial, true)
+  assert.equal(part.skipped.length, 1)
+  assert.match(part.skipped[0].paper, /L{120}$/)
+  assert.equal(existsSync(join(data, 'T', 'Good', 'Good.pdf')), true)
+  assert.equal(existsSync(join(data, 'T', `${longName}.pdf`)), true, '被跳过篇的源文件原地不动')
+})
+
+test('C13 【裁定 2】前导点的隐藏论文也纳入迁移并保留原名（用户盘上已有的数据不许被丢下）', () => {
+  const { data, home } = newLib()
+  putFlatPaper(data, 'T', '.hidden', ['.txt'])
+  const plan = MG.planMigration(data, home)
+  assert.deepEqual(plan.quarantine, [], '前导点不再是「不合规名」——迁移保留原名')
+  assert.equal(plan.moves.length, 2, `隐藏论文也要迁移：${JSON.stringify(plan.moves)}`)
+  assert.deepEqual(plan.moves.map((m) => m.to).sort(), ['T/.hidden/.hidden.pdf', 'T/.hidden/.hidden.txt'])
+  assert.deepEqual(plan.hidden, [], '隐藏的**论文文件**不算「不动」的隐藏条目（只有非论文隐藏条目才是）')
+  const res = MG.runMigration(data, { home, logPath: join(home, 'c13.jsonl') })
+  assert.equal(res.partial, false, '没有跳过项 ⇒ 正常完成')
+  assert.equal(existsSync(join(data, MG.DONE_MARKER)), true)
+  assert.equal(existsSync(join(data, 'T', '.hidden', '.hidden.pdf')), true)
+  // 迁移后必须仍然可见、可解析（否则就是「用户盘上已有数据被丢下」）
+  assert.deepEqual(L.listPapers(data, 'T').map((p) => `${p.topic}/${p.name}`), ['T/.hidden'])
+  assert.deepEqual(L.listTopicTree(data, 'T')[0].papers, ['.hidden'], '树里也要能看到')
+  const ref = L.resolvePaper(data, { topic: 'T', name: '.hidden' })
+  assert.equal(ref.pdfPath, join(data, 'T', '.hidden', '.hidden.pdf'))
+  assert.equal(ref.txtPath, join(data, 'T', '.hidden', '.hidden.txt'))
+})
+
+test('C14 【F-C 靶子】未迁移旧库的 /api/library 必须给出**存在的** pdfPath（不能写死新布局）', async () => {
+  const { data } = newLib()
+  putFlatPaper(data, 'T', 'Flat', ['.txt'])
+  const { srv, get } = await boot(data)
+  try {
+    const lib = await get('/api/library')
+    const p = lib.body.papers.find((x) => x.name === 'Flat')
+    assert.ok(p, `列表里必须有那篇平铺论文：${JSON.stringify(lib.body.papers)}`)
+    assert.equal(p.pdfPath, join(data, 'T', 'Flat.pdf'), '旧布局 ⇒ pdfPath 指向平铺文件')
+    assert.equal(existsSync(p.pdfPath), true, '**pdfPath 必须真实存在**（写死新布局会指向不存在的路径）')
+    // 新布局同样正确（同一函数按布局推导）
+    putPaper(data, 'T', 'Folder')
+    const lib2 = await get('/api/library')
+    const p2 = lib2.body.papers.find((x) => x.name === 'Folder')
+    assert.equal(p2.pdfPath, join(data, 'T', 'Folder', 'Folder.pdf'))
+    assert.equal(existsSync(p2.pdfPath), true)
   } finally { srv.close() }
 })
 

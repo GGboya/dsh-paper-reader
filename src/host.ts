@@ -11,6 +11,7 @@ import {
   listPapers,
   listTopicTree,
   listTopics,
+  paperPdfPath,
   resolveDataDir,
   resolvePaper,
   resolveUploadTopic,
@@ -528,7 +529,9 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     if (sub === '/api/library' && req.method === 'GET') {
-      const papers = listPapers(dataDir).map((p) => ({ ...p, pdfPath: join(dataDir, p.topic, p.name, p.name + '.pdf') }))
+      // F-C：pdfPath 必须按**该篇实际所在布局**给（新布局论文夹 / 旧布局平铺）。
+      // 写死新布局会让未迁移旧库里的平铺论文 pdfPath 指向不存在的路径（直接影响用户现在正在用的库）。
+      const papers = listPapers(dataDir).map((p) => ({ ...p, pdfPath: paperPdfPath(dataDir, p.topic, p.name) }))
       // topics 保持「一级子目录」语义（既有调用方/测试），新增 tree = 完整嵌套树（子专题 UI 用）
       json(res, 200, { dataDir, topics: listTopics(dataDir), papers, tree: listTopicTree(dataDir) })
       return

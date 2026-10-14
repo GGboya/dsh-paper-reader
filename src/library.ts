@@ -231,18 +231,21 @@ export function listTopicTree(dataDir: string, root?: string): TopicTreeNode[] {
       return node
     }
     for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (e.name.startsWith('.')) continue
-      if (!e.isDirectory()) {
-        // 旧布局的平铺 PDF 也算「本节点有一篇论文」（同名文件夹存在时文件夹赢）
-        if (rel && isPaperPDF(e.name)) {
-          const stem = e.name.slice(0, -4)
-          if (!existsSync(join(dir, stem)) && !node.papers.includes(stem)) node.papers.push(stem)
-        }
+      if (e.isDirectory()) {
+        // 论文目录**先判后跳隐藏名**（与 listPapers 同口径）：`.hidden/` 这类前导点的论文目录必须能显示；
+        // `.trash` 等隐藏**非论文**目录依旧跳过。
+        const child = join(dir, e.name)
+        if (isPaperDir(child)) { if (!node.papers.includes(e.name)) node.papers.push(e.name); continue }
+        if (e.name.startsWith('.')) continue
+        node.children.push(build(`${rel}/${e.name}`))
         continue
       }
-      const child = join(dir, e.name)
-      if (isPaperDir(child)) node.papers.push(e.name)
-      else node.children.push(build(`${rel}/${e.name}`))
+      // 旧布局的平铺 PDF 也算「本节点有一篇论文」（同名文件夹存在时文件夹赢）——含前导点的隐藏论文
+      // （裁定 2：迁移保留原名，隐藏论文也在库/树里可见）
+      if (rel && isPaperPDF(e.name)) {
+        const stem = e.name.slice(0, -4)
+        if (!existsSync(join(dir, stem)) && !node.papers.includes(stem)) node.papers.push(stem)
+      }
     }
     node.papers.sort()
     return node

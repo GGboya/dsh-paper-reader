@@ -22,6 +22,8 @@ import { dshHome, isPaperDir, isPaperPDF, resolveDataDir } from './library.ts'
 import { matchArtifactName, PAPER_STEM_SUFFIXES } from './library-manage.ts'
 
 export const DONE_MARKER = '.migration-v1.done'
+/** 有跳过项时写的**部分完成**标记（队长裁定 1：绝不写「全部完成」的假成功标记）。 */
+export const PARTIAL_MARKER = '.migration-v1.partial.json'
 /** 允许「论文名 → 目录名」的长度上限（validateEntryName 是 120；目录名留余量到 100，与 §B2.5 一致）。 */
 const MAX_PAPER_DIR_NAME = 100
 
@@ -55,6 +57,8 @@ export interface MigrationPlan {
   paperDirs: string[]
   totals: { papers: number; files: number; bytes: number; needBytes: number }
   doneMarker: string | null
+  /** 上一次运行留下的**部分完成**标记（有跳过项时才有；内容是 {partial, skipped[]}） */
+  partialMarker: string | null
 }
 
 export interface MigrationLogEntry {
@@ -68,12 +72,18 @@ export interface MigrationLogEntry {
 export interface MigrationResult {
   ok: true
   copied: number
+  /** 「已完成（同内容副本已在论文夹里，只清了源）」的条目数 */
   skipped: number
   removed: number
   dirsRemoved: string[]
   logPath: string
+  /** 仅在**零跳过**时给出完成标记路径；有跳过项时为空字符串（改写 `.partial` 标记） */
   doneMarker: string
   studyRewrites: number
+  /** 有跳过项 = true（本次**不是**整体完成；用户须看 skippedPapers） */
+  partial: boolean
+  /** 被跳过的论文（不合规名 / 冲突）：源文件一律原地未动 */
+  skippedPapers: Array<{ paper: string; code: string; reason: string }>
   aborted?: false
 }
 
@@ -103,6 +113,15 @@ function sha256Of(file: string): string {
   return createHash('sha256').update(readFileSync(file)).digest('hex')
 }
 
+/** 读链接指向；读不到返回 null（用于「链接 ↔ 链接 是否同一份」的判定，不抛）。 */
+function readlinkOf(file: string): string | null {
+  try {
+    return readlinkSync(file)
+  } catch {
+    return null
+  }
+}
+
 function sizeOf(file: string): number {
   try {
     return statSync(file).size
@@ -111,11 +130,16 @@ function sizeOf(file: string): number {
   }
 }
 
-/** 论文名能否当目录名（建不出就进 quarantine，绝不硬来）。 */
+/**
+ * 论文名能否当目录名（建不出同名目录才进 quarantine，绝不硬来）。
+ *
+ * **队长裁定 2**：迁移是**搬运已有数据**，不是重新命名 —— 前导点（`.hidden`）、`.trash` 这类
+ * 「能存在于盘上但不符合新命名规则」的既有名字一律**保留原名**迁移（否则那篇数据会被永久丢下、
+ * 对插件不可见）。只有真的建不出目录的情况才 quarantine：过长 / 含分隔符或 NUL / `.`、`..`。
+ */
 function paperDirNameError(name: string): string | null {
   if (!name) return '空名'
-  if (name.startsWith('.')) return '以 . 开头（隐藏/保留名）'
-  if (name === '.trash') return '保留名'
+  if (name === '.' || name === '..') return '非法名（. / ..）'
   if (name.length > MAX_PAPER_DIR_NAME) return `过长（${name.length} > ${MAX_PAPER_DIR_NAME}）`
   if (/[\\/]/.test(name) || name.includes('\u0000')) return '含分隔符/控制字符'
   return null
@@ -143,30 +167,32 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
     } catch {
       return
     }
-    // 论文目录：**到此为止**（它的内容已经在新布局里了）
-    if (rel && isPaperDir(dir)) {
-      paperDirs.push(rel)
-      return
-    }
-    // 本层收集「论文 stem → 命中文件」；只有存在 `<stem>.pdf` 常规文件才算一篇平铺论文
+    // 本层收集「论文 stem → 命中文件」。stem 有三个来源（并集）：
+    //   ① 平铺的 `<名>.pdf`（**含前导点**——队长裁定 2：隐藏论文也要迁移，保留原名）
+    //   ② 已存在的论文文件夹 `<名>/`（F1/F1b：阶段 2 中断后平铺 pdf 可能已被删）
+    //   ③ 隐藏的论文文件夹 `.hidden/`（同上）
     const byStem = new Map<string, string[]>()
     for (const e of entries) {
       const relPath = rel ? `${rel}/${e.name}` : e.name
-      if (e.name.startsWith('.')) {
-        hidden.push(relPath)      // .trash / .DS_Store / .migration-log.json：不动、不阻塞
-        continue
-      }
       if (e.isDirectory()) {
-        // F1/F1b：**已存在的论文文件夹**也算一个 stem。阶段 2 逐条删源时若在「某篇的 `<名>.pdf` 已删、
-        // 同篇其余产物还在」处中断，只认平铺 pdf 会把那些产物误判成 orphan（永远留在旧布局 ⇒ 对插件等于消失）。
-        if (isPaperDir(join(dir, e.name))) byStem.set(e.name, [])
+        // 结构不变量（**唯一**的「论文目录不递归」判定点）：目录内有 `<目录名>.pdf` ⇒ 论文目录，
+        // 登记 stem 供 F1/F1b 的残留收口用，然后**绝不递归进去**（否则复跑会产生 X/X/X.pdf 套娃）。
+        if (isPaperDir(join(dir, e.name))) {
+          paperDirs.push(relPath)
+          byStem.set(e.name, [])
+          continue
+        }
+        if (e.name.startsWith('.')) {
+          hidden.push(relPath)     // `.trash` / `.pdf2zh-tmp` 等隐藏**非论文**目录：不动、不阻塞
+          continue
+        }
         walk(relPath)
         continue
       }
       if (isPaperPDF(e.name)) byStem.set(e.name.slice(0, -4), [])
     }
     for (const e of entries) {
-      if (e.name.startsWith('.') || e.isDirectory()) continue
+      if (e.isDirectory()) continue
       let matched = false
       for (const stem of byStem.keys()) {
         if (matchArtifactName(stem, e.name)) {
@@ -175,8 +201,11 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
           break
         }
       }
-      // 孤儿（方案 §B1.2 六类清单）：既不匹配任何论文 stem、也不是目录 ⇒ **原地不动**，只报告
-      if (!matched) orphans.push(rel ? `${rel}/${e.name}` : e.name)
+      if (matched) continue
+      const relPath = rel ? `${rel}/${e.name}` : e.name
+      // 没匹配上任何论文 stem 的隐藏名（.DS_Store 等）→ hidden（不动、不阻塞）；其余 → orphan（原地不动）
+      if (e.name.startsWith('.')) hidden.push(relPath)
+      else orphans.push(relPath)
     }
     for (const [stem, files] of byStem) {
       const targetRel = rel ? `${rel}/${stem}` : stem
@@ -186,8 +215,20 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
         quarantine.push({ paper: targetRel, reason: bad })
         continue
       }
-      if (existsSync(targetAbs) && !lstatSync(targetAbs).isDirectory()) {
+      let targetKind: 'none' | 'file' | 'dir-paper' | 'dir-other' = 'none'
+      try {
+        const tst = lstatSync(targetAbs)
+        targetKind = tst.isDirectory() ? (isPaperDir(targetAbs) ? 'dir-paper' : 'dir-other') : 'file'
+      } catch { targetKind = 'none' }
+      if (targetKind === 'file') {
         conflicts.push({ paper: targetRel, target: targetRel, reason: '目标名被文件占据' })
+        continue
+      }
+      if (targetKind === 'dir-other') {
+        // F-B：目标是**已存在的目录，但不是这篇论文的文件夹**（典型：同名子专题）⇒ 绝不能把平铺论文塞进去。
+        // 塞进去会让该目录同时是「专题」与「论文」：listPapers/listTopicTree 不再递归、子专题里原有论文
+        // 从列表与树里消失（文件还在盘上、用户却看不到）、clearTopic 永久 409。干跑就要报警。
+        conflicts.push({ paper: targetRel, target: targetRel, reason: '目标名已被子专题目录占据（会把子专题变成论文、子专题内论文从列表/树里消失）' })
         continue
       }
       for (const f of files) {
@@ -200,22 +241,27 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
           continue
         }
         const entry: MigrationEntry = { from: fromRel, to: toRel, bytes: st.size, symlink: st.isSymbolicLink() }
+        const toAbs = join(root, toRel)
+        const fromAbs = join(root, fromRel)
         let targetIsFile = false
+        let targetIsLink = false
         try {
-          targetIsFile = lstatSync(join(root, toRel)).isFile()
+          const tst = lstatSync(toAbs)
+          targetIsFile = tst.isFile()
+          targetIsLink = tst.isSymbolicLink()
         } catch { /* 目标不存在 */ }
-        if (!st.isSymbolicLink() && targetIsFile) {
-          const toAbs = join(root, toRel)
-          const fromAbs = join(root, fromRel)
-          const sameSize = sizeOf(toAbs) === st.size
-          // 「已完成」必须是**同内容**：size 相同还不够（内容不同 = 静默覆盖，正是 F2）
-          const sameContent = sameSize && sha256Of(toAbs) === sha256Of(fromAbs)
-          if (sameContent) {
+        // F-A：**符号链接源也要走冲突判定**。原先 `!st.isSymbolicLink() && targetIsFile` 让链接源绕过判定，
+        // 阶段 1 的 `rmSync(toAbs, {force:true})` 会把论文夹里那份**常规文件**换成链接（内容不可恢复、不进回收站）。
+        if (targetIsFile || targetIsLink) {
+          const sameEntry = st.isSymbolicLink()
+            ? (targetIsLink && readlinkOf(fromAbs) === readlinkOf(toAbs))         // 链接 ↔ 链接：同目标 = 同一份
+            : (!targetIsLink && sizeOf(toAbs) === st.size && sha256Of(toAbs) === sha256Of(fromAbs))
+          if (sameEntry) {
             alreadyDone.push(entry)
           } else {
-            // F2：目标已存在且内容不同 ⇒ **绝不静默覆盖**（那与队长裁定的「文件夹赢」相反，且是静默数据替换）。
-            // 判冲突：先报告不执行（runMigration 见 conflicts 即中止），源一律不动。
-            conflicts.push({ paper: targetRel, target: toRel, reason: '论文夹内已有同名文件且内容不同（文件夹赢：不覆盖、不删源）' })
+            // F2/F-A：目标已存在且与源不是同一份内容 ⇒ **绝不静默覆盖**（与裁定的「文件夹赢」相反、且是静默数据替换）。
+            // 判冲突：先报告、源一律不动；该篇本次不迁移（队长裁定 1：跳过该篇继续，绝不整库中止）。
+            conflicts.push({ paper: targetRel, target: toRel, reason: st.isSymbolicLink() ? '论文夹内已有同名文件，与符号链接源不是同一份（绝不覆盖）' : '论文夹内已有同名文件且内容不同（文件夹赢：不覆盖、不删源）' })
           }
         } else {
           moves.push(entry)
@@ -246,6 +292,7 @@ export function planMigration(dataDir: string, home: string = dshHome()): Migrat
       needBytes: Math.ceil(moves.reduce((n, e) => n + e.bytes, 0) * 1.2),
     },
     doneMarker: existsSync(markerPath) ? readFileSync(markerPath, 'utf8') : null,
+    partialMarker: existsSync(join(root, PARTIAL_MARKER)) ? readFileSync(join(root, PARTIAL_MARKER), 'utf8') : null,
   }
 }
 
@@ -268,24 +315,32 @@ export function formatMigrationReport(plan: MigrationPlan): string {
     L.push(`孤儿文件（既不匹配任何论文也不是目录，**原地不动**）：${plan.orphans.length} 个`)
     for (const o of plan.orphans) L.push(`  ${o}`)
   }
+  const skippedTotal = plan.conflicts.length + plan.quarantine.length
   if (plan.conflicts.length > 0) {
     L.push('')
-    L.push(`冲突（目标名被非目录占据，**中止该篇**）：${plan.conflicts.length} 个`)
+    L.push(`⚠️ 冲突（本次**跳过该篇**、源文件原地不动，其余照常迁移）：${plan.conflicts.length} 个`)
     for (const c of plan.conflicts) L.push(`  ${c.paper}：${c.reason}`)
   }
   if (plan.quarantine.length > 0) {
     L.push('')
-    L.push(`需人工（能识别成论文但建不出同名目录）：${plan.quarantine.length} 个`)
+    L.push(`⚠️ 需人工（论文名建不出同名目录，本次**跳过该篇**、源文件原地不动）：${plan.quarantine.length} 个`)
     for (const q of plan.quarantine) L.push(`  ${q.paper}：${q.reason}`)
+  }
+  if (skippedTotal > 0) {
+    L.push('')
+    L.push(`注意：有 ${skippedTotal} 篇会被跳过 ⇒ 本次**不会**写「全部完成」标记，只会写 ${PARTIAL_MARKER}（含跳过清单）。`)
   }
   if (plan.hidden.length > 0) {
     L.push('')
     L.push(`隐藏条目（不动、不阻塞）：${plan.hidden.length} 个`)
   }
   if (plan.doneMarker) L.push(`\n⚠️ 检测到完成标记 ${DONE_MARKER}：${plan.doneMarker.trim().slice(0, 200)}`)
+  if (plan.partialMarker) L.push(`\n⚠️ 检测到**部分完成**标记 ${PARTIAL_MARKER}（上次有跳过项）：${plan.partialMarker.trim().slice(0, 300)}`)
   L.push('')
   L.push(plan.moves.length === 0
-    ? '结论：无需迁移（幂等：可安全重复运行）。'
+    ? (skippedTotal > 0
+      ? `结论：可迁移的都已就位；但仍有 ${skippedTotal} 篇被跳过（见上），需人工处理后再跑（幂等：可安全重复运行）。`
+      : '结论：无需迁移（幂等：可安全重复运行）。')
     : '结论：先人工核对本报告，再以 --apply 执行；执行前建议 `cp -a` 一份库快照到库外。')
   return L.join('\n')
 }
@@ -339,10 +394,13 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
   const home = opts.home ?? dshHome()
   const root = resolveDataDir(dataDir)
   const plan = planMigration(root, home)
-  if (plan.conflicts.length > 0 || plan.quarantine.length > 0) {
-    // 结构性问题一律**先报告、不执行**（用户核对后再处理）
-    throw new MigrationError('migrate-conflict', `有 ${plan.conflicts.length} 个冲突 / ${plan.quarantine.length} 个需人工条目，已中止（未改动任何文件）；请先看干跑报告`)
-  }
+  // 队长裁定 1：不合规论文名（quarantine）与冲突一律**跳过该篇、继续迁移**——绝不整库中止
+  //（一篇坏名字/一个冲突挡住整个库是不可接受的）；但绝不允许「假成功」：跳过项在这里记账，
+  // 结束时报进 `skippedPapers`，且**只在零跳过时**写 `.migration-v1.done`，否则写 `.partial`。
+  const skippedPapers = [
+    ...plan.quarantine.map((q) => ({ paper: q.paper, code: 'migrate-quarantine', reason: q.reason })),
+    ...plan.conflicts.map((c) => ({ paper: c.paper, code: 'migrate-conflict', reason: c.reason })),
+  ]
   const logPath = opts.logPath ?? newMigrationLogPath(home)
   lastLogPath = logPath
   const useHash = opts.hash !== false
@@ -418,9 +476,18 @@ export function runMigration(dataDir: string, opts: RunMigrationOptions = {}): M
     const dirsRemoved = removeEmptyDirs(root, touchedDirs(toUnlink.map((e) => e.from)))
     // study.json 的 paper 字段重写（`<旧专题>/<篇名>` → `<新专题>/<篇名>`）
     const studyRewrites = rewriteStudyPointers(root, plan)
-    const marker = { v: 1, at: new Date().toISOString(), copied: done.length, removed, logPath, dirsRemoved }
-    writeFileSync(join(root, DONE_MARKER), JSON.stringify(marker, null, 2) + '\n', 'utf8')
-    return { ok: true, copied: done.length, skipped: plan.alreadyDone.length, removed, dirsRemoved, logPath, doneMarker: join(root, DONE_MARKER), studyRewrites }
+    const partial = skippedPapers.length > 0
+    const marker = { v: 1, at: new Date().toISOString(), copied: done.length, removed, logPath, dirsRemoved, partial, skipped: skippedPapers }
+    if (partial) {
+      // 有跳过项 ⇒ **绝不**写「全部完成」标记（用户会以为迁完了）
+      writeFileSync(join(root, PARTIAL_MARKER), JSON.stringify(marker, null, 2) + '\n', 'utf8')
+    } else {
+      writeFileSync(join(root, DONE_MARKER), JSON.stringify(marker, null, 2) + '\n', 'utf8')
+    }
+    return {
+      ok: true, copied: done.length, skipped: plan.alreadyDone.length, removed, dirsRemoved, logPath,
+      doneMarker: partial ? '' : join(root, DONE_MARKER), studyRewrites, partial, skippedPapers,
+    }
   } catch (err) {
     if (err instanceof MigrationError && err.code === 'migrate-interrupted') {
       const doneSet = new Set(done.map((d) => d.from))
@@ -560,8 +627,9 @@ export function rollbackMigration(dataDir: string, logPath: string): { ok: true;
   // 候选目录要同时含**源**与**副本**的父目录：迁移时新建的论文文件夹（`T/P1/`）在搬回后是空的，
   // 不收口就会在库里留下一堆空目录（实测：回滚后形状与迁移前不一致）。
   const dirsRemoved = removeEmptyDirs(root, touchedDirs([...entries.map((e) => e.from), ...entries.map((e) => e.to)]))
-  // 回滚完成后清掉完成标记（库已回到旧布局）
+  // 回滚完成后清掉完成/部分完成标记（库已回到旧布局）
   try { rmSync(join(root, DONE_MARKER), { force: true }) } catch { /* 不存在 */ }
+  try { rmSync(join(root, PARTIAL_MARKER), { force: true }) } catch { /* 不存在 */ }
   return { ok: true, restored, dirsRemoved }
 }
 
@@ -596,7 +664,13 @@ export function migrateMain(argv: string[] = process.argv.slice(2)): number {
       return 2
     }
     const r = runMigration(dataDir ?? resolveDataDir(), { hash: !argv.includes('--no-hash'), ...(home ? { home } : {}) })
-    console.log(`迁移完成：复制 ${r.copied}，跳过 ${r.skipped}，删除源 ${r.removed}，删空目录 ${r.dirsRemoved.length}，重写学习档案 ${r.studyRewrites}。`)
+    if (r.partial) {
+      console.log(`⚠️ 部分完成：复制 ${r.copied}，删除源 ${r.removed}；**跳过 ${r.skippedPapers.length} 篇**（源文件原地未动）：`)
+      for (const sp of r.skippedPapers) console.log(`   · ${sp.paper}：${sp.reason}（${sp.code}）`)
+      console.log('   未写「全部完成」标记；处理完这些篇再跑一次即可（幂等）。')
+    } else {
+      console.log(`迁移完成：复制 ${r.copied}，跳过 ${r.skipped}，删除源 ${r.removed}，删空目录 ${r.dirsRemoved.length}，重写学习档案 ${r.studyRewrites}。`)
+    }
     console.log(`日志：${r.logPath}`)
     return 0
   } catch (err) {
