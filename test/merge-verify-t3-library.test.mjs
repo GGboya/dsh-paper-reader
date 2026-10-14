@@ -437,10 +437,29 @@ test('V5 创建/删除对称（规范化路由名）、畸形 JSON 体 4xx、历
     }
   }
   // 命名不规范的创建一律 4xx；**凡能创建的必然能删掉**（对称性）
-  for (const bad of ['.hidden', 'a'.repeat(300), 'x\u0000y', 'a/b', '..', '', '   ']) {
+  // ⚠️ 布局改造后 `a/b` 不再是非法输入：topic 升级为**相对路径**（`A/B`，逐段校验）。
+  // 它的失败模式变成「父目录不存在 → 404」，因此从「命名非法」清单移到下面单独断言。
+  for (const bad of ['.hidden', 'a'.repeat(300), 'x\u0000y', '..', '', '   ']) {
     const r = await post('/api/library/topic', { name: bad })
     assert.ok(r.status >= 400 && r.status < 500, `创建 ${JSON.stringify(bad)} 必须 4xx`)
     assert.equal(r.body.code, 'bad-name')
+  }
+  // 路径化后的新语义（方案 §B2.2）：mkdir(recursive) 天然建多级 ⇒ 一次可建 `A/B`；
+  // 真正的越界（含 `..` 的段）仍被逐段词法门拒绝（下面单独断言）
+  const deepOnce = await post('/api/library/topic', { name: 'no-such-parent/child' })
+  assert.equal(deepOnce.status, 200, `多级一次创建应成功：${deepOnce.status} ${deepOnce.text}`)
+  assert.ok(existsSync(join(DATA, 'no-such-parent', 'child')), '多级目录必须真的落盘')
+  const escapeSeg = await post('/api/library/topic', { name: 'x/../../y' })
+  assert.ok(escapeSeg.status >= 400 && escapeSeg.status < 500, `含 .. 的段必须被拒：${escapeSeg.status} ${escapeSeg.text}`)
+  assert.equal(escapeSeg.body.code, 'bad-name')
+  assert.equal((await post('/api/library/topic', { name: 'sub-parent' })).status, 200)
+  const deep = await post('/api/library/topic', { name: 'sub-parent/child/grand' })
+  assert.equal(deep.status, 200, `三层子专题必须能建：${deep.text}`)
+  assert.equal(deep.body.topic, 'sub-parent/child/grand', '响应回规范化后的相对路径')
+  assert.ok(existsSync(join(DATA, 'sub-parent', 'child', 'grand')), '三层目录必须真的落盘')
+  for (const t of ['sub-parent/child/grand', 'sub-parent/child', 'sub-parent']) {
+    const d = await post('/api/library/delete-topic', { topic: t, confirmName: t })
+    assert.equal(d.status, 200, `逐层删除 ${t} 必须成功：${d.text}`)
   }
   const created = ['sym-a', '点号.名', 'with space', 'UPPER_case-1', '中文专题']
   for (const name of created) {

@@ -1715,6 +1715,8 @@ test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作
     { file: 'test/library-traversal-verification.test.mjs', case: 'V11① -en 变体 / V11⑤ 大小写改名', why: '① 我们的产物清单把 -en/-zh/-dual 都算作该文献的产物（不留删不掉的孤儿，上游报告 F3「已修复」）；⑤ 大小写-only 改名按**实测**的文件系统大小写敏感性分支：敏感 FS 成功、不敏感 FS（APFS/NTFS）→ 409 target-exists（上游口径「源码返回 409 是对的，补平台分支即可」）' },
     { file: 'test/library-traversal-verification.test.mjs', case: 'V14 F3 -en 残留', why: '同 V11①：-en.pdf 一并进回收站，断言反转为「不得残留」' },
     { file: 'test/library-traversal.test.mjs', case: '大小写改名平台分支', why: '同 V11⑤：按实测的大小写敏感性分支（敏感 FS → 成功；不敏感 FS → 409 target-exists）' },
+    { file: 'test/library-symmetry.test.mjs', case: 'R7 upload 落点/删除收口', why: '布局改造（按论文分文件夹）：upload 落点从 <topic>/<名>.pdf 变为 <topic>/<名>/<名>.pdf；删除后整个论文文件夹消失。断言强度不降（仍然两向断言「落盘可见 / 删除后消失」）' },
+    { file: 'test/library-topic-symmetry.test.mjs', case: 'R14 改名 / R7 上传→删除复核', why: '同布局改造：改名 = 论文文件夹改名 + 内部文件名改名；上传/删除断言改到新落点。断言强度不降' },
   ]
   // 登记表完整性：评审点名的 7 例一个都不能少（V11①⑤ 记为一条，含两个子例）
   const registered = documentedTestEdits.map((d) => d.case).join(' | ')

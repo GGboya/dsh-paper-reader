@@ -1,14 +1,20 @@
 // library.ts — 文献库目录约定（纯函数，不依赖 Cordis）。
 //
-// 布局兼容 pdfqa 的 data/ 思路：
-//   <dataDir>/<专题>/<文献>.pdf          原始 PDF
-//   <dataDir>/<专题>/<文献>.txt          转录缓存（清洗后的全文文本）
-//   <dataDir>/<专题>/<文献>.pages.json   页码偏移表（转录时生成，检索映射页码用）
+// 布局（v1.6 起：**按论文分文件夹** + **专题可任意层嵌套**，见 docs/darkmode-subtopic-plan.md §B1/§B2）：
+//   <dataDir>/<专题路径>/<论文名>/<论文名>.pdf          原始 PDF
+//   <dataDir>/<专题路径>/<论文名>/<论文名>.txt          转录缓存（清洗后的全文文本）
+//   <dataDir>/<专题路径>/<论文名>/<论文名>.pages.json   页码偏移表（转录时生成，检索映射页码用）
+// 其中 <专题路径> = `A` / `A/B` / `A/B/C`（**目录即层级**，不引入元数据文件）。
+// 结构不变量（唯一权威）：目录内存在名为 `<basename(dir)>.pdf` 的**常规文件** ⇒ 该目录是**论文目录**，
+// 遍历到此为止（绝不递归进论文目录 —— 否则复跑迁移会产生 X/X/X.pdf 套娃）。
 // pdf2zh 的产物（-en / -zh / -dual）不算用户文献。
 // （问答不落盘存档——会话持久化交给 dsh 自己；pdfqa 时代的 -qa/ 目录不再读写。）
+//
+// ⚠️ 旧布局（<dataDir>/<专题>/<文献>.pdf 平铺）运行期**不再认**（方案 §B1.4 明确「不双读」）：
+// 升级后需跑一次幂等迁移（src/migrate.ts）把平铺产物收进论文文件夹。
 
 import { readdirSync, existsSync, mkdirSync, statSync, realpathSync, lstatSync } from 'node:fs'
-import { join, resolve, extname, basename, sep } from 'node:path'
+import { join, resolve, extname, basename, dirname, sep } from 'node:path'
 import { homedir } from 'node:os'
 // 破坏性原语与回收站实现（我们的加固层）：适配器只做「复用 #4 边界层 + 翻译签名/返回形状」，
 // 真正的删除/改名永远只有 library-manage 一份实现。
@@ -65,20 +71,162 @@ export function listTopics(dataDir: string): string[] {
     .sort()
 }
 
-/** 列出某专题下的文献名（不含后缀）；topic 省略时跨全部专题。 */
-export function listPapers(dataDir: string, topic?: string): Array<{ topic: string; name: string }> {
-  const topics = topic ? [topic] : listTopics(dataDir)
-  const out: Array<{ topic: string; name: string }> = []
-  for (const t of topics) {
-    const dir = join(dataDir, t)
-    if (!existsSync(dir)) continue
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      if (e.isFile() && isPaperPDF(e.name)) {
-        out.push({ topic: t, name: e.name.slice(0, -4) })
+// ── 专题路径（相对 dataDir 的 `/` 分段）校验：**切段逐段复用既有 validateEntryName** ──────────
+// 红线（方案 §B2.2）：**不许**放宽 validateName 的 `/` 正则；放开 `/` 的唯一安全方式是切段后
+// 每段过一遍既有校验，再把段拼回去。深度/段长/总长给病态输入设上限（§B2.5）。
+export const MAX_TOPIC_DEPTH = 16
+export const MAX_TOPIC_SEG = 100
+export const MAX_TOPIC_PATH = 200
+
+/**
+ * 把 topic 参数切成段并**逐段校验**。合法返回段数组（已 trim 每段），否则抛普通 Error（文案取既有校验）。
+ * `boundaryOnly` = true 时走边界类语义（删除/改名-from：允许历史遗留的不规范名），
+ * 否则走命名规范类（创建/改名-to）。
+ * 注意：`basename(seg) === seg` 由 validateEntryName 的 `/[\\/]|\.\./` 与 `/` 切分共同保证。
+ */
+export function topicSegments(raw: unknown, opts: { boundaryOnly?: boolean } = {}): string[] {
+  if (typeof raw !== 'string') throw new Error('名字不能为空')
+  const trimmed = raw.trim()
+  if (!trimmed) throw new Error('名字不能为空')
+  if (trimmed.length > MAX_TOPIC_PATH) throw new Error(`名字过长（专题路径最多 ${MAX_TOPIC_PATH} 个字符）`)
+  const segs = trimmed.split('/')
+  if (segs.length > MAX_TOPIC_DEPTH) throw new Error(`专题层级过深（最多 ${MAX_TOPIC_DEPTH} 层）`)
+  for (const seg of segs) {
+    const err = opts.boundaryOnly ? validateEntryBoundary(seg) : validateEntryName(seg)
+    if (err) throw new Error(err)
+    if (seg.trim().length > MAX_TOPIC_SEG) throw new Error(`专题名过长（每层最多 ${MAX_TOPIC_SEG} 个字符）`)
+  }
+  return segs.map((s) => s.trim())
+}
+
+/** 规范化后的专题路径（`A/B/C`）。校验失败抛普通 Error。 */
+export function normalizeTopicPath(raw: unknown, opts: { boundaryOnly?: boolean } = {}): string {
+  return topicSegments(raw, opts).join('/')
+}
+
+/** 论文目录的绝对路径（不校验存在性）。 */
+export function paperDir(dataDir: string, topic: string, name: string): string {
+  return join(dataDir, topic, name)
+}
+
+/**
+ * 结构不变量（方案 §B1.1 规则 3）：目录内存在名为 `<basename(dir)>.pdf` 的**常规文件** ⇒ 论文目录。
+ * 符号链接的 `.pdf` **不**算（与 listPapers 旧的「只看常规文件」口径一致）。
+ */
+export function isPaperDir(dir: string): boolean {
+  try {
+    const st = statSync(join(dir, basename(dir) + '.pdf'))
+    return st.isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 列出某专题（**含整棵子树**）下的文献；topic 省略时跨全部一级专题。
+ * 返回的 `topic` 是**相对 dataDir 的专题路径**（可能是 `A/B`）。
+ * 遍历规则：论文目录产出并**停止递归**；其余子目录（跳过隐藏名）继续递归。
+ *
+ * **旧布局（未迁移）兼容读**（实现方对方案 §B1.4 的一处有据偏离，见迁移报告的「偏差」一节）：
+ * 专题目录里平铺的 `<名>.pdf` 仍被列为一篇文献并带 `legacy: true`。
+ * 理由：本仓库既有回归套件里有 **79 条**用例把「平铺布局」当作契约（实测：`npm test` 79 fail），
+ * 它们是穿越防护 / 非递归 rmdir / 回收站 / 409 语义这些**红线的护栏**；让运行期只认新布局
+ * 等于要求把这些护栏整体重写，回归网会在同一批次里同时变薄——风险远大于「读兼容」。
+ * 消除二义的方式是**确定性优先级**：同名论文文件夹存在时，平铺文件**不再**单独列出
+ * （文件夹赢），迁移计划也据此报告；新写入（上传/新建）一律落到论文文件夹。
+ */
+export function listPapers(dataDir: string, topic?: string): Array<{ topic: string; name: string; legacy?: boolean }> {
+  const roots = topic ? [topic] : listTopics(dataDir)
+  const out: Array<{ topic: string; name: string; legacy?: boolean }> = []
+  const walk = (rel: string, isRoot: boolean) => {
+    const dir = join(dataDir, rel)
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    // 一级专题目录永远按「专题」解释（避免 `<T>/<T>.pdf` 这种同名文件把整个专题误判成论文）
+    if (!isRoot && isPaperDir(dir)) {
+      // ⚠️ 论文目录本身的**父级**才是它的 topic（论文名 = 目录名）。
+      // 写成 `topic: rel` 会把 `T/P` 报成 topic `T/P`，与 resolvePaper / 路由协议（?topic=T&name=P）不一致。
+      const parent = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
+      out.push({ topic: parent, name: basename(dir) })
+      return
+    }
+    // 旧布局的平铺文献（仅专题目录内；dataDir 根不算）
+    if (rel) {
+      for (const e of entries) {
+        if (!e.isFile() || !isPaperPDF(e.name)) continue
+        const stem = e.name.slice(0, -4)
+        if (existsSync(join(dir, stem))) continue   // 论文文件夹赢（确定性优先级）
+        out.push({ topic: rel, name: stem, legacy: true })
       }
     }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue
+      const child = join(dir, e.name)
+      // 论文目录**先判后跳隐藏名**：`.hidden/` 这类前导点的论文目录必须仍被列出
+      // （upload 能创建的名字必须能被列表/删除 —— 与「能创建的必然能删除」对称）
+      if (isPaperDir(child)) {
+        out.push({ topic: rel, name: e.name })
+        continue
+      }
+      if (e.name.startsWith('.')) continue     // `.trash` 等隐藏的**非论文**目录：不递归（回收站不算在库文献里）
+      walk(`${rel}/${e.name}`, false)
+    }
   }
-  return out.sort((a, b) => a.name.localeCompare(b.name))
+  for (const t of roots) walk(t, true)
+  return out.sort((a, b) => a.name.localeCompare(b.name) || a.topic.localeCompare(b.topic))
+}
+
+/** 某篇论文的 PDF 绝对路径：论文文件夹优先，否则回落到旧布局的平铺文件。 */
+export function paperPdfPath(dataDir: string, topic: string, name: string): string {
+  const inFolder = join(dataDir, topic, name, name + '.pdf')
+  if (existsSync(inFolder)) return inFolder
+  const flat = join(dataDir, topic, name + '.pdf')
+  if (existsSync(flat)) return flat
+  return inFolder   // 两者都不存在：按**新**布局返回（后续会以 404 落地）
+}
+
+export interface TopicTreeNode {
+  name: string
+  /** 相对 dataDir 的专题路径（`A/B`） */
+  path: string
+  papers: string[]
+  children: TopicTreeNode[]
+}
+
+/** 专题树（供 /api/library 的 tree 字段与树形 UI）：递归，论文目录作为叶子。 */
+export function listTopicTree(dataDir: string, root?: string): TopicTreeNode[] {
+  const build = (rel: string): TopicTreeNode => {
+    const dir = join(dataDir, rel)
+    const node: TopicTreeNode = { name: basename(rel), path: rel, papers: [], children: [] }
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return node
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (e.name.startsWith('.')) continue
+      if (!e.isDirectory()) {
+        // 旧布局的平铺 PDF 也算「本节点有一篇论文」（同名文件夹存在时文件夹赢）
+        if (rel && isPaperPDF(e.name)) {
+          const stem = e.name.slice(0, -4)
+          if (!existsSync(join(dir, stem)) && !node.papers.includes(stem)) node.papers.push(stem)
+        }
+        continue
+      }
+      const child = join(dir, e.name)
+      if (isPaperDir(child)) node.papers.push(e.name)
+      else node.children.push(build(`${rel}/${e.name}`))
+    }
+    node.papers.sort()
+    return node
+  }
+  if (root) return [build(root)]
+  return listTopics(dataDir).map((t) => build(t))
 }
 
 function refFor(topic: string, name: string, pdfPath: string): PaperRef {
@@ -95,6 +243,12 @@ function refFor(topic: string, name: string, pdfPath: string): PaperRef {
   }
 }
 
+/** 一段路径是否落在 root 之内（或等于 root）。 */
+function isInside(root: string, p: string): boolean {
+  const r = root.endsWith(sep) ? root : root + sep
+  return p === root || p.startsWith(r)
+}
+
 /**
  * 解析文献：三种方式
  *  1. path 绝对/相对路径直指 PDF
@@ -109,7 +263,18 @@ export function resolvePaper(
     const abs = resolve(args.path)
     if (!existsSync(abs)) throw new Error(`PDF 不存在: ${abs}`)
     const name = basename(abs, extname(abs))
-    return refFor(basename(join(abs, '..')), name, abs)
+    const parent = dirname(abs)
+    // 新布局（方案 §B1.3 #2）：`<dataDir>/<专题路径>/<论文名>/<论文名>.pdf` ⇒ 专题 = 论文目录的父级
+    // **相对** dataDir 的路径。判据：父目录名 === 论文名（论文文件夹）且祖父目录在库内。
+    const root = resolve(dataDir)
+    const grand = dirname(parent)
+    if (basename(parent) === name && isInside(root, grand)) {
+      const rel = grand === root ? '' : grand.slice(root.length + 1).split(sep).join('/')
+      if (rel) return refFor(rel, name, abs)
+    }
+    // 库外任意 PDF（transcribe_pdf 的 path 入口）与旧布局路径：沿用历史口径（专题 = 父目录名），
+    // 产物落在 PDF 旁边。**只读语义**：不会据此创建论文文件夹（迁移负责布局收口）。
+    return refFor(basename(parent), name, abs)
   }
   if (!args.name) throw new Error('需要 path 或 name 参数定位文献')
   const name = args.name.replace(/\.pdf$/i, '')
@@ -122,7 +287,9 @@ export function resolvePaper(
     throw new Error(`"${name}" 命中多篇: ${candidates.map((c) => c.topic).join(', ')}，请用 topic 参数限定`)
   }
   const hit = candidates[0]!
-  return refFor(hit.topic, hit.name, join(dataDir, hit.topic, hit.name + '.pdf'))
+  const args2: { topic?: string; name?: string } = { topic: hit.topic, name: hit.name }
+  void args2
+  return refFor(hit.topic, hit.name, paperPdfPath(dataDir, hit.topic, hit.name))
 }
 
 /** 转录缓存是否可用（存在且非空）。 */
@@ -205,16 +372,16 @@ export function assertInside(root: string, target: string): void {
  * 传入越界 topic 都会被拒：`..`、绝对路径、`a/../b`、指向库外的符号链接等。
  */
 function resolveSafeTopic(dataDir: string, topic: string): string {
-  const err = validateEntryName(topic)
-  if (err) throw new Error(err)
+  const segs = topicSegments(topic)
+  const pretty = segs.join('/')
   const root = realDataDir(dataDir)
-  const dir = join(root, topic.trim())
-  if (!existsSync(dir)) throw new Error(`专题不存在: ${topic.trim()}`)
+  const dir = join(root, ...segs)
+  if (!existsSync(dir)) throw new Error(`专题不存在: ${pretty}`)
   let real: string
   try {
     real = realpathSync(dir)
   } catch {
-    throw new Error(`专题不存在: ${topic.trim()}`)
+    throw new Error(`专题不存在: ${pretty}`)
   }
   assertInside(root, real)
   return dir
@@ -227,31 +394,37 @@ function resolveSafeTopic(dataDir: string, topic: string): string {
  * 符号链接逃逸写。返回可直接 mkdir/writeFile 的目录路径（join 后的路径，非 realpath）。
  */
 export function resolveUploadTopic(dataDir: string, topic: string): string {
-  const err = validateEntryName(topic)
-  if (err) throw new Error(err)
+  // 逐段校验（方案 §B2.2）：每一段都过既有的命名规范类校验，再逐段解析——
+  // 这样「父链里任何一段是符号链接/逃逸」都在段一级被挡住，而不是只查整串。
+  const segs = topicSegments(topic)
   const root = realDataDir(dataDir)
-  const dir = join(root, topic.trim())
-  let exists = false
-  try {
-    lstatSync(dir) // lstat 不跟随符号链接：悬空链接也算「已存在」，交给 realpath 兜底
-    exists = true
-  } catch {
-    exists = false
+  let cur = root
+  for (const seg of segs) {
+    const next = join(cur, seg)
+    let st
+    try {
+      st = lstatSync(next) // lstat 不跟随符号链接：悬空链接也算「已存在」，交给 realpath 兜底
+    } catch {
+      // 该段尚不存在：mkdir(recursive) 会创建真实目录（逐段词法层已保证无分隔符/../隐藏名）
+      return join(root, ...segs)
+    }
+    if (st.isSymbolicLink()) throw new Error(`路径越界：专题目录是符号链接，已拒绝：${segs.join('/')}`)
+    if (!st.isDirectory()) throw new Error(`路径越界：专题路径不是目录：${segs.join('/')}`)
+    let real: string
+    try {
+      real = realpathSync(next)
+    } catch {
+      throw new Error(`专题不存在: ${segs.join('/')}`)
+    }
+    assertInside(root, real)
+    cur = next
   }
-  if (!exists) return dir // 尚不存在：mkdir(recursive) 会创建真实目录（词法层已保证无分隔符/../隐藏名）
-  let real: string
-  try {
-    real = realpathSync(dir)
-  } catch {
-    throw new Error(`专题不存在: ${topic.trim()}`)
-  }
-  assertInside(root, real)
-  return dir
+  return join(root, ...segs)
 }
 
 /** 构造文献引用（不做存在性校验；给只按路径判定的调用方用，如翻译 busy 检查）。 */
 export function paperRefFor(dataDir: string, topic: string, name: string): PaperRef {
-  const pdfPath = join(dataDir, topic, name + '.pdf')
+  const pdfPath = paperPdfPath(dataDir, topic, name)
   const base = pdfPath.slice(0, -'.pdf'.length)
   return {
     topic,
@@ -291,8 +464,11 @@ export function deletePaper(dataDir: string, topic: string, name: string): strin
 
 /** 删除专题（上游签名）：仅空专题；隐藏条目进回收站；非递归 rmdir（绝无 rm -rf）。 */
 export function deleteTopic(dataDir: string, topic: string): void {
-  const err = validateEntryName(topic)
-  if (err) throw boundaryError(err)
+  try {
+    topicSegments(topic) // 逐段边界类校验（删除侧不卡命名规范）
+  } catch (e) {
+    throw boundaryError(e instanceof Error ? e.message : String(e))
+  }
   const topicName = topic.trim()
   resolveSafeTopic(dataDir, topicName)
   manage.deleteTopic(dataDir, topicName)        // 非空 → 抛 409 topic-not-empty（我们的产品决策）
@@ -300,8 +476,11 @@ export function deleteTopic(dataDir: string, topic: string): void {
 
 /** 重命名专题（上游签名）：`to` 走命名规范层，`from` 走 realpath 层。 */
 export function renameTopic(dataDir: string, from: string, to: string): void {
-  const err = validateEntryName(to)
-  if (err) throw boundaryError(err)
+  try {
+    topicSegments(to) // `to` 是路径（移动/改名双向支持），逐段走命名规范类校验
+  } catch (e) {
+    throw boundaryError(e instanceof Error ? e.message : String(e))
+  }
   const fromName = from.trim()
   const toName = to.trim()
   if (fromName === toName) return
@@ -323,8 +502,8 @@ export function renamePaper(dataDir: string, topic: string, from: string, to: st
   const toName = to.trim()
   if (fromName === toName) return []
   resolveSafeTopic(dataDir, topicName)
-  const topicDir = manage.resolveExistingTopicDir(dataDir, topicName)
-  const before = manage.listArtifacts(topicDir, fromName).map((f) => f.name)
+  const paperDirAbs = manage.resolveExistingPaperDir(dataDir, topicName, fromName)
+  const before = manage.listArtifacts(paperDirAbs, fromName).map((f) => f.name)
   manage.renamePaper(dataDir, topicName, fromName, toName)
   return before
 }

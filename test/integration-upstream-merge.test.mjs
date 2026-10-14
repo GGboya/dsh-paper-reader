@@ -273,11 +273,17 @@ test('S2 符号链接逃逸：专题 → 库外目录、文件名 → 库外文�
 /* ═══ P 组 · PR-1 的三个收口（整合时一并带入） ══════════════════════════════ */
 
 test('P1 创建/删除对称：能创建的必然能删除；命名不规范的创建一律 4xx', async () => {
-  for (const bad of ['.hidden', 'a'.repeat(300), 'x\u0000y', 'a/b', '..', '']) {
+  // ⚠️ `a/b` 不再是非法输入（topic 升级为相对路径，逐段校验）——它现在要求父目录已存在
+  for (const bad of ['.hidden', 'a'.repeat(300), 'x\u0000y', '..', '']) {
     const r = await postJson('/api/library/topic', { name: bad })
     assert.ok(r.status >= 400 && r.status < 500, `创建 ${JSON.stringify(bad)} 必须 4xx：${r.status} ${r.text}`)
     assert.equal(r.body.code, 'bad-name')
   }
+  // 路径语义（方案 §B2.2）：mkdir(recursive) 天然建多级 ⇒ 一次可建 `A/B`
+  const nested = await postJson('/api/library/topic', { name: 'a/b' })
+  assert.equal(nested.status, 200, `多级子专题可一次创建：${nested.status} ${nested.text}`)
+  assert.equal(nested.body.topic, 'a/b')
+  assert.ok(existsSync(join(DATA, 'a', 'b')), 'a/b 必须真的落盘')
   const ok = await postJson('/api/library/topic', { name: 'p1-ok' })
   assert.equal(ok.status, 200, ok.text)
   // 能创建的（含中文 / 空格 / 点号）必然能删除

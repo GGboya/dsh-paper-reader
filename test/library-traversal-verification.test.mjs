@@ -750,7 +750,9 @@ test('V12 防护是结构性的：realpath 规范化 + 严格子路径包含（�
   for (const route of ['rename-topic', 'delete-topic', 'rename-paper', 'delete-paper']) {
     const at = host.indexOf(`sub === '/api/library/${route}'`)
     const seg = host.slice(at, at + 500)
-    assert.match(seg, /badEntry\(res,/, `${route} 必须调用 badEntry`)
+    // 专题路径化后，topic 入参统一走 badTopicPath（内部**逐段**调 validateEntryName/validateEntryBoundary），
+    // 论文名仍走 badEntry/badEntryBoundary —— 三者都是文件系统操作之前的词法门，断言强度不降。
+    assert.match(seg, /badEntry\(res,|badEntryBoundary\(res,|badTopicPath\(res,/, `${route} 必须调用词法门（badEntry/badEntryBoundary/badTopicPath）`)
   }
   assert.match(host, /const badEntry = \(res: Res, raw: unknown\): boolean =>/, 'badEntry 必须做类型检查')
 })

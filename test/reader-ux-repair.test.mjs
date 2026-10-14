@@ -283,7 +283,8 @@ test('T5 upload：≥6 种恶意 topic 全 4xx 带 code、快照零变化；符�
   try { symlinkSync(OUTSIDE, join(DATA, 'link-topic'), 'dir') } catch { /* 已存在 */ }
   const before = snap(DATA)
   const beforeOut = snap(OUTSIDE)
-  const evil = ['..', '../x', '/abs-topic', 'a/b', 'a\\b', '.hidden-topic', 'x\u0000topic', 'a..b']
+  // ⚠️ `a/b` 不再是恶意输入（topic 升级为相对路径，逐段校验）；换成真正会逃逸的 `a/../b`
+  const evil = ['..', '../x', '/abs-topic', 'a/../b', 'a\\b', '.hidden-topic', 'x\u0000topic', 'a..b']
   for (const topic of evil) {
     const r = await api('/api/library/upload', {
       method: 'POST',
@@ -310,7 +311,8 @@ test('T5 upload：≥6 种恶意 topic 全 4xx 带 code、快照零变化；符�
   })
   assert.equal(ok.status, 200, ok.text)
   assert.equal(ok.body.name, 'My Paper')
-  assert.ok(existsSync(join(DATA, 'ok-topic', 'My Paper.pdf')))
+  // 布局改造后：落点是 <topic>/<论文名>/<论文名>.pdf
+  assert.ok(existsSync(join(DATA, 'ok-topic', 'My Paper', 'My Paper.pdf')))
 })
 
 /* ── T6 弹窗「不删清单」与 delete-plan 同源 ─────────────────────────────── */
