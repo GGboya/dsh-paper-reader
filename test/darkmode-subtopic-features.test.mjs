@@ -18,7 +18,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -27,6 +28,24 @@ import { normalizeEol, extractModuleScript } from './reader-script.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO = join(ROOT, '..')
+
+/**
+ * 实测能力：本平台的文件系统是否**真的表达 POSIX mode 位**（chmod 0o600 后 stat 能否读回 0o600）。
+ *   · POSIX（ext4/APFS）→ true；
+ *   · Windows/NTFS → **false**（chmod 只映射「只读位」，`statSync().mode` 对普通文件恒为 0o666）。
+ * 为什么需要它：PR #8 的 Windows CI（job 115752032053）在 A2 上报 `438 !== 384`，即 **0o666 !== 0o600** ——
+ * 这不是行尾问题（384=0o600、438=0o666），而是「NTFS 不表达 mode 位」这个平台事实。硬编码断言 0600
+ * 在 Windows 上**永远不会成立**；正确做法是按实测能力分支（而不是 t.skip、也不是把断言删掉）。
+ */
+const posixModeBits = (() => {
+  const d = mkdtempSync(join(tmpdir(), 'dpr-modeprobe-'))
+  try {
+    const f = join(d, 'f')
+    writeFileSync(f, 'x')
+    chmodSync(f, 0o600)
+    return (statSync(f).mode & 0o777) === 0o600
+  } finally { rmSync(d, { recursive: true, force: true }) }
+})()
 const dist = (m) => join(ROOT, '..', 'dist', m)
 
 const HOME = mkdtempSync(join(tmpdir(), 'dpr-t6-home-'))
@@ -135,7 +154,25 @@ test('A2 主题配置持久化：写盘 → 回读 → DELETE 回落默认（重
   await TC.writeThemeConfig({ pdfTheme: 'dark', pdfDarkStrength: 3, pdfDarkChrome: false }, home)
   const back = await TC.readThemeConfig(home)
   assert.deepEqual(back, { pdfTheme: 'dark', pdfDarkStrength: 3, pdfDarkChrome: false }, '重启后必须原样读回')
-  assert.equal(statSync(TC.themeConfigPath(home)).mode & 0o777, 0o600, '配置文件必须 0600')
+  const cfgPath = TC.themeConfigPath(home)
+  assert.equal(existsSync(cfgPath), true, '配置文件必须真的落在预期路径（平台无关）')
+  if (posixModeBits) {
+    assert.equal(statSync(cfgPath).mode & 0o777, 0o600, '配置文件必须 0600（本机实测 chmod 生效）')
+    // 「已存在的宽权限文件必须被收紧」——这正是 writeThemeConfig 里那句显式 chmod 存在的理由
+    // （writeFile 的 mode 只在**新建**时生效）。这条在 POSIX 上平台无关地证明「每次写都收紧」。
+    chmodSync(cfgPath, 0o666)
+    await TC.writeThemeConfig({ pdfTheme: 'dark', pdfDarkStrength: 3, pdfDarkChrome: false }, home)
+    assert.equal(statSync(cfgPath).mode & 0o777, 0o600, '重写已存在的宽权限文件必须收紧回 0600')
+  } else {
+    // 本平台不表达 POSIX mode 位（典型 win32）：断言 mode === 0o600 是**跨平台不可能成立**的。
+    // 换成平台无关的**等价强度**断言：① 文件确实在预期路径；② 写入路径**确实请求**了 0600
+    // （源码级断言：防止有人以「反正 Windows 不生效」为由把 chmod 删掉，那样 Unix 上就真的不收紧）；
+    // ③ 实测记录本平台的实际 mode（若哪天 Windows 行为变了，这条会先报出来，而不是被静默跳过）。
+    assert.match(readFileSync(join(REPO, 'src', 'theme-config.ts'), 'utf8'),
+      /mode: 0o600[\s\S]{0,200}chmod\(file, 0o600\)/,
+      '写入路径必须同时用 writeFile 的 mode 与显式 chmod 请求 0600')
+    assert.equal(statSync(cfgPath).mode & 0o777, 0o666, '实测：NTFS 上普通文件 mode 恒为 0o666（不是 0o600）')
+  }
   await TC.clearThemeConfig(home)
   assert.deepEqual(await TC.readThemeConfig(home), TC.THEME_DEFAULTS, '清掉后回落默认 follow')
 })
@@ -1082,6 +1119,24 @@ test('C22 【CLI 退出码】0=全迁完 / 2=部分完成 / 1=硬失败 / 64=用
   const help = cli(['--help'])
   assert.equal(help.status, 0)
   for (const code of ['0', '1', '2', '64']) assert.match(help.stdout, new RegExp('^  ' + code + '\\s', 'm'), `--help 必须写明退出码 ${code}`)
+})
+
+test('C23 【Windows CI 根因】CLI 入口判定必须用 fileURLToPath：带空格/win32 路径下 URL.pathname 判不出入口', async () => {
+  // win32 的 `new URL(import.meta.url).pathname` 形如 `/D:/a/b/dist/migrate.js`，`path.resolve()` 会拼成
+  // `D:\D:\a\...` ⇒ 与 process.argv[1] 永不相等 ⇒ **CLI 静默什么都不做**（PR #8 Windows CI 上 C22 拿到
+  // 空 stdout、`/退出码 0/` 匹配空串，就是这个）。同一缺陷在 POSIX 上也能复现：路径含空格/非 ASCII 时
+  // pathname 是 %-转义形式（`%20`），同样判不出入口。所以这里用**带空格的目录**做本机判别。
+  const dir = mkdtempSync(join(tmpdir(), 'dpr cli space '))
+  try {
+    cpSync(join(REPO, 'dist'), join(dir, 'dist'), { recursive: true })
+    const r = spawnSync(process.execPath, [join(dir, 'dist', 'migrate.js'), '--help'], { encoding: 'utf8' })
+    assert.equal(r.status, 0, `带空格路径下 CLI 必须正常跑：${r.stdout}${r.stderr}`)
+    assert.match(r.stdout, /退出码/,
+      `入口判定必须在带空格（win32 同理）的路径下成立；拿到空输出=入口没判出来：${JSON.stringify(r.stdout)}`)
+    // 反向对照：同一份 CLI 在**无空格**路径下当然也要正常（两条路径都必须成立）
+    const plain = spawnSync(process.execPath, [join(REPO, 'dist', 'migrate.js'), '--help'], { encoding: 'utf8' })
+    assert.match(plain.stdout, /退出码/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('D7 【F4 靶子】路由层支持多段 to（移动到另一父）；.. / 绝对路径 / 编码变形 / 超深 / NUL 一律拒', async () => {

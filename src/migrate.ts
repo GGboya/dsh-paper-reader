@@ -18,6 +18,7 @@ import {
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { basename, dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { dshHome, isPaperDir, isPaperPDF, resolveDataDir } from './library.ts'
 import { matchArtifactName, PAPER_STEM_SUFFIXES, TRASH_DIR } from './library-manage.ts'
 
@@ -765,7 +766,11 @@ export const USAGE = `用法：node dist/migrate.js [--data-dir <目录>] [--hom
 注意：「--dry-run」永远返回 0（它只是报告）；「--apply」后请按退出码分支，不要只看 stdout。`
 
 // 直接 `node dist/migrate.js` 时进入 CLI；被 import 时不执行。
-if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {
+// ⚠️ 必须用 `fileURLToPath`（平台感知）而不是 `new URL(import.meta.url).pathname`：
+//   · win32：pathname 形如 `/D:/a/b/dist/migrate.js`，`path.resolve()` 会拼成 `D:\D:\a\...` ⇒ 永不相等
+//     ⇒ CLI **静默什么都不做**（PR #8 Windows CI 上 C22 拿到空 stdout 就是这个）；
+//   · 任何平台：路径里有空格/非 ASCII 时 pathname 是 %-转义形式（`%20`），同样判不出。
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   process.exitCode = migrateMain()
 }
 
