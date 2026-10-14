@@ -977,6 +977,113 @@ test('C18 结构护栏：默认复制必须 COPYFILE_EXCL（结构上杜绝覆�
   assert.match(symBranch, /symlinkSync\(link, toAbs\)/, '目标已存在时交给 symlinkSync 报 EEXIST（如实失败、不删源）')
 })
 
+test('C19 【R2-1 靶子】全量成功后必须清掉旧 .partial：干跑报告不得再谎报「上次有跳过项」', () => {
+  const { data, home } = newLib()
+  const longName = 'L'.repeat(120)
+  putFlatPaper(data, 'T', longName, ['.txt'])          // 先制造一次「有跳过」的运行
+  putFlatPaper(data, 'T', 'Good', ['.txt'])
+  const r1 = MG.runMigration(data, { home, logPath: join(home, 'c19-1.jsonl') })
+  assert.equal(r1.partial, true)
+  assert.equal(existsSync(join(data, MG.PARTIAL_MARKER)), true, '第一次运行留下 .partial')
+  assert.match(MG.formatMigrationReport(MG.planMigration(data, home)), /部分完成/, '报告如实报「上次有跳过项」')
+  // 用户把那篇处理掉（这里模拟：移出库）→ 复跑全量成功
+  rmSync(join(data, 'T', `${longName}.pdf`), { force: true })
+  rmSync(join(data, 'T', `${longName}.txt`), { force: true })
+  const r2 = MG.runMigration(data, { home, logPath: join(home, 'c19-2.jsonl') })
+  assert.equal(r2.partial, false, '这次没有跳过项')
+  assert.equal(existsSync(join(data, MG.DONE_MARKER)), true, '写 .done')
+  assert.equal(existsSync(join(data, MG.PARTIAL_MARKER)), false, 'R2-1：旧的 .partial 必须被清掉（成对）')
+  const plan = MG.planMigration(data, home)
+  assert.equal(plan.partialMarker, null, 'plan 不许再看到 .partial')
+  const report = MG.formatMigrationReport(plan)
+  assert.ok(!/部分完成/.test(report), `报告不得再谎报「部分完成」：${report.match(/部分完成.{0,40}/)}`)
+  assert.ok(!/会被跳过/.test(report), '报告不得再说「有 N 篇会被跳过」')
+  assert.ok(!/跳过该篇/.test(report), '报告不得再提「跳过该篇」')
+  assert.ok(!/部分完成标记/.test(report), '报告不得再提「部分完成标记」')
+})
+
+test('C20 【R2-2 靶子】数据根读不进去（chmod 300）也必须进 unreadable，且绝不写 .done', (t) => {
+  const { data, home } = newLib()
+  putFlatPaper(data, 'T', 'P')            // 论文全在旧布局
+  chmodSync(data, 0o300)                  // 可写可进、**不可读**
+  let blocked = false
+  try { readdirSync(data) } catch { blocked = true }
+  if (!blocked) {
+    chmodSync(data, 0o755)
+    return t.skip('当前用户可无视 0o300（例如 root）：无法构造「数据根不可读」（显式跳过，不是静默通过）')
+  }
+  try {
+    const plan = MG.planMigration(data, home)
+    assert.deepEqual(plan.unreadable, [{ dir: '.', cause: 'EACCES' }], 'R2-2：根也要进 unreadable')
+    assert.equal(plan.moves.length, 0, '读不进去 ⇒ 自然看不到任何可迁移项')
+    assert.match(MG.formatMigrationReport(plan), /读不进去/, '报告必须显式提示根读不进去')
+    const res = MG.runMigration(data, { home, logPath: join(home, 'c20.jsonl') })
+    assert.equal(res.partial, true, 'R2-2：有 unreadable 就**绝不能**算全量完成')
+    assert.equal(res.ok, true)
+    assert.deepEqual(res.unreadable, [{ dir: '.', cause: 'EACCES' }])
+    assert.equal(existsSync(join(data, MG.DONE_MARKER)), false, '绝不写 .done（否则是假成功：论文还在旧布局）')
+  } finally { chmodSync(data, 0o755) }
+  assert.equal(existsSync(join(data, MG.PARTIAL_MARKER)), true, '写 .partial 让用户知道没迁完')
+})
+
+test('C21 【R2-3 靶子】clearTopic 失败后 best-effort 清掉**空**的 .trash 根；非空一字不动', () => {
+  // 失败现场：专题里有个「认不出」的可见文件 ⇒ 非递归 rmdir 必失败 ⇒ 回滚 + 收尾清理
+  const { data } = newLib()
+  putPaper(data, 'A', 'P')
+  writeFileSync(join(data, 'A', 'note.md'), 'user note')
+  let err = null
+  try { M.clearTopic(data, 'A') } catch (e) { err = e }
+  assert.ok(err && err.code === 'topic-not-empty')
+  assert.equal(existsSync(join(data, '.trash')), false, 'R2-3：空回收站根应被 best-effort 收掉')
+  // 非空：绝不删
+  const { data: d2 } = newLib()
+  putPaper(d2, 'A', 'P')
+  writeFileSync(join(d2, 'A', 'note.md'), 'user note')
+  mkdirSync(join(d2, '.trash', 'keepme'), { recursive: true })
+  writeFileSync(join(d2, '.trash', 'keepme', 'payload.pdf'), 'recoverable')
+  let err2 = null
+  try { M.clearTopic(d2, 'A') } catch (e) { err2 = e }
+  assert.ok(err2 && err2.code === 'topic-not-empty')
+  assert.equal(readFileSync(join(d2, '.trash', 'keepme', 'payload.pdf'), 'utf8'), 'recoverable', '非空回收站一个字都不许动')
+})
+
+test('C22 【CLI 退出码】0=全迁完 / 2=部分完成 / 1=硬失败 / 64=用法错误（--help 写明）', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const cli = (args, env = {}) => spawnSync(process.execPath, [join(REPO, 'dist', 'migrate.js'), ...args], {
+    encoding: 'utf8', env: { ...process.env, ...env },
+  })
+  // ① 全迁完 ⇒ 0
+  const ok = newLib()
+  putFlatPaper(ok.data, 'T', 'P')
+  const r0 = cli(['--data-dir', ok.data, '--home', ok.home, '--apply', '--yes'])
+  assert.equal(r0.status, 0, `全迁完必须 exit 0：${r0.stdout}${r0.stderr}`)
+  assert.match(r0.stdout, /退出码 0/)
+  assert.equal(existsSync(join(ok.data, MG.DONE_MARKER)), true)
+  // ② 部分完成（有一篇不合规名）⇒ 2（脚本化调用者据此区分「没迁完」）
+  const part = newLib()
+  putFlatPaper(part.data, 'T', 'L'.repeat(120), ['.txt'])
+  putFlatPaper(part.data, 'T', 'Good', ['.txt'])
+  const r2 = cli(['--data-dir', part.data, '--home', part.home, '--apply', '--yes'])
+  assert.equal(r2.status, 2, `部分完成必须 exit 2：${r2.stdout}${r2.stderr}`)
+  assert.match(r2.stdout, /退出码 2/)
+  assert.equal(existsSync(join(part.data, MG.DONE_MARKER)), false)
+  // ③ 硬失败（悬空符号链接源：阶段 1 如实失败）⇒ 1
+  const hard = newLib()
+  putFlatPaper(hard.data, 'T', 'P', [])
+  symlinkSync(join(hard.data, 'no-such-target'), join(hard.data, 'T', 'P.txt'), 'file')
+  const r1 = cli(['--data-dir', hard.data, '--home', hard.home, '--apply', '--yes'])
+  assert.equal(r1.status, 1, `硬失败必须 exit 1：${r1.stdout}${r1.stderr}`)
+  assert.match(r1.stderr, /退出码 1/)
+  assert.equal(existsSync(join(hard.data, MG.DONE_MARKER)), false)
+  assert.equal(existsSync(join(hard.data, 'T', 'P.pdf')), true, '硬失败后源文件仍在（数据零丢失）')
+  // ④ 用法错误（缺 --yes）⇒ 64；--help ⇒ 0 且写明四个码
+  const usage = cli(['--data-dir', ok.data, '--apply'])
+  assert.equal(usage.status, 64, `缺 --yes 必须 exit 64：${usage.stdout}${usage.stderr}`)
+  const help = cli(['--help'])
+  assert.equal(help.status, 0)
+  for (const code of ['0', '1', '2', '64']) assert.match(help.stdout, new RegExp('^  ' + code + '\\s', 'm'), `--help 必须写明退出码 ${code}`)
+})
+
 test('D7 【F4 靶子】路由层支持多段 to（移动到另一父）；.. / 绝对路径 / 编码变形 / 超深 / NUL 一律拒', async () => {
   const { data } = newLib()
   const { srv, postJson } = await boot(data)
