@@ -20,7 +20,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO = join(ROOT, '..')
 const dist = (m) => join(REPO, 'dist', m)
 
-const { chunkText } = await import(pathToFileURL(dist('search.js')).href)
+const { chunkText, cutToCodePoint } = await import(pathToFileURL(dist('search.js')).href)
 const { sanitizeDetail } = await import(pathToFileURL(dist('mineru.js')).href)
 
 /** 孤立代理项探测器：与 String.prototype.isWellFormed()（ES2024，Node ≥16）等价的显式写法，
@@ -89,11 +89,34 @@ test('S3 sanitizeDetail 的 240 码元截断不得以孤立高代理项收尾（
   assert.ok(wellFormed(aligned))
 })
 
-test('S4 源码守卫：三处截断点都带回退逻辑（防后人复制旧写法）', () => {
+test('S4 源码守卫：各截断点都带回退逻辑（防后人复制旧写法）', () => {
   const search = readFileSync(join(REPO, 'src', 'search.ts'), 'utf8')
-  assert.match(search, /beforeCut >= 0xd800 && beforeCut <= 0xdbff/, 'chunkText 硬切必须回退码点边界')
+  assert.match(search, /before >= 0xd800 && before <= 0xdbff/, 'cutToCodePoint（chunkText 硬切共用）必须回退码点边界')
   const mineru = readFileSync(join(REPO, 'src', 'mineru.ts'), 'utf8')
   assert.match(mineru, /last >= 0xd800 && last <= 0xdbff/, 'sanitizeDetail 截断必须去掉尾部孤立高代理')
   const reader = readFileSync(join(REPO, 'reader', 'index.html'), 'utf8')
   assert.match(reader, /before >= 0xd800 && before <= 0xdbff/, '阅读器选区闸门截断必须回退码点边界')
+})
+
+test('S5 cutToCodePoint：截断原语本身绝不切开代理对（scope 等截断点的统一底座）', () => {
+  // 切点落在代理对中间 → 回退 1 个码元
+  const s1 = 'a'.repeat(9) + '\u{1D44B}' + 'b'.repeat(30)
+  const out1 = cutToCodePoint(s1, 10)
+  assert.equal(out1.length, 9)
+  assert.ok(wellFormed(out1))
+  // 切点本来就在码点边界 → 一个码元都不能少
+  const s2 = '\u{1D44B}'.repeat(200)
+  assert.equal(cutToCodePoint(s2, 240).length, 240)
+  // 不超限 → 原样返回（同一引用）
+  const s3 = 'short'
+  assert.equal(cutToCodePoint(s3, 10), s3)
+  // 极端护栏：limit=1 且切点在高代理项上 → 不死循环、退化为切 1（size=1 本身无法不切）
+  const s4 = '\u{1D44B}'.repeat(3)
+  assert.equal(cutToCodePoint(s4, 1).length, 1)
+})
+
+test('S6 源码守卫（scope）：按码元截断进模型上下文的一律走 cutToCodePoint', () => {
+  const scope = readFileSync(join(REPO, 'src', 'scope.ts'), 'utf8')
+  assert.ok(!/\.slice\(0, *(?:limit|1200)\)/.test(scope), 'scope.ts 不得再出现裸 .slice(0, limit/1200)——一律 cutToCodePoint')
+  assert.ok(scope.includes('cutToCodePoint'), 'scope.ts 必须引用截断原语')
 })

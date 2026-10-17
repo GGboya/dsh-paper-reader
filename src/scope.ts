@@ -16,7 +16,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { listPapers, paperRefFor, resolvePaper, type PaperRef } from './library.ts'
 import { ManageError, resolveTopicDir, validateTopicPath } from './library-manage.ts'
-import { chunkText, searchChunks, type Chunk } from './search.ts'
+import { chunkText, cutToCodePoint, searchChunks, type Chunk } from './search.ts'
 import type { PageSpan } from './transcribe.ts'
 
 /** 方案 §B3.2 冻结的五个上限（导出以便断言）。 */
@@ -30,25 +30,10 @@ const BLOCK_RESERVE = 400
 /** 论文正文的来源优先级（MinerU 的版面重排质量最好） */
 export const BODY_SOURCES = ['.mineru.md', '.txt'] as const
 
-/**
- * 按**码点**截断（PR #8 维护者点名要跟 issue #9 同类修复；上游 main 的 `cutToCodePoint` 在本分支
- * 不存在，故此处自建同语义实现，合入 main 时再对账）。
- *
- * 为什么必须：`String.prototype.slice` 按 UTF-16 码元切。切点若落在**代理对中间**（如 U+1D400
- * 数学粗体字母，占 2 个码元），结果里就留一个孤立代理项。这个字符串一旦进会话历史，
- * JSON 序列化后带 `\ud800`，服务端 `JSON.parse` 不接受孤立代理项 ⇒ **整条会话 400**。
- * 语义：切点若正好落在代理对中间，就少切 1 个码元（不越界、不补字）。
- */
-export function cutToCodePoint(text: string, limit: number): string {
-  if (typeof text !== 'string') return ''
-  if (!Number.isFinite(limit) || limit >= text.length) return text
-  const n = Math.max(0, Math.floor(limit))
-  if (n >= text.length) return text
-  if (n === 0) return ''
-  const last = text.charCodeAt(n - 1)
-  const midPair = last >= 0xd800 && last <= 0xdbff
-  return text.slice(0, midPair ? n - 1 : n)
-}
+/* cutToCodePoint 已对账：统一用 search.ts 的导出（issue #9——码元截断切开代理对
+ * 会让孤立代理项进会话历史，之后每轮请求 400），不再保留本文件的等价实现。
+ * re-export 维持 scope 模块原有导出面（测试 GC1/VER-G4 依赖）。 */
+export { cutToCodePoint } from './search.ts'
 
 export type AskScope =
   | { kind: 'paper'; topic?: string; name?: string }

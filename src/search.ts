@@ -15,6 +15,20 @@ export interface Chunk {
   text: string
 }
 
+/**
+ * 按 UTF-16 码元数截断，但**绝不切开代理对**：切点落在代理对中间时回退 1 个码元。
+ * 一切「截断结果会进模型上下文」的路径都必须走这里（或等价回退）——孤立代理项留在
+ * 会话历史里会让宿主之后每一轮模型请求都 400 INVALID_REQUEST，整条会话报废（issue #9）。
+ */
+export function cutToCodePoint(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  let cut = limit
+  // 切点前一码元是高代理项 ⇒ 代理对会被切成两半，回退 1；cut > 1 防 size=1 死循环
+  const before = text.charCodeAt(cut - 1)
+  if (before >= 0xd800 && before <= 0xdbff && cut > 1) cut -= 1
+  return text.slice(0, cut)
+}
+
 /** 按空行分段后打包成 ~size 字符的片段（忠实移植 pdfqa chunkText）。 */
 export function chunkText(text: string, size = 1500): Chunk[] {
   const paras = text.split('\n\n')
@@ -33,21 +47,16 @@ export function chunkText(text: string, size = 1500): Chunk[] {
     offset += raw.length + 2 // +2 为 \n\n
     if (p === '') continue
     if (cur.length > 0 && cur.length + p.length > size) flush(pStart - 2)
-    // 单段超过 size 的硬切
+    // 单段超过 size 的硬切（cutToCodePoint：切点若落在代理对中间——数学论文的 LaTeX 斜体
+    // 全在 U+1D400 区段，如 𝑋 = D835 DC4B——回退到码点边界，绝不产生孤立代理项）
     let rest = p
     let restStart = pStart
     while (rest.length > size) {
       if (cur.length > 0) flush(restStart)
-      // 硬切回退到码点边界：slice 按 UTF-16 码元计数，切点若落在代理对中间（数学论文的
-      // LaTeX 斜体全在 U+1D400 区段，如 𝑋 = D835 DC4B），前后片段就各带一个孤立代理项。
-      // 片段文本经 search_paper 原样返回 → 留在会话历史 → 宿主之后每一轮模型请求都
-      // 400 INVALID_REQUEST，整条会话报废（issue #9）。宁可片段短 1 个码元，绝不切开代理对。
-      let cut = size
-      const beforeCut = rest.charCodeAt(cut - 1)
-      if (beforeCut >= 0xd800 && beforeCut <= 0xdbff && cut > 1) cut -= 1
-      chunks.push({ index: chunks.length + 1, start: restStart, end: restStart + cut, text: rest.slice(0, cut) })
-      rest = rest.slice(cut)
-      restStart += cut
+      const piece = cutToCodePoint(rest, size)
+      chunks.push({ index: chunks.length + 1, start: restStart, end: restStart + piece.length, text: piece })
+      rest = rest.slice(piece.length)
+      restStart += piece.length
     }
     if (rest !== '') {
       if (cur.length > 0) cur += '\n\n'

@@ -765,6 +765,23 @@ test('E3 上限硬生效：MAX_PAPERS_IN_SCOPE / MAX_MANIFEST / MAX_CONTEXT_CHAR
   assert.equal(SC.MAX_HITS_PER_PAPER, 3)
 })
 
+test('E3b 范围上下文的截断不切开代理对（issue #9 同类）：block 全文 well-formed', () => {
+  const { data } = newLib()
+  // 正文全由 𝑋（D835 DC4B）组成、长度远超 MAX_PER_DOC：截点无论落在哪，
+  // 只要切在代理对中间就必然产出孤立代理项。夹具是确定性的——本用例对旧实现
+  // （裸 slice）做过变异验证：注入必红（见 chunk-surrogate.test.mjs 的 S5/S6）。
+  const dir = join(data, 'T', 'MathPaper')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'MathPaper.pdf'), 'pdf:MathPaper')
+  // 开头垫 1 个 ASCII：夹具是确定性的，实测内部截点为偶数偏移——垫 1 后切点必落在
+  // 某个高代理项之后（即代理对中间），对裸 slice 必红（变异验证过）。
+  writeFileSync(join(dir, 'MathPaper.txt'), 'x' + '\u{1D44B}'.repeat(4500) + ' tail')
+  const cur = L.resolvePaper(data, { topic: 'T', name: 'MathPaper' })
+  const ctx = SC.buildScopeContext(data, cur, { kind: 'paper' }, 'anything')
+  assert.equal(ctx.papers[0].coverage, 'truncated', '前置：正文确实被截断（否则用例空转）')
+  assert.ok(ctx.block.isWellFormed(), '装配出的范围上下文不得含孤立代理项（截断必须回退码点边界）')
+})
+
 test('E4 路由：不传 scope 时提示词与改造前逐字一致；传 topic 范围时只给范围内内容', async () => {
   const { data } = scopeFixtures()
   let spec = null
