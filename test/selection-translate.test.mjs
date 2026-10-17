@@ -1085,6 +1085,21 @@ test('E2 切块闸门：段数 ≤200、单 text 段 ≤4000、总长 ≤8000', 
   assert.ok(total <= 8000, `总长上限：${total}`)
 })
 
+test('E2b 闸门截断不切开代理对（issue #9 同类）：截断文本会进翻译 LLM 请求，孤立代理项可让上游整轮 400', () => {
+  const R = loadReader()
+  // 3999 个 'a' 之后恰是一个完整代理对（𝑋 = D835 DC4B），总长 4051 > 4000：
+  // 旧实现 slice(0, 4000) 的切点落在代理对中间，产出的段以孤立高代理 D835 收尾。
+  const s = 'a'.repeat(3999) + '\u{1D44B}' + 'b'.repeat(50)
+  const chunks = R.t.buildChunks([{ ch: s, page: 1, rect: null }], () => null)
+  assert.equal(chunks.length, 1)
+  const out = chunks[0].text
+  assert.ok(out.isWellFormed(), `截断后的段不得含孤立代理项：尾 4 码元 ${JSON.stringify(out.slice(-4))}`)
+  assert.equal(out.length, 3999, '回退一个码元（短 1），而不是切开代理对')
+  // 切点本来就在码点边界时一个码元都不能少
+  const aligned = R.t.buildChunks([{ ch: 'a'.repeat(4000) + 'x', page: 1, rect: null }], () => null)[0].text
+  assert.equal(aligned.length, 4000)
+})
+
 test('E3 分屏同步是纯函数：同页号 + 页内比例；页数不同按比例映射并报 mismatch', () => {
   const R = loadReader()
   const pages = (n, h = 800) => Array.from({ length: n }, (_, i) => ({ page: i + 1, offsetTop: i * h, offsetHeight: h }))

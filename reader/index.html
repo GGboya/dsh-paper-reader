@@ -1757,7 +1757,14 @@ function buildChunks(chars, itemsByPage) {
     if (room <= 0) break;
     let s = payload;
     const cap = c.kind === 'text' ? Math.min(MAX_SELECTION_CHARS, room) : room;
-    if (s.length > cap) s = s.slice(0, cap);
+    if (s.length > cap) {
+      // 截断回退到码点边界：slice 按 UTF-16 码元计数，切开代理对（数学斜体 𝑋 等）会让
+      // 翻译请求带孤立代理项、上游整轮 400（issue #9 同类）。宁可短 1 个码元。
+      let cut = cap;
+      const before = s.charCodeAt(cut - 1);
+      if (before >= 0xd800 && before <= 0xdbff && cut > 1) cut -= 1;
+      s = s.slice(0, cut);
+    }
     if (!s) continue;
     total += s.length;
     capped.push(c.kind === 'text' ? { page: c.page, kind: 'text', text: s } : { page: c.page, kind: 'formula', latex: s });

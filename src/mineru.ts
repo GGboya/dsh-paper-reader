@@ -104,7 +104,6 @@ function redactSecret(msg: string, secret: string): string {
  */
 export function sanitizeDetail(msg: string, secret = ''): string {
   const out = redactSecret(msg, secret)
-  return out
     // Bearer 之后只吃到「不可能属于令牌」的字符为止：不要把紧跟的 ) ] } , ; 引号 一起吃掉（验证报告 O4）
     .replace(/Bearer\s+[^\s)\]}>"',;]+/gi, 'Bearer [redacted]')
     .replace(/\bsk-[A-Za-z0-9_-]{4,}\b/g, '[redacted]')
@@ -112,6 +111,10 @@ export function sanitizeDetail(msg: string, secret = ''): string {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 240)
+  // 截断同样不能落在代理对中间：错误详情会进 tool result / 模型上下文，孤立代理项会让
+  // 宿主的请求整轮 400（issue #9 同类）。宁可短 1 个码元。
+  const last = out.charCodeAt(out.length - 1)
+  return last >= 0xd800 && last <= 0xdbff ? out.slice(0, -1) : out
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

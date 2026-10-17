@@ -60,7 +60,11 @@ const READER_HTML = () => listFiles('reader', (n) => n.endsWith('.html'))
  * `process.platform === 'darwin'` 时 C3 竟然仍是绿的）。现在 C3 用原文匹配 + `kinds` 过滤。
  */
 export function scanSource(src) {
-  const out = [...src]
+  // 必须 split('')（按 UTF-16 码元），不能用 [...src]（按码点）：文件里一旦有字面代理对
+  // （emoji、数学斜体 𝑋 等），[...src] 的数组就比 src.length 短，blank() 按 UTF-16 索引
+  // 写 out 会从第一个非 BMP 字符起整体错位——code 与原文不再 1:1，C1 的 balanced(src, i)
+  // 取到错位的实参（实测：含字面 𝑋 的测试文件被误报 import((pathToFileURL(...))）。
+  const out = src.split('')
   const kinds = new Array(src.length).fill('code')
   const blank = (from, to, kind) => {
     for (let k = from; k < to; k++) {

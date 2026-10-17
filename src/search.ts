@@ -38,9 +38,16 @@ export function chunkText(text: string, size = 1500): Chunk[] {
     let restStart = pStart
     while (rest.length > size) {
       if (cur.length > 0) flush(restStart)
-      chunks.push({ index: chunks.length + 1, start: restStart, end: restStart + size, text: rest.slice(0, size) })
-      rest = rest.slice(size)
-      restStart += size
+      // 硬切回退到码点边界：slice 按 UTF-16 码元计数，切点若落在代理对中间（数学论文的
+      // LaTeX 斜体全在 U+1D400 区段，如 𝑋 = D835 DC4B），前后片段就各带一个孤立代理项。
+      // 片段文本经 search_paper 原样返回 → 留在会话历史 → 宿主之后每一轮模型请求都
+      // 400 INVALID_REQUEST，整条会话报废（issue #9）。宁可片段短 1 个码元，绝不切开代理对。
+      let cut = size
+      const beforeCut = rest.charCodeAt(cut - 1)
+      if (beforeCut >= 0xd800 && beforeCut <= 0xdbff && cut > 1) cut -= 1
+      chunks.push({ index: chunks.length + 1, start: restStart, end: restStart + cut, text: rest.slice(0, cut) })
+      rest = rest.slice(cut)
+      restStart += cut
     }
     if (rest !== '') {
       if (cur.length > 0) cur += '\n\n'
