@@ -1742,10 +1742,11 @@ test('VC1[C1/C2] 回归：测试文件改动仅限逐条登记的例外、工作
   //   · PR #5 rebase 轮（t2）：`.probe/` 是本地证据目录（gitignored，但 .gitignore 一旦丢行它就
   //     会出现在 git status 里——本守卫自己的产物不能把自己判成越界）
   //   · README 瘦身轮：AGENTS.md（新增，给 AI 协作者的项目说明；README 的架构/约定小节迁入）
+  //   · 发版轮：scripts/release.mjs（一条命令发版 + GitHub Release；发布记录不进 README）
   // ⚠️ **该白名单需随各轮契约的 inScope 同步，否则会误报越界**——t5 就因此被卡成 252/253
   //   （本条的原始版本只抄了实现轮 scope）。新增轮次/新交付面时先来改这里，别用
   //   「先 commit 让路径从 git status 消失」绕过：那只会让这条守卫变瞎，而不是修正它。
-  const allowed = /^(\.probe\/|src\/|lib\/|reader\/|test\/|docs\/|\.gitignore$|package-lock\.json$|pnpm-lock\.yaml$|README\.md$|README_EN\.md$|AGENTS\.md$|package\.json$)/
+  const allowed = /^(\.probe\/|src\/|lib\/|reader\/|test\/|docs\/|\.gitignore$|package-lock\.json$|pnpm-lock\.yaml$|README\.md$|README_EN\.md$|AGENTS\.md$|package\.json$|scripts\/release\.mjs$)/
   for (const p of touched) assert.ok(allowed.test(p), `本轮不应改动：${p}`)
   // 强守卫：把「上游自带的 6 个 library 用例」相对**上游 tip**（ef00a5d = 本分支的 rebase 基点）的差异
   // 与登记清单逐一核对——rebase 轮里「零改动」已不成立（方案 §2.6 类 8 是本轮契约的一部分），
