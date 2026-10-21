@@ -5,13 +5,13 @@
 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件：论文伴读工作台（文献库 + PDF 阅读器 + AI 伴读）。npm 包 `@ggboy123/dsh-paper-reader`（裸名被别的插件占用，必须带 scope）。
 
 - `dist/` 是构建产物，**不入库**；发布只走 npm。**不要建议用户用 `github:` 安装**——profile 会起不来。
-- peer 兼容：`@deepseek-ai/dsh-tools >=0.1.5-rc.1 <0.3.0-0`；插件 ≥1.2.0 才能被 dsh 0.2.x 运行时（官方桌面端）接受。
+- peer 兼容：`@deepseek-ai/dsh-tools >=0.2.0-rc.2 <0.3.0-0`；声明式 `paper-reader` preset 依赖 dsh 0.2.x，0.1.5 不再支持。
 - Node 要求 `^22.19.0 || >=24`。
 
 ## 常用命令
 
 ```bash
-pnpm install && pnpm run build     # tsc，改完 build + 重启 profile 生效
+pnpm install && pnpm run build     # 清理 dist 后 tsc（避免已删源码残留进 npm 包），改完 build + 重启 profile 生效
 npm test                           # node --test 全量（pretest 自动 build），CI 在 ubuntu/macos/windows 三平台跑
 pnpm smoke:engine clean|managed-uv|pip-fallback|repair|translate   # babeldoc 引擎冒烟（Windows 依赖完整性）
 pnpm release patch|minor|major "一句话摘要"   # 发版：测试→同步 README→commit/tag→publish→GitHub Release
@@ -39,7 +39,7 @@ src/
   index.ts      Cordis 壳：inject tools；webServer 等服务就绪后挂路由
   tools.ts      5 个 agent 工具：list_papers / transcribe_pdf / search_paper / study_progress / study_update
   host.ts       webServer 路由（/paper-reader/*），connection.requestRejection 鉴权；
-                sessionController.create/prompt（agentPreset=paper-reader）+ follow SSE 桥
+                sessionController.create/prompt + follow SSE 桥（论文入口不默认套用 preset）
   library.ts    纯函数：文献库目录约定与解析（.txt/.pages.json/.transcript.json/.mineru.* 产物路径）
   library-manage.ts 纯函数：删除/重命名（回收站、精确 stem、路径穿越防护、批量清空）
   transcribe.ts 纯函数：pdf.js 提取 + 页码偏移表 + MinerU 后端选择与缓存来源语义
@@ -53,8 +53,7 @@ src/
   babeldoc-install.ts 纯函数：无 Python 环境时自动安装 babeldoc（uv → 托管 Python → venv）
   translate-selection.ts 纯函数：划词翻译（公式保留——行内公式与 MinerU 块文本对齐还原、提示词契约、逐公式保全校验、内存 LRU）
   rerank.ts     纯函数：search_paper 语义重排（TypeSafe/Jev，无凭据时退回关键词排序）
-  preset.ts     纯函数：自带 agent preset 安装到 $DSH_HOME/.agent-presets/
-presets/paper-reader/  「论文伴读」agent preset（persona 完整提示词 + compaction）
+cordis.patch.yml      bundle 声明插件本体 + 可选「论文伴读」agent preset（dsh-agent-preset；persona 完整提示词 + compaction）
 reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）
 lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管) + PDF 页签 + 主面板
 ```

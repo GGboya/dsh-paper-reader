@@ -4,11 +4,23 @@ The README lists only the core capabilities; prerequisites, costs, known limitat
 
 ## Contents
 
+- [Guided reading & stage checks](#guided-reading--stage-checks)
 - [MinerU parsing: scanned PDFs & click-to-cite formulas](#mineru-parsing-scanned-pdfs--click-to-cite-formulas)
 - [Embedding semantic search](#embedding-semantic-search)
 - [Selection translation (formulas preserved)](#selection-translation-formulas-preserved)
 - [Bilingual split view (two modes)](#bilingual-split-view-two-modes)
 - [Library management details](#library-management-details)
+
+## Guided reading & stage checks
+
+After the plugin is enabled and the app restarts, the `paper-reader` preset is registered with the plugin — **no separate agent install or copied configuration is needed**. It is only added as an optional dsh preset: new conversations opened from the paper library still use dsh's default agent, and the plugin never switches it for you. When you want stage checks, select “论文伴读” (Paper Reading Tutor) manually in the conversation's preset picker. Existing conversations are not rewritten.
+
+- **Quick Q&A**: selection questions and isolated factual questions are answered directly with clickable page citations; they do not complete steps in a learning plan.
+- **Guided learning**: say “带我读”, “guide me through this paper”, “continue”, or “quiz me”. The AI reads the current study progress and creates a 3–6 step plan. Each step starts only with original-page links and a few questions; you read the original and answer in your own words.
+- **Earn the transition**: the AI checks the core ideas, key reasoning/evidence, and major misconceptions at the depth expected for the current step. For vague, copied, or incorrect answers it assigns targeted re-reading, asks follow-ups, and gives progressive hints. Until the current step passes, it does not assign or explain the next stage in the guided conversation. A fresh answer is still required after remediation; to skip a step, ask for a short test-out check instead.
+- **Not a substitute reader**: no whole-paper/section summary or pre-explanation before your first genuine attempt. After all steps, a 3–5 question integrative quiz provides item-by-item feedback and exact re-reading links for weak points.
+
+The study profile lives beside each paper as `<paper>.study.json`, storing the plan and quiz history; all conversations for the same paper share it. Stage passing is judged by the AI from your answers, not by an independent deterministic grader. This gate only controls **progression in the guided conversation** — it does not lock PDF navigation or search, and Quick Q&A remains available.
 
 ## MinerU parsing: scanned PDFs & click-to-cite formulas
 

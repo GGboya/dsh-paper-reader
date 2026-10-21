@@ -21,7 +21,7 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 
 - 📚 **Three-pane workbench**: topic library + PDF reader + native chat on the right; installing does not modify the official UI — just one extra toggle in the sidebar
 - 💬 **Page-cited companion**: every answer cites page numbers; click one to jump back and flash the passage; select-to-ask on any text; conversation history supported
-- 🤖 **Tutor mode**: a dedicated preset makes step-by-step reading plans, coaches section by section, and grades quizzes; progress accumulates across sessions
+- 🤖 **Optional tutor mode**: a dedicated preset makes step-by-step plans; you read the original and answer, then the AI gives feedback and follow-ups. Advance only after demonstrating understanding; progress accumulates across sessions
 - 🀄 **One-click Chinese version**: in-place original ↔ Chinese toggle; exportable translation PDFs (Chinese / bilingual); the translation engine auto-installs, zero preinstall
 - 📏 **No more truncated paragraphs + live progress**: translation runs through `babeldoc-driver.py` — per-input output budgets (instead of babeldoc's hard-wired 2048), auto split-and-retry on `finish_reason=length`; a top-bar progress bar shows live stage progress like "Translate Paragraphs 76% (521/798)", and the driver retries with lower reasoning effort when the endpoint refuses to disable thinking
 - 🈯 **Selection translation (formulas preserved)** (v1.6.0): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
@@ -44,7 +44,7 @@ Done. Click "📚 Paper Reading" at the bottom of the sidebar, upload a PDF, and
 
 ![Install and use the paper-reading plugin on the official desktop app](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/desktop-official-use.gif)
 
-> Verified on official desktop V0.2.0-rc.2 (bundled dsh 0.2.0-rc.2, macOS arm64); plugin requires ≥1.2.0.
+> Requires official desktop V0.2.0-rc.2 or newer (bundled dsh ≥0.2.0-rc.2); dsh 0.1.5 is no longer supported.
 > To browse a plugin marketplace inside the client, also install the community plugin [`dshmarket`](https://github.com/dsh-market/dsh-market); this plugin is listed there.
 
 **Pitfalls (all hit in real testing)**:

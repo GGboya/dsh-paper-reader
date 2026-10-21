@@ -479,7 +479,7 @@ export function registerTools(ctx: Context, config: PluginConfig) {
     description:
       '更新一篇论文的学习档案（老师用）：' +
       'set_plan=制定阅读计划（steps 为 3~6 个分步标题，会重置计划但保留历史成绩）；' +
-      'complete_step=学生完成某一步（step_id + 可选 note 点评，自动推进到下一步）；' +
+      'complete_step=当前步检查已通过后才可记录完成（step_id + 可选 note 点评，自动推进到下一步；未通过不得调用）；' +
       'record_quiz=记录一次检验成绩（score/total + 可选 summary 薄弱点小结）。',
     parameters: {
       action: { type: 'string', required: true, enum: ['set_plan', 'complete_step', 'record_quiz'] },

@@ -16,7 +16,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import {
-  cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync,
+  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync,
   rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -155,7 +155,7 @@ function ensurePrefixHost() {
   if (prefixHostErr) return null
   try {
     const treeHash = execFileSync('git', ['rev-parse', `${PRE_FIX_REF}:src`], { cwd: REPO, encoding: 'utf8' }).trim()
-    const key = `${PRE_FIX_REF}:src\n${treeHash}`
+    const key = `${PRE_FIX_REF}:src\n${treeHash}\nlegacy-preset-fixture-v2`
     let cached = null
     try { cached = readFileSync(PREFIX_HOST_SIDECAR, 'utf8') } catch { /* 无 sidecar */ }
     if (cached === key && existsSync(PREFIX_HOST_JS)) return PREFIX_HOST_JS
@@ -172,10 +172,11 @@ function ensurePrefixHost() {
     }
     // host.js 启动即读「包根 package.json」的版本号；写最小版本即可（避免符号链接，跨平台）
     writeFileSync(join(PREFIX_HOST_DIR, 'package.json'), JSON.stringify({ version: '0.0.0' }))
-    // 包根还必须有 `presets/`：host 启动会把自带的 agent preset 同步进 $DSH_HOME/.agent-presets/，
-    // 缺了只会打一条「安装失败（回退默认 preset）」warning（CI 日志里 4× ENOENT 正是它）。
-    // 这里既然是「一个真实的包根」的模拟，就把它一并复制过去（纯测试基建，与穿越防护无关）。
-    cpSync(join(REPO, 'presets'), join(PREFIX_HOST_DIR, 'presets'), { recursive: true })
+    // 历史 prefix host 仍含旧版 preset 拷贝逻辑；当前仓库已改为声明式 preset，
+    // 这里给旧 fixture 两个空文件避免启动 warning（内容不会被执行）。
+    const legacyPresetDir = join(PREFIX_HOST_DIR, 'presets', 'paper-reader')
+    mkdirSync(legacyPresetDir, { recursive: true })
+    for (const f of ['preset.yml', 'agent.cordis.yml']) writeFileSync(join(legacyPresetDir, f), '')
     writeFileSync(join(PREFIX_HOST_DIR, 'tsconfig.json'), JSON.stringify({
       compilerOptions: {
         target: 'es2022', module: 'esnext', moduleResolution: 'bundler',

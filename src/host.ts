@@ -80,7 +80,6 @@ import {
   testMineruLocal,
   writeMineruConfig,
 } from './mineru-config.ts'
-import { installPaperPreset, PAPER_PRESET_ID } from './preset.ts'
 import { noteOrigin } from './origin.ts'
 
 type Req = import('node:http').IncomingMessage
@@ -95,7 +94,7 @@ type WebServer = { register: (spec: RouteSpec) => () => void }
 
 /** 选中即问注入 dsh 会话用的最小服务视图（官方 SessionController 的 create/prompt/follow）。 */
 interface SessionControllerLike {
-  create(request: { sessionId?: string; cwd?: string; workspaceId?: string; agentPreset?: string }): Promise<unknown>
+  create(request: { sessionId?: string; cwd?: string; workspaceId?: string }): Promise<unknown>
   prompt(
     request: {
       sessionId: string
@@ -192,9 +191,6 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
   const readerVendorDir = new URL('../reader/vendor/', import.meta.url)
   // 插件版本（读包根 package.json，注入阅读器顶栏——用户截图反馈时一眼可见）
   const pluginVersion = 'v' + (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
-  // 自带「论文伴读」agent preset → $DSH_HOME/.agent-presets/（实时扫描，免重启）；
-  // 失败（旧版 dsh/无权限）则回退默认 preset，功能不受影响。
-  const presetDir = installPaperPreset(new URL('../', import.meta.url))
 
   const locate = (url: URL) => {
     const path = url.searchParams.get('path') ?? undefined
@@ -279,19 +275,13 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
   }
 
-  /** 创建/复用会话：优先挂工作区 + 论文伴读 preset；失败（preset 缺失或旧会话 preset 冲突）逐级回退。 */
+  /** 创建/复用会话：论文伴读 preset 只注册到 dsh；论文入口不默认套用，避免替用户改变 agent。 */
   const createPaperSession = async (sessionId: string, topic: string) => {
     const workspaceId = await ensureTopicWorkspace(topic)
-    const usePreset = (await presetDir) !== null
     if (workspaceId) {
-      if (usePreset) {
-        try {
-          return await sessionController.create({ sessionId, workspaceId, agentPreset: PAPER_PRESET_ID })
-        } catch { /* preset 未注册或旧会话属另一 preset → 去掉 preset 重试 */ }
-      }
       try {
         return await sessionController.create({ sessionId, workspaceId })
-      } catch { /* 工作区挂载失败则回退 */ }
+      } catch { /* 工作区挂载失败则回退 cwd */ }
     }
     return sessionController.create({ sessionId, cwd: join(dataDir, topic) })
   }
