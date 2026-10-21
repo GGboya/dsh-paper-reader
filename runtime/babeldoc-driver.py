@@ -178,7 +178,10 @@ def split_text(text: str, limit_tokens: int) -> tuple[list[str], str]:
     if len(units) <= 1:
         # 连句子边界都没有：按字符硬切（极少见，兜底别死循环）
         step = max(200, limit_tokens * 3)
-        return [text[i : i + step] for i in range(0, len(text), step)], ""
+        hard = [text[i : i + step] for i in range(0, len(text), step)]
+        if len(hard) > 1 and any(not placeholders_balanced(p) for p in hard):
+            return [text], ""  # 硬切也会劈占位符 → 与行/句路径同一守卫，宁可不拆
+        return hard, ""
 
     pieces: list[str] = []
     current: list[str] = []
