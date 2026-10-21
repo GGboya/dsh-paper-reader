@@ -27,6 +27,7 @@
     "lib",
     "reader",
     "presets",
+    "runtime",
     "cordis.patch.yml"
   ],
   "dsh": {

@@ -44,6 +44,13 @@
   /* min-width:0 —— flex 项默认 min-width:auto 会拒绝收缩，空间不够时转而去挤按钮；
      让标题自己截断（已有 ellipsis），按钮才能保持原样 */
   #status { flex: 0 1 auto; min-width: 0; color: var(--text-2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 翻译进度条（只在生成中文版时出现）：细长条 + 阶段文字，宽度跟着 babeldoc 的 overall 走 */
+  #zh-prog { flex: 0 1 auto; min-width: 0; max-width: 46%; display: inline-flex; align-items: center; gap: 7px; }
+  #zh-prog[hidden] { display: none; }
+  #zh-prog .track { position: relative; flex: 1 1 auto; min-width: 48px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  #zh-prog .fill { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-radius: 3px; background: var(--accent); transition: width .35s ease; }
+  #zh-prog .txt { flex: none; font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @media (prefers-reduced-motion: reduce) { #zh-prog .fill { transition: none; } }
   /* PDF 文件路径：可点的只读文本（点击复制）。⚠️ 必须可收缩（flex:0 1 auto + min-width:0）——
      它是最长的内容项，窄列时先让位给按钮、自己截断（title 悬停始终有完整路径），
      曾经 max-width:34% + flex:none 在窄列把 ＋/适宽 挤出可视区（用户实测） */
@@ -134,6 +141,55 @@
   #eq-toggle.muted { opacity: .55; }
   #ask-copy { background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--text-2); cursor: pointer; margin-right: auto; }
 
+  /* ---------- 在文中查找（顶栏 🔍 / Ctrl+F）----------
+     输入框与结果列表在**同一个浮窗**里：窗口可拖动、可拖边框改大小，开关只有窗口一件事，
+     不再有「输入条」和「结果面板」两套入口。页内高亮是 .findLayer 里的百分比盒子
+     （Range.getClientRects 算出来的词级矩形）：不给 span 加背景类——span 常常是一整行，
+     而且加类会动 textLayer 的换行与划词。 */
+  #find-tools { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); flex: none; }
+  #find-input { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font: inherit;
+    font-size: 12.5px; line-height: 18px; background: var(--panel); color: var(--text); }
+  #find-input:focus { outline: none; border-color: var(--accent); }
+  #find-count { flex: none; min-width: 44px; max-width: 96px; text-align: center; font-size: 12px; color: var(--text-2);
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #find-count.hit { color: var(--accent); }
+  #find-count:empty { display: none; }
+  /* 查找浮窗：输入行 + 结果列表装在一起，可拖动、可拖边框改大小，默认 330×340，不占满阅读区。
+     旧版用右侧滑出面板占满整列高度，会遮住半页纸，所以改成浮窗。 */
+  #find-window { position: fixed; z-index: 46; display: none; flex-direction: column; width: 330px; height: 340px;
+    min-width: 240px; min-height: 190px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.18); overflow: hidden; }
+  #find-window.on { display: flex; }
+  #find-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: move; user-select: none;
+    border-bottom: 1px solid var(--border); font-size: 12.5px; font-weight: 600; flex: none; }
+  #find-head .spacer { flex: 1; }
+  #find-headcount { font-weight: 400; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  #find-meta { padding: 6px 10px 2px; font-size: 11.5px; color: var(--text-2); line-height: 1.5; flex: none; }
+  /* 列表自己滚：头部与说明固定在窗口上沿，关按钮永远在最上面看得见 */
+  #find-list { flex: 1; overflow: auto; padding: 2px 8px 10px; }
+  #find-grip { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; z-index: 2; }
+  #find-grip::after { content: ''; position: absolute; right: 3px; bottom: 3px; width: 8px; height: 8px;
+    border-right: 2px solid var(--text-2); border-bottom: 2px solid var(--text-2); border-bottom-right-radius: 3px; opacity: .55; }
+  /* 右边缘 / 下边缘也能拖：整条边都是热区，不用非得瞄准右下角那 16px */
+  #find-grip-r { position: absolute; top: 68px; right: 0; bottom: 16px; width: 6px; cursor: ew-resize; z-index: 2; }
+  #find-grip-b { position: absolute; left: 0; right: 16px; bottom: 0; height: 6px; cursor: ns-resize; z-index: 2; }
+  .tbtn.mini { height: 24px; padding: 0 6px; border-radius: 5px; }
+  .tbtn.mini svg.ic { width: 14px; height: 14px; }
+  #find-window .tbtn.mini.on { border-color: var(--accent); color: var(--accent); }
+  .find-page { margin: 10px 0 2px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+  .find-item { display: block; width: 100%; text-align: left; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); padding: 5px 8px; margin: 3px 0; cursor: pointer;
+    font: inherit; font-size: 12px; line-height: 1.5; }
+  .find-item:hover { border-color: var(--accent); }
+  .find-item.cur { border-color: var(--accent); background: var(--accent-soft); }
+  .find-item mark { background: rgba(255,196,0,.55); color: inherit; border-radius: 2px; padding: 0 1px; }
+  .findLayer { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+  .find-box { position: absolute; border-radius: 2px; background: rgba(255,214,0,.45); }
+  .find-box.cur { background: rgba(255,146,0,.55); box-shadow: 0 0 0 1.5px rgba(230,110,0,.85); }
+  /* 兜底高亮：Range 几何算不出来时给 span 加类（宁可糙一点，也不能「搜到了却看不见」） */
+  .textLayer span.find-hit { background: rgba(255,214,0,.45); border-radius: 2px; }
+  .textLayer span.find-hit.cur { background: rgba(255,146,0,.55); }
+
   /* ---------- 选中即问浮层 ---------- */
   #ask-pop { position: fixed; z-index: 50; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: 320px; }
   #ask-quote { font-size: 12px; color: var(--text-2); max-height: 64px; overflow: hidden; margin-bottom: 8px; border-left: 3px solid var(--accent-soft); padding-left: 8px; }
@@ -183,6 +239,9 @@
 
 <div id="bar">
   <span id="status">论文伴读</span>
+  <!-- 翻译进度条：只在 babeldoc 跑着时出现（宽度=overall，文字=阶段+百分比），
+       窄列下先让位给按钮（flex:0 1 auto + min-width:0），别把控件挤出去 -->
+  <span id="zh-prog" hidden><span class="track"><span class="fill"></span></span><span class="txt"></span></span>
   <button id="pdf-path" style="display:none" title="点击复制文件路径"></button>
   <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none" data-icon="translate"></button>
   <button id="dual-toggle" class="tbtn" title="用 babeldoc 的中英对照 PDF（模式 A）" style="display:none" data-icon="columns">对照</button>
@@ -193,6 +252,8 @@
   <button id="sync-toggle" class="tbtn" title="同步滚动 / Sync scroll：开（两列一起滚，点击关闭）" style="display:none" data-icon="sync"></button>
   <button id="zh-regen" class="tbtn" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none" data-icon="regen"></button>
   <button id="dl-btn" class="tbtn" title="下载 PDF" style="display:none" data-icon="download"></button>
+  <!-- 在文中查找（Ctrl+F）：入口紧挨下载，实际输入条是浮层，不占顶栏宽度 -->
+  <button id="find-open" class="tbtn" title="在文中查找（Ctrl+F）" style="display:none" data-icon="search"></button>
   <span class="spacer"></span>
   <button id="mode-toggle" class="tbtn" title="切换 滚动/翻页模式" style="display:none" data-icon="paged"></button>
   <span id="pager" style="display:none">
@@ -226,6 +287,28 @@
     <h3>公式</h3>
     <div id="eq-meta"></div>
     <div id="eq-list"></div>
+  </div>
+  <!-- 查找：输入框与结果列表在同一个浮窗里（可拖动 / 拖边框改大小 / 精简↔全部，
+       位置尺寸记在 localStorage）。头部固定，只有 #find-list 自己滚，所以关按钮永远可见。 -->
+  <div id="find-window" role="dialog" aria-label="查找">
+    <div id="find-head">
+      <span>查找</span>
+      <span id="find-headcount"></span>
+      <span class="spacer"></span>
+      <button id="find-expand" class="tbtn mini" title="在「精简」与「全部」之间切换">精简</button>
+      <button id="find-window-close" class="tbtn mini" title="关闭（Esc）">✕</button>
+    </div>
+    <div id="find-tools">
+      <input id="find-input" type="text" placeholder="在文中查找…" autocomplete="off" spellcheck="false">
+      <span id="find-count"></span>
+      <button id="find-prev" class="tbtn mini" title="上一处（Shift+Enter）" data-icon="prev"></button>
+      <button id="find-next" class="tbtn mini" title="下一处（Enter）" data-icon="next"></button>
+    </div>
+    <div id="find-meta"></div>
+    <div id="find-list"></div>
+    <div id="find-grip-r" title="拖动改变宽度"></div>
+    <div id="find-grip-b" title="拖动改变高度"></div>
+    <div id="find-grip" title="拖动调整大小"></div>
   </div>
 </div>
 
@@ -292,10 +375,12 @@ const ICONS = {
   sync: '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>',
   syncOff: '<path d="m18.84 12.25 1.72-1.71h-.02a5.004 5.004 0 0 0-.12-7.07 5.006 5.006 0 0 0-6.95 0l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a5.004 5.004 0 0 0 .12 7.07 5.006 5.006 0 0 0 6.95 0l1.71-1.71"/><line x1="8" x2="8" y1="2" y2="5"/><line x1="2" x2="5" y1="8" y2="8"/><line x1="16" x2="16" y1="19" y2="22"/><line x1="19" x2="22" y1="16" y2="16"/>',
   spin: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-3.9-3.9"/>',
+  close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
 };
 const iconHtml = (name) => `<svg class="ic${name === 'spin' ? ' spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 // 静态按钮按 data-icon 注入一次；动态按钮（翻译/重翻/模式切换）在状态变化时用同一函数换图标
-document.querySelectorAll('#bar [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
+document.querySelectorAll('#bar [data-icon], #find-window [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
 const api = (p, opts) => fetch('/paper-reader/api' + p, opts).then(async (r) => {
   if (!r.ok) {
     // 服务端错误体有两种：{error}（参数/权限）与 {reason}（zh/generate 的未启动原因，带完整说明）
@@ -397,8 +482,14 @@ async function openPaper(topic, name, opts = {}) {
 // 下载当前正在看的那个版本（原文/纯中文/中英对照）——导出译文的主要入口
 function updateDlBtn() {
   const btn = $('dl-btn');
-  if (!current) { btn.style.display = 'none'; return; }
+  const findBtn = $('find-open');
+  if (!current) {
+    btn.style.display = 'none';
+    if (findBtn) findBtn.style.display = 'none';
+    return;
+  }
   btn.style.display = '';
+  if (findBtn) findBtn.style.display = '';
   btn.title = zhVariant === 'zh' ? '下载：纯中文版 PDF'
     : zhVariant === 'dual' ? '下载：中英对照版 PDF' : '下载：原文 PDF';
 }
@@ -414,7 +505,615 @@ function downloadCurrent() {
 }
 $('dl-btn').onclick = downloadCurrent;
 
+/* ================= 在文中查找（顶栏 🔍 / Ctrl+F）=================
+   索引来自 pdf.js 的 getTextContent 而**不是** DOM：翻页/分屏模式 DOM 里只有当前页，
+   只查 DOM 会漏掉其它页的命中。归一化口径与 highlightSnippet 一致（忽略空白、连字符、
+   软连字符与大小写），论文跨行断词（dis-tributed）也能命中。
+   页内高亮不给 span 加背景类（span 常常是一整行，加类还会动 textLayer 的换行与划词），
+   改用 Range.getClientRects() 在 .findLayer 里画百分比盒子：精确到词、缩放后自动对齐、
+   不吃鼠标事件（pointer-events:none，划词提问照旧）。 */
+const FIND_MAX_HITS = 2000;   // 防御：极端查询（单个字母）不至于把面板撑爆
+const FIND_WIN_KEY = 'dpr.findWin';       // 结果窗口的位置与尺寸（localStorage）
+const FIND_EXPAND_KEY = 'dpr.findExpand'; // 精简/全部（1 = 全部）
+const FIND_COMPACT_HITS = 30; // 精简模式列多少处
+const findInputEl = $('find-input');
+const findCountEl = $('find-count');
+let find = { q: '', needle: '', hits: [], idx: -1, index: null, doc: null, building: false, shown: false, listStale: true, expand: false };
+let findTimer = null;
+let findWin = { x: null, y: null, w: 330, h: 340 };  // x/y 为 null = 还没定位过（贴 🔍 下方）
+const findWinEl = $('find-window');
+try { find.expand = localStorage.getItem(FIND_EXPAND_KEY) === '1'; } catch { /* 隐私模式：默认精简 */ }
+
+/** 归一化 + 回原串索引：丢掉空白/连字符/软连字符并转小写（map[i] = 归一化串第 i 字符在原文的位置） */
+function findNorm(str) {
+  let nh = '';
+  const map = [];
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i].toLowerCase();
+    if (/\s/.test(c) || c === '-' || c === '­') continue;
+    nh += c;
+    map.push(i);
+  }
+  return { nh, map };
+}
+
+/** 一页的文本索引：text 保留空格（给结果列表做上下文片段），nh/map 用于匹配 */
+async function findPageIndex(n) {
+  const page = await pdfDoc.getPage(n);
+  const tc = await page.getTextContent();
+  // item 之间补空格：pdf.js 把同一行的单词切成多个 item，直接拼会粘连成 "theenclave"
+  const text = tc.items.map((it) => it.str || '').join(' ').replace(/\s+/g, ' ').trim();
+  const { nh, map } = findNorm(text);
+  return { text, nh, map };
+}
+
+async function findBuildIndex() {
+  if (!pdfDoc) return;
+  if (find.index && find.doc === pdfDoc) return;
+  const doc = pdfDoc;
+  find.doc = doc;
+  find.index = new Map();
+  find.building = true;
+  const total = doc.numPages;
+  for (let n = 1; n <= total; n++) {
+    if (find.doc !== doc) return;   // 索引期间换了文档/变体：这份索引作废
+    try { find.index.set(n, await findPageIndex(n)); } catch { find.index.set(n, null); }
+    updateFindCount(`索引 ${n}/${total}`);
+    if (n % 8 === 0) await new Promise((r) => setTimeout(r, 0));   // 让出主线程，别卡住滚动
+  }
+  find.building = false;
+}
+
+/** 上下文片段：命中前后各留一段，去掉首尾空白并把偏移跟着挪 */
+function findSnippet(text, start, end) {
+  const pad = 42;
+  let a = Math.max(0, start - pad);
+  let b = Math.min(text.length, end + pad);
+  while (a < start && /\s/.test(text[a])) a++;
+  while (b > end && /\s/.test(text[b - 1])) b--;
+  return { pre: a > 0, post: b < text.length, text: text.slice(a, b), hitStart: start - a, hitEnd: end - a };
+}
+
+/** 扫全篇收集命中（按页、按出现顺序），每处带「该页内第几个」序号（高亮时要对号入座） */
+function findCollect() {
+  find.hits = [];
+  find.idx = -1;
+  const needle = find.needle;
+  if (!needle || !find.index) return;
+  for (const [page, e] of find.index) {
+    if (!e || !e.nh) continue;
+    let from = 0;
+    let ord = 0;
+    for (;;) {
+      if (find.hits.length >= FIND_MAX_HITS) return;
+      const at = e.nh.indexOf(needle, from);
+      if (at < 0) break;
+      const start = e.map[at];
+      const end = e.map[at + needle.length - 1] + 1;
+      find.hits.push({ page, ord, snippet: findSnippet(e.text, start, end) });
+      ord += 1;
+      from = at + Math.max(1, needle.length);
+    }
+  }
+}
+
+function updateFindCount(note) {
+  if (!findCountEl) return;
+  findCountEl.classList.remove('hit');
+  if (note) { findCountEl.textContent = note; findCountEl.title = ''; return; }
+  if (!find.q || !find.needle) { findCountEl.textContent = ''; findCountEl.title = ''; return; }
+  if (find.building) { findCountEl.textContent = '索引…'; return; }
+  if (!find.hits.length) {
+    findCountEl.textContent = '无匹配';
+    findCountEl.title = '没有找到这段文字。扫描件没有文本层时也搜不到';
+    return;
+  }
+  // idx < 0 = 还没跳过（边打边搜阶段）：显示总处数，别让用户看到 "0/12"
+  findCountEl.textContent = find.idx < 0 ? `${find.hits.length} 处` : `${find.idx + 1}/${find.hits.length}`;
+  findCountEl.classList.add('hit');
+  findCountEl.title = `共 ${find.hits.length} 处（Enter 下一处，Shift+Enter 上一处）`;
+}
+
+function findMetaText() {
+  if (!find.q) return '输入关键词：Enter 跳到第一处，Shift+Enter 上一处，Esc 关闭。';
+  if (!find.needle) return '';
+  if (find.building && !find.hits.length) return '正在建立索引…';
+  if (!find.hits.length) {
+    return `没有找到「${find.q}」。如果这篇是扫描件（没有文本层）就会搜不到，可先用转录或 MinerU 解析再试。`;
+  }
+  const pages = new Set(find.hits.map((h) => h.page)).size;
+  const capped = find.hits.length >= FIND_MAX_HITS ? `（已截断到前 ${FIND_MAX_HITS} 处）` : '';
+  return `「${find.q}」共 ${find.hits.length} 处，分布在 ${pages} 页${capped}。点条目直接跳转。`;
+}
+
+/* ---------- 结果窗口：可拖动、可拖边框缩放、可精简/全部 ---------- */
+function findWinSave() {
+  if (!findWinEl) return;
+  try {
+    const r = findWinEl.getBoundingClientRect();
+    localStorage.setItem(FIND_WIN_KEY, JSON.stringify({
+      x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height),
+    }));
+  } catch { /* 隐私模式记不住：下次回到默认位置，不影响本次使用 */ }
+}
+
+function findWinLoad() {
+  if (!findWinEl) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem(FIND_WIN_KEY) || 'null');
+    if (raw) {
+      if (Number.isFinite(raw.w)) findWin.w = Math.max(240, Math.min(720, raw.w));
+      if (Number.isFinite(raw.h)) findWin.h = Math.max(190, raw.h);
+      if (Number.isFinite(raw.x) && Number.isFinite(raw.y)) { findWin.x = raw.x; findWin.y = raw.y; }
+    }
+  } catch { /* 坏 JSON：用默认值 */ }
+}
+
+/** 落位并夹在视口内（窗口拖动/缩放/视口变化后都走这里，保证不会拖到屏幕外找不回来） */
+function findWinPlace() {
+  if (!findWinEl) return;
+  const w = findWin.w;
+  const h = Math.min(findWin.h, Math.max(190, window.innerHeight - 40));
+  let x = findWin.x;
+  let y = findWin.y;
+  if (x === null || y === null) {
+    // 首次打开：贴在 🔍 按钮下方（用户点的那颗按钮旁边最符合直觉）；按钮没显出来就贴右上角
+    const btn = $('find-open');
+    const r = btn ? btn.getBoundingClientRect() : null;
+    if (r && r.width) {
+      x = r.right - w;
+      y = r.bottom + 6;
+    } else {
+      x = window.innerWidth - w - 26;
+      y = 64;
+    }
+  }
+  x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
+  y = Math.max(8, Math.min(y, window.innerHeight - h - 8));
+  findWinEl.style.width = w + 'px';
+  findWinEl.style.height = h + 'px';
+  findWinEl.style.left = Math.round(x) + 'px';
+  findWinEl.style.top = Math.round(y) + 'px';
+  findWin.x = Math.round(x);
+  findWin.y = Math.round(y);
+}
+
+function findWinShow(on) {
+  if (!findWinEl) return;
+  if (!on) {
+    findWinEl.classList.remove('on');
+    find.shown = false;
+    return;
+  }
+  findWinEl.classList.add('on');
+  find.shown = true;
+  findWinPlace();
+  renderFindList();
+}
+
+/** 精简模式只列当前命中附近的一段，避免几百处命中把窗口刷成冗长清单 */
+function findVisibleIdx() {
+  const n = find.hits.length;
+  const out = [];
+  if (find.expand || n <= FIND_COMPACT_HITS) {
+    for (let i = 0; i < n; i++) out.push(i);
+    return out;
+  }
+  const center = find.idx < 0 ? 0 : find.idx;
+  let start = Math.max(0, center - Math.floor(FIND_COMPACT_HITS / 2));
+  if (start + FIND_COMPACT_HITS > n) start = Math.max(0, n - FIND_COMPACT_HITS);
+  for (let i = start; i < start + FIND_COMPACT_HITS; i++) out.push(i);
+  return out;
+}
+
+function findSetExpand(on) {
+  find.expand = on;
+  try { localStorage.setItem(FIND_EXPAND_KEY, on ? '1' : '0'); } catch { /* 忽略 */ }
+  find.listStale = true;
+  renderFindList();
+}
+
+/** 重建结果列表（只在查询/模式变化时做；跳转只切 .cur 类，不重建 DOM） */
+function renderFindList() {
+  const list = $('find-list');
+  const meta = $('find-meta');
+  const head = $('find-headcount');
+  if (!list || !meta || !head) return;
+  meta.textContent = findMetaText();
+  head.textContent = !find.q || !find.needle ? ''
+    : !find.hits.length ? '无匹配'
+    : find.idx < 0 ? `${find.hits.length} 处` : `${find.idx + 1}/${find.hits.length}`;
+  const expBtn = $('find-expand');
+  if (expBtn) {
+    expBtn.style.display = find.hits.length > FIND_COMPACT_HITS ? '' : 'none';
+    // 按钮写的是「点了会变成什么」：精简时显示「全部」，全部时显示「精简」
+    expBtn.textContent = find.expand ? '精简' : '全部';
+    expBtn.classList.toggle('on', find.expand);
+    expBtn.title = find.expand ? `当前列出全部 ${find.hits.length} 处，点击收成精简` : `当前只列 ${FIND_COMPACT_HITS} 处，点击展开全部 ${find.hits.length} 处`;
+  }
+  if (!find.listStale && list.childElementCount) { syncFindCurrent(); return; }
+  find.listStale = false;
+  list.innerHTML = '';
+  if (!find.hits.length) return;
+  const frag = document.createDocumentFragment();
+  const shown = findVisibleIdx();
+  let lastPage = 0;
+  for (const i of shown) {
+    const hit = find.hits[i];
+    if (hit.page !== lastPage) {
+      const ph = document.createElement('div');
+      ph.className = 'find-page';
+      ph.textContent = `第 ${hit.page} 页`;
+      frag.appendChild(ph);
+      lastPage = hit.page;
+    }
+    const s = hit.snippet;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'find-item';
+    btn.dataset.i = String(i);
+    if (s.pre) btn.appendChild(document.createTextNode('…'));
+    btn.appendChild(document.createTextNode(s.text.slice(0, s.hitStart)));
+    const mk = document.createElement('mark');
+    mk.textContent = s.text.slice(s.hitStart, s.hitEnd);
+    btn.appendChild(mk);
+    btn.appendChild(document.createTextNode(s.text.slice(s.hitEnd)));
+    if (s.post) btn.appendChild(document.createTextNode('…'));
+    btn.addEventListener('click', () => { void findGoto(i); });
+    frag.appendChild(btn);
+  }
+  if (shown.length < find.hits.length) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'find-item';
+    more.style.textAlign = 'center';
+    more.style.color = 'var(--text-2)';
+    more.textContent = `还有 ${find.hits.length - shown.length} 处没有列出 · 点这里展开全部`;
+    more.addEventListener('click', () => findSetExpand(true));
+    frag.appendChild(more);
+  }
+  list.appendChild(frag);
+  syncFindCurrent();
+}
+
+function syncFindCurrent() {
+  const list = $('find-list');
+  if (!list) return;
+  let cur = null;
+  list.querySelectorAll('.find-item').forEach((el) => {
+    const on = Number(el.dataset.i) === find.idx;
+    el.classList.toggle('cur', on);
+    if (on) cur = el;
+  });
+  if (cur) cur.scrollIntoView({ block: 'nearest' });
+}
+
+function findClearBoxes() {
+  document.querySelectorAll('.findLayer').forEach((l) => l.remove());
+  document.querySelectorAll('.textLayer span.find-hit').forEach((sp) => sp.classList.remove('find-hit', 'cur'));
+}
+
+/** 一页 DOM 的「拼接串 + 归一化映射 + 偏移→(文本节点, offset) 定位器」 */
+function findPageHay(pageDiv) {
+  const tl = pageDiv.querySelector('.textLayer');
+  if (!tl) return null;
+  // 用**文本节点**而不是 span：Range.setStart(node, n) 里的 n 对元素节点是「子节点序号」，
+  // 对文本节点才是字符偏移。之前把字符偏移直接喂给 span，Range 要么抛错、要么落在行首，
+  // getClientRects 拿不到有效矩形 → 这就是「搜到了却没有标黄」的根因。
+  const nodes = [];
+  const startOf = [];
+  let hay = '';
+  const walker = document.createTreeWalker(tl, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const t = n.nodeValue || '';
+    if (!t) continue;
+    nodes.push(n);
+    startOf.push(hay.length);
+    hay += t;
+  }
+  if (!hay) return null;
+  const { nh, map } = findNorm(hay);
+  if (!nh) return null;
+  const at = (off) => {
+    let lo = 0;
+    let hi = startOf.length - 1;
+    let idx = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (startOf[mid] <= off) { idx = mid; lo = mid + 1; } else { hi = mid - 1; }
+    }
+    return [nodes[idx], Math.min(off - startOf[idx], nodes[idx].nodeValue.length)];
+  };
+  return { nh, map, at };
+}
+
+/** 兜底高亮：Range 几何算不出来（跨节点怪例、TextLayer 结构变化）时给 span 加类。
+ *  宁可粗一点，也不能出现「搜到了却看不见」。 */
+function findMarkSpansFallback(tl, ord) {
+  const spans = [...tl.querySelectorAll('span:not(.markedContent)')];
+  let seen = 0;
+  for (const sp of spans) {
+    const t = sp.textContent || '';
+    const { nh } = findNorm(t);
+    if (!nh || !nh.includes(find.needle)) continue;
+    sp.classList.add('find-hit');
+    if (seen === ord) sp.classList.add('cur');
+    seen += 1;
+  }
+  return seen > 0;
+}
+
+/** 在指定页画出该页全部命中（第 ord 处标为当前），返回当前盒子供滚动 */
+function findMarkPage(page, ord) {
+  findClearBoxes();
+  const div = origPageNode(page);
+  const tl = div && div.querySelector('.textLayer');
+  if (!div || !tl || !find.needle) return null;
+  const hay = findPageHay(div);
+  if (!hay) return null;
+  const rect = tl.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const layer = document.createElement('div');
+  layer.className = 'findLayer';
+  // 必须插在 textLayer **之前**：paintPage 靠 div.firstChild/lastChild 取 canvas/textLayer，
+  // 追加在后面会让 lastChild 变成高亮层 → TextLayer 挂错容器（同 paintEqLayer 的坑）
+  div.insertBefore(layer, tl);
+  const percent = (v, base) => (v / base * 100).toFixed(3) + '%';
+  let cur = null;
+  let found = 0;
+  let from = 0;
+  for (;;) {
+    const at = hay.nh.indexOf(find.needle, from);
+    if (at < 0) break;
+    const start = hay.map[at];
+    const end = hay.map[at + find.needle.length - 1] + 1;
+    const [nodeA, offA] = hay.at(start);
+    const [nodeB, offB] = hay.at(end);
+    try {
+      const rng = document.createRange();
+      rng.setStart(nodeA, offA);
+      rng.setEnd(nodeB, offB);
+      for (const r of rng.getClientRects()) {
+        if (r.width < 0.6 || r.height < 0.6) continue;   // 换行点产生的退化矩形跳过
+        const isCur = found === ord;
+        const box = document.createElement('span');
+        box.className = 'find-box' + (isCur ? ' cur' : '');
+        box.style.left = percent(r.left - rect.left, rect.width);
+        box.style.top = percent(r.top - rect.top, rect.height);
+        box.style.width = percent(r.width, rect.width);
+        box.style.height = percent(r.height, rect.height);
+        layer.appendChild(box);
+        if (isCur && !cur) cur = box;
+      }
+    } catch { /* 这一处几何算不出来：循环结束后统一兜底 */ }
+    found += 1;
+    from = at + Math.max(1, find.needle.length);
+    if (found > 600) break;   // 单页防御
+  }
+  if (!layer.childElementCount) {
+    layer.remove();                     // 空层留着也没用
+    findMarkSpansFallback(tl, ord);     // 兜底：给命中的 span 上底色
+    return null;
+  }
+  return cur;
+}
+
+/** 等目标页真的出现（翻页/分屏模式要先切页再等 TextLayer 铺好） */
+async function findReadyPage(page) {
+  if (!pdfDoc) return;
+  const p = Math.max(1, Math.min(page, pdfDoc.numPages));
+  if ((pageMode === 'paged' || viewMode === 'split') && curPage !== p) {
+    curPage = p;
+    await rerender();
+    updatePager();
+  }
+  for (let i = 0; i < 120; i++) {
+    const div = origPageNode(p);
+    if (div && div.querySelector('.textLayer span')) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+async function findGoto(i) {
+  if (!find.hits.length) return;
+  const n = find.hits.length;
+  find.idx = ((i % n) + n) % n;          // 首尾循环
+  const hit = find.hits[find.idx];
+  await findReadyPage(hit.page);
+  if (!find.hits.length) return;
+  const cur = findMarkPage(hit.page, hit.ord);
+  updateFindCount();
+  if (!find.listStale) syncFindCurrent();
+  const target = cur || origPageNode(hit.page);
+  if (target) {
+    await new Promise((r) => requestAnimationFrame(r));
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+
+/** 新的查询：清空命中 → 建索引（有缓存则秒回）→ 收集 → 渲染列表 */
+async function findRun(q) {
+  find.q = q;
+  find.needle = findNorm(q).nh;
+  find.hits = [];
+  find.idx = -1;
+  find.listStale = true;
+  findClearBoxes();
+  renderFindList();
+  if (!find.needle) { updateFindCount(); return; }
+  updateFindCount('索引…');
+  await findBuildIndex();
+  if (find.q !== q) return;              // 期间输入又变了
+  findCollect();
+  renderFindList();
+  updateFindCount();
+  // 输入框就在窗口里，所以窗口一打开就一直开着；有结果时顺手把列表滚到当前命中
+  findWinShow(true);
+}
+
+/** 打开查找窗口（focus=true 时选中输入框内容，方便直接改写关键词） */
+function findPanelOpen(focus) {
+  if (!findWinEl) return;
+  findWinShow(true);
+  if (find.idx >= 0) findReapply();   // 重新打开时把上次的当前命中重新标出来，不用再跳一次
+  if (focus) { findInputEl.focus(); findInputEl.select(); }
+}
+
+/** 关闭查找窗口：连页内高亮一起收掉（关键词留着，下次按 🔍 还能直接用） */
+function findClose() {
+  findWinShow(false);
+  findClearBoxes();
+}
+
+/** 拖动窗口标题栏（指针事件：鼠标/触控板/触屏同一套） */
+function findWinDrag(e) {
+  if (e.button !== 0 || e.target.closest('button')) return;  // 头部按钮不触发拖动
+  e.preventDefault();
+  const start = { mx: e.clientX, my: e.clientY, x: findWinEl.offsetLeft, y: findWinEl.offsetTop };
+  const move = (ev) => {
+    findWin.x = start.x + (ev.clientX - start.mx);
+    findWin.y = start.y + (ev.clientY - start.my);
+    findWinPlace();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    findWinSave();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+}
+
+/** 拖边缘/右下角改大小：dir = 'se'（角）| 'e'（右边缘）| 's'（下边缘） */
+function findWinResize(e, dir) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const start = { mx: e.clientX, my: e.clientY, w: findWinEl.offsetWidth, h: findWinEl.offsetHeight, x: findWinEl.offsetLeft, y: findWinEl.offsetTop };
+  const move = (ev) => {
+    if (dir !== 's') findWin.w = Math.max(220, Math.min(window.innerWidth - 16, start.w + (ev.clientX - start.mx)));
+    if (dir !== 'e') findWin.h = Math.max(150, Math.min(window.innerHeight - 24, start.h + (ev.clientY - start.my)));
+    findWin.x = start.x;
+    findWin.y = start.y;
+    findWinPlace();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    findWinSave();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+}
+
+/** 缩放/换模式/开关分屏后 DOM 被重建：把当前命中重新画上去 */
+function findReapply() {
+  if (!find.shown || !find.hits.length) return;
+  const hit = find.hits[find.idx];
+  if (hit) findMarkPage(hit.page, hit.ord);
+}
+
+/** 换了文档（换论文/原文↔译文）：索引与命中全部作废，输入框里的词留着 */
+function findReset() {
+  find.index = null;
+  find.doc = null;
+  find.hits = [];
+  find.idx = -1;
+  find.needle = '';
+  find.q = '';
+  find.listStale = true;
+  findClearBoxes();
+  updateFindCount();
+  renderFindList();
+}
+
+findInputEl.addEventListener('input', () => {
+  clearTimeout(findTimer);
+  const q = findInputEl.value.trim();
+  // 边打边算（220ms 防抖）但不自动跳页：跳页留给 Enter/上下箭头，避免打字时页面乱跳
+  findTimer = setTimeout(() => { void findRun(q); }, 220);
+});
+findInputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    clearTimeout(findTimer);
+    const q = findInputEl.value.trim();
+    if (q !== find.q) { void findRun(q).then(() => findGoto(0)); return; }
+    void findGoto(find.idx + (e.shiftKey ? -1 : 1));
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    findClose();
+  }
+});
+// 🔍 只是「打开查找窗口」：窗口关着就开、开着就把焦点给输入框（关键词和结果都还在）
+$('find-open').onclick = () => {
+  if (!pdfDoc) return;
+  findPanelOpen(true);
+};
+$('find-prev').onclick = () => { void findGoto(find.idx - 1); };
+$('find-next').onclick = () => { void findGoto(find.idx + 1); };
+$('find-window-close').onclick = findClose;
+$('find-expand').onclick = () => findSetExpand(!find.expand);
+$('find-head').addEventListener('pointerdown', findWinDrag);
+$('find-grip').addEventListener('pointerdown', (e) => findWinResize(e, 'se'));
+$('find-grip-r').addEventListener('pointerdown', (e) => findWinResize(e, 'e'));
+$('find-grip-b').addEventListener('pointerdown', (e) => findWinResize(e, 's'));
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'f' || e.key === 'F') && pdfDoc) {
+    e.preventDefault();
+    findPanelOpen(true);
+  }
+});
+window.addEventListener('resize', () => {
+  if (findWinEl.classList.contains('on')) findWinPlace();   // 视口变小：把窗口夹回可见范围
+});
+findWinLoad();
+
+/** 排查用：控制台执行 dprFindDebug() 能看到当前查找的内部状态（高亮不显示时先看 boxes 是否为 0） */
+window.dprFindDebug = () => {
+  const cur = find.hits[find.idx];
+  return {
+    q: find.q,
+    needle: find.needle,
+    hits: find.hits.length,
+    idx: find.idx,
+    indexPages: find.index ? find.index.size : 0,
+    currentHit: cur ? { page: cur.page, ord: cur.ord } : null,
+    spansInDom: document.querySelectorAll('.textLayer span').length,
+    boxes: document.querySelectorAll('.find-box').length,
+    fallbackMarks: document.querySelectorAll('.textLayer span.find-hit').length,
+    windowOpen: !!(findWinEl && findWinEl.classList.contains('on')),
+    winPos: findWinEl ? { x: findWinEl.offsetLeft, y: findWinEl.offsetTop, w: findWinEl.offsetWidth, h: findWinEl.offsetHeight } : null,
+  };
+};
+
 /* ================= 中英切换 ================= */
+/** 翻译进度条（只在 busy 时出现）：宽度跟着后端 progress.overall，文字给阶段+百分比。 */
+function updateZhProgress() {  const box = $('zh-prog');
+  const p = zhState && zhState.busy ? zhState.progress : null;
+  if (!p) { box.hidden = true; return; }
+  const pct = typeof p.overall === 'number' ? Math.max(0, Math.min(100, p.overall)) : null;
+  box.hidden = false;
+  box.querySelector('.fill').style.width = (pct === null ? 8 : Math.max(2, pct)).toFixed(1) + '%';
+  box.querySelector('.txt').textContent = pct === null
+    ? `${p.label || '翻译'}…`
+    : `${p.label || '翻译'} ${Math.round(pct)}%`;
+  box.title = p.text || '';
+}
+// 别人启动的翻译（另开会话/刷新页面后进来）也要能看到进度：busy 就自动挂一个低成本轮询
+let zhWatch = null;
+let zhGenerating = false;
+function ensureZhWatch() {
+  if (zhState.busy && !zhWatch && !zhGenerating) {
+    zhWatch = setInterval(() => { void refreshZhState(); }, 1200);
+  } else if (!zhState.busy && zhWatch) {
+    clearInterval(zhWatch); zhWatch = null;
+  }
+}
 async function refreshZhState() {
   zhState = await api(`/zh?topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`);
   const btn = $('zh-toggle');
@@ -433,6 +1132,8 @@ async function refreshZhState() {
     delete statusEl.dataset.phaseShown;
     if (statusMeta) statusEl.textContent = statusMeta;
   }
+  updateZhProgress();
+  ensureZhWatch();
   // 重翻按钮只在「已有译文且空闲」时出现；状态变化时顺手拆掉两击确认的待确认态
   const regen = $('zh-regen');
   const canRegen = (zhState.zh || zhState.dual) && !zhState.busy;
@@ -557,10 +1258,17 @@ async function startGenerate(force) {
   }
   $('zh-toggle').disabled = true; $('zh-toggle').innerHTML = iconHtml('spin');
   $('zh-regen').style.display = 'none';
+  // 先本地亮一个「准备中」的进度条，别等第一轮轮询才出现（首轮可能要几秒）
+  zhState = { ...zhState, busy: true, progress: null };
+  updateZhProgress();
+  zhGenerating = true;
+  // 翻译期间 1s 一轮（进度条要跟手）；结束后自动停
   const timer = setInterval(async () => {
     await refreshZhState();
     if (!zhState.busy) {
       clearInterval(timer);
+      zhGenerating = false;
+      ensureZhWatch();
       if (zhState.dual || zhState.zh) {
         toast('中文版已生成');
         // 重翻完成时用户可能正停在译文视图/分屏：原地刷新，而不是来回切换
@@ -570,7 +1278,7 @@ async function startGenerate(force) {
       }
       else toast('生成失败：' + (zhState.error || '未知原因'), 8000);
     }
-  }, 5000);
+  }, 1000);
 }
 
 /* ================= 重新翻译（重翻按钮，两击确认） ================= */
@@ -734,6 +1442,9 @@ let renderToken = 0;
 async function loadPdf(url, opts = {}) {
   await ensurePdfjs(); // 就绪前禁止触 pdfjsLib（defer 竞态，见文件头注释）
   pdfDoc = await pdfjsLib.getDocument({ url }).promise; // v6 起不接受字符串参数，必须传对象
+  // 换了文档（换论文 / 原文↔译文）：查找索引按文档对象缓存，这里必须作废，
+  // 否则会拿旧文档的页码去定位新文档（页数不同时直接跳错页）。
+  if (find.doc !== pdfDoc) findReset();
   $('empty').style.display = 'none';
   // 翻页控件与模式切换按钮：文档就绪后才出现
   $('pager').style.display = '';
@@ -799,8 +1510,10 @@ async function paintPage(page, div, viewport, token) {
 /** 当前模式的全量重渲入口：缩放/DPR/换文档/换变体统一走这里。
  *  分屏（模式 B）是第三套布局，转到 renderSplit()；renderPaged/renderAllPages 的既有语义**不变**。 */
 function rerender() {
-  if (viewMode === 'split') return renderSplit();
-  return pageMode === 'paged' ? renderPaged() : renderAllPages();
+  // 渲染完成后再补画查找高亮：缩放/切模式把 DOM 整个重建，旧的高亮层随之消失。
+  const done = () => { try { findReapply(); } catch { /* 高亮是装饰，失败不影响阅读 */ } };
+  if (viewMode === 'split') return renderSplit().then(done);
+  return (pageMode === 'paged' ? renderPaged() : renderAllPages()).then(done);
 }
 
 // 隐藏期间被跳过的重渲请求：尺寸恢复（resize）后补跑。
