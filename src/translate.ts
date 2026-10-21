@@ -24,9 +24,9 @@ export interface TranslatePaperRef {
 
 /** OpenAI 兼容翻译端点（baseUrl + key + 模型名）。 */
 export interface TranslateEndpoint {
-    baseUrl: string;
-    apiKey: string;
-    model: string;
+    baseUrl?: string;
+    apiKey?: string;
+    model?: string;
 }
 
 /** 一条翻译进度（驱动脚本事件折算后的前端可画形态）。 */
@@ -336,6 +336,8 @@ function resolveDriverPython(bin: string | null): string | null {
 
 /** 真正拉起 babeldoc 子进程（bin 已就绪、产物不存在/已删）。 */
 async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, bin: string): Promise<void> {
+    // 走到这里之前 precheck 已保证三项齐全；收窄一次，后续按 string 用
+    const ep = endpoint as Required<TranslateEndpoint>;
     const tmpDir = join(dataDir, '.pdf2zh-tmp');
     await mkdir(tmpDir, { recursive: true });
     busy.set(ref.pdfPath, null); // 清掉安装阶段说明，回到「翻译进行中」
@@ -351,7 +353,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
     // 0.6.x 都有，没有的话 babeldoc 会立刻报 unrecognized arguments，比默默用错的临时目录好排查。
     const assumeModern = supported.size === 0;
     const hasFlag = (flag: string): boolean => assumeModern || supported.has(flag);
-    const noThink = /bigmodel|kimi|moonshot|deepseek/i.test(endpoint.baseUrl) && hasFlag('openai-thinking')
+    const noThink = /bigmodel|kimi|moonshot|deepseek/i.test(ep.baseUrl) && hasFlag('openai-thinking')
         ? ['--openai-thinking', 'disabled']
         : [];
     // 工作目录必须自己指定：babeldoc 默认在 cwd 下建 my_temp 并反复重建 PDF，
@@ -362,8 +364,8 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
     const babelArgs = [
         '--files', ref.pdfPath,
         '--lang-in', 'en', '--lang-out', 'zh-CN',
-        '--openai', '--openai-model', endpoint.model,
-        '--openai-base-url', endpoint.baseUrl, '--openai-api-key', endpoint.apiKey,
+        '--openai', '--openai-model', ep.model,
+        '--openai-base-url', ep.baseUrl, '--openai-api-key', ep.apiKey,
         ...noThink,
         '--qps', '16', '--no-watermark', '--output', tmpDir,
         ...(workParent ? ['--working-dir', workParent] : []),
@@ -540,7 +542,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
             return;
         }
         child.on('error', (err) => end(null, err));
-        child.on('close', (code) => end(code, null));
+        child.on('close', (code: number | null) => end(code, null));
     });
 }
 
