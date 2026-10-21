@@ -23,6 +23,7 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 - 💬 **Page-cited companion**: every answer cites page numbers; click one to jump back and flash the passage; select-to-ask on any text; conversation history supported
 - 🤖 **Tutor mode**: a dedicated preset makes step-by-step reading plans, coaches section by section, and grades quizzes; progress accumulates across sessions
 - 🀄 **One-click Chinese version**: in-place original ↔ Chinese toggle; exportable translation PDFs (Chinese / bilingual); the translation engine auto-installs, zero preinstall
+- 📏 **No more truncated paragraphs + live progress**: translation runs through `babeldoc-driver.py` — per-input output budgets (instead of babeldoc's hard-wired 2048), auto split-and-retry on `finish_reason=length`; a top-bar progress bar shows live stage progress like "Translate Paragraphs 76% (521/798)", and the driver retries with lower reasoning effort when the endpoint refuses to disable thinking
 - 🈯 **Selection translation (formulas preserved)** (v1.5.1): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
 - 🖥️ **Bilingual side-by-side / split view** (v1.5.1): a doubled-width对照 page or a two-pane split with synchronised scrolling — switch any time, remembered per paper
 - 🗂️ **Library management**: rename/delete topics and papers; deletion goes to a recoverable trash

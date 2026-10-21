@@ -66,6 +66,31 @@ That bubble has **no** "insert into chat" and **no** "copy" button, and the plug
 - A **literal `$`** inside the selection (a real dollar sign printed in the text) can, in an extreme shape, produce a false "N formulas were not preserved" note. Recorded; it does not affect the translation itself.
 - **No formula replacement in the Chinese / dual views** (the bbox only holds for original pages), which is why the "译" button only appears in the original view.
 
+## One-click Chinese: live progress & no more truncated paragraphs
+
+**Progress bar (top bar, shown while generating)**: a slim bar plus stage text (e.g. "Translate Paragraphs · 76%", "Add Fonts (0/10) · 90%"), tracking babeldoc's overall progress. Translations started **elsewhere** keep showing progress too (another session, or after refreshing the page, polling resumes automatically); the bar disappears on completion and the existing success/failure notice takes over.
+
+**Long paragraphs are no longer truncated (driven by `runtime/babeldoc-driver.py`)**:
+
+- babeldoc used to omit `max_tokens` when calling the LLM (many endpoints default to only 2k–4k, silently truncating long Chinese translations). The driver sizes it explicitly from the input (≈4 chars/token for Latin, ≈1.5 for CJK; budget ≈2.6× the input, capped at 8192).
+- If still truncated (`finish_reason=length`): retry once at the full cap, then **split the input on newline/sentence boundaries, translate pieces separately, and join back**. If splitting would tear a rich-text placeholder (`<b12>…</b12>`, formula placeholders) in half, it **refuses to split**.
+- Endpoints that reject `max_tokens` (or only accept `max_completion_tokens`): the parameter is dropped and the request resent. Endpoints that refuse disabling thinking: the field is removed and retried with `reasoning_effort=low`. Each fallback fires **at most once** and is logged; no infinite retries.
+- **Honest degradation**: if no python is found next to babeldoc's venv (or the driver script is missing), it falls back to running plain babeldoc — **no progress bar**, and single requests may still hit the endpoint's default cap (the old behavior). A failed in-driver patch install likewise falls back to vanilla babeldoc: translation still works, progress and length fixes are lost.
+- During translation, full logs land in `<paper>.babeldoc.log` (under `.pdf2zh-tmp/` in the data dir) — debugging no longer depends on a 400-character tail.
+
+**Verification scope**: the behaviors above were verified against a local mock OpenAI endpoint with the real babeldoc 0.6.4 pipeline (event stream 0→100, input-dependent max_tokens, escalation retry after `length`, clean exit). No long-document regression against a real paid endpoint has been run.
+
+## Find in document (Ctrl+F / the 🔍 top-bar button)
+
+**How to use**: click 🔍 or press Ctrl+F; typing searches as you go (220 ms debounce, **no auto-jumping** — jumping is left to Enter / Shift+Enter / clicking a result). The window is draggable, resizable by its edges, and toggles compact↔full; its position and size are remembered locally.
+
+**Scope & limits (stated honestly)**:
+
+- The index is built from the **pdf.js text layer**, not the DOM — full-document search works in paged/split modes too (not just the visible page). **Scanned PDFs without a text layer cannot be searched**; the UI says so (transcribe/MinerU first).
+- Normalization ignores whitespace, hyphens, soft hyphens, and case; words broken across lines by hyphenation (`dis-tributed`) still match. **No stemming/synonyms**: searching `distributing` will not match `distributed`.
+- In-page highlights are word-level rectangles (`Range.getClientRects` converted to percentage boxes, zoom-stable) and pointer-transparent — select-to-ask keeps working. If geometry fails in an edge case, whole-line spans get a background tint as a fallback (rough, but never "found yet invisible").
+- Defensive caps: 2000 hits per document, 600 highlight boxes per page (excess is honestly labelled as truncated).
+
 ## Bilingual split view (two modes)
 
 Two toolbar buttons; switch any time and **click again to return to the original**. Each paper remembers its last view (and the memory follows the paper across renames):
