@@ -7,7 +7,7 @@
 
 **中文**: [README.md](README.md)
 
-A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin: a **paper reading workbench** — paper library + PDF reader + AI companion. Every answer cites page numbers, and clicking a page jumps back to the exact highlighted passage. Current version: **v1.5.1**.
+A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plugin: a **paper reading workbench** — paper library + PDF reader + AI companion. Every answer cites page numbers, and clicking a page jumps back to the exact highlighted passage. Current version: **v1.6.0**.
 
 > 💬 **QQ group: 1127244508** — questions, feature requests, and bug reports are all welcome.
 
@@ -24,8 +24,8 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 - 🤖 **Tutor mode**: a dedicated preset makes step-by-step reading plans, coaches section by section, and grades quizzes; progress accumulates across sessions
 - 🀄 **One-click Chinese version**: in-place original ↔ Chinese toggle; exportable translation PDFs (Chinese / bilingual); the translation engine auto-installs, zero preinstall
 - 📏 **No more truncated paragraphs + live progress**: translation runs through `babeldoc-driver.py` — per-input output budgets (instead of babeldoc's hard-wired 2048), auto split-and-retry on `finish_reason=length`; a top-bar progress bar shows live stage progress like "Translate Paragraphs 76% (521/798)", and the driver retries with lower reasoning effort when the endpoint refuses to disable thinking
-- 🈯 **Selection translation (formulas preserved)** (v1.5.1): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
-- 🖥️ **Bilingual side-by-side / split view** (v1.5.1): a doubled-width对照 page or a two-pane split with synchronised scrolling — switch any time, remembered per paper
+- 🈯 **Selection translation (formulas preserved)** (v1.6.0): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
+- 🖥️ **Bilingual side-by-side / split view** (v1.6.0): a doubled-width对照 page or a two-pane split with synchronised scrolling — switch any time, remembered per paper
 - 🗂️ **Library management**: rename/delete topics and papers; deletion goes to a recoverable trash
 - ➕ **Optional add-ons** (off by default): MinerU parsing — scanned PDFs become readable, formulas become **Click to cite a formula** and searchable; an embeddings endpoint — plain-language semantic search
 
