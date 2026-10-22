@@ -8,6 +8,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { normalizeEol } from './reader-script.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const REPO = join(ROOT, '..')
@@ -15,9 +16,10 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dpr-preset-home-'))
 const { registerRoutes } = await import(pathToFileURL(join(REPO, 'dist', 'host.js')).href)
 
 test('preset：bundle 声明可选 agent-preset，并保留伴读门槛与压缩组', () => {
-  const patch = readFileSync(join(REPO, 'cordis.patch.yml'), 'utf8')
-  const host = readFileSync(join(REPO, 'src', 'host.ts'), 'utf8')
-  const tools = readFileSync(join(REPO, 'src', 'tools.ts'), 'utf8')
+  // Windows 检出是 CRLF：多行正则（下面的 `config:\n...`）必须跑在归一化后的文本上。
+  const patch = normalizeEol(readFileSync(join(REPO, 'cordis.patch.yml'), 'utf8'))
+  const host = normalizeEol(readFileSync(join(REPO, 'src', 'host.ts'), 'utf8'))
+  const tools = normalizeEol(readFileSync(join(REPO, 'src', 'tools.ts'), 'utf8'))
   const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'))
 
   assert.match(patch, /id: preset-paper-reader\n\s+name: '@deepseek-ai\/dsh-agent-preset'/)
