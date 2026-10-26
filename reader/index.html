@@ -190,6 +190,61 @@
   .textLayer span.find-hit { background: rgba(255,214,0,.45); border-radius: 2px; }
   .textLayer span.find-hit.cur { background: rgba(255,146,0,.55); }
 
+  /* ---------- 笔记（划词标注 + 可移动笔记窗口） ----------
+     标注用「百分比盒子 + 底部波浪底图」而不是给 span 加 text-decoration：一个选区常跨多个 span，
+     加类会把整行都画上波浪线（与查找高亮同一条教训）。盒子层 pointer-events:none，
+     悬停/点击靠坐标命中测试，不会挡住划词选字。 */
+  .noteLayer { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+  .note-under { position: absolute; border-radius: 2px; pointer-events: none;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='4'%3E%3Cpath d='M0 3 Q2.25 .6 4.5 3 T9 3' fill='none' stroke='%232f6bff' stroke-width='1.1'/%3E%3C/svg%3E");
+    background-repeat: repeat-x; background-position: 0 100%; background-size: 9px 4px; }
+  .note-under.flash { background-color: rgba(47,107,255,.20); }
+  #note-tip { position: fixed; z-index: 58; display: none; max-width: 320px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.18);
+    padding: 8px 10px; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; pointer-events: none; }
+  #note-tip .tip-hint { display: block; margin-top: 4px; color: var(--text-2); font-size: 11px; }
+  /* 划词三动作小菜单（提问 / 全局搜索 / 笔记） */
+  #sel-menu { position: fixed; z-index: 52; display: none; gap: 2px; padding: 4px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 9px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+  #sel-menu.on { display: flex; }
+  #sel-menu button { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 10px; border: none;
+    border-radius: 6px; background: none; color: var(--text); font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  #sel-menu button:hover { background: var(--accent-soft); color: var(--accent); }
+  #sel-menu svg.ic { width: 15px; height: 15px; }
+  /* 笔记窗口：与查找窗同一套（可拖动 / 拖边框缩放 / 位置记忆）。列表与编辑器切换显示。 */
+  #note-window { position: fixed; z-index: 46; display: none; flex-direction: column; width: 330px; height: 360px;
+    min-width: 260px; min-height: 200px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.18); overflow: hidden; }
+  #note-window.on { display: flex; }
+  #note-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: move; user-select: none;
+    border-bottom: 1px solid var(--border); font-size: 12.5px; font-weight: 600; flex: none; }
+  #note-head .spacer, #note-actions .spacer { flex: 1; }
+  #note-headcount { font-weight: 400; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  #note-list { flex: 1; overflow: auto; padding: 4px 8px 10px; }
+  .note-item { display: block; width: 100%; text-align: left; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); padding: 6px 8px; margin: 5px 0; cursor: pointer; font: inherit; font-size: 12px; line-height: 1.5; }
+  .note-item:hover { border-color: var(--accent); }
+  .note-item .ni-meta { display: block; color: var(--accent); font-size: 11px; margin-bottom: 2px; }
+  .note-item .ni-meta .ni-time { float: right; color: var(--text-2); font-weight: 400; }
+  .note-item .ni-body { display: block; white-space: pre-wrap; word-break: break-word; }
+  .note-item .ni-quote { display: block; color: var(--text-2); font-size: 11px; margin-top: 3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #note-empty { padding: 14px 6px; color: var(--text-2); font-size: 12px; line-height: 1.6; }
+  #note-editor { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 6px 8px 8px; }
+  #note-window.editing #note-list, #note-window.editing #note-empty { display: none; }
+  #note-window.editing #note-editor { display: flex; }
+  #note-quote { flex: none; max-height: 72px; overflow: auto; font-size: 11.5px; color: var(--text-2);
+    border-left: 3px solid var(--accent-soft); padding-left: 8px; margin-bottom: 6px; }
+  #note-body { flex: 1; min-height: 80px; width: 100%; resize: none; border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 8px; font: inherit; font-size: 12.5px; line-height: 1.6; background: var(--panel); color: var(--text); }
+  #note-actions { display: flex; align-items: center; gap: 6px; margin-top: 6px; flex: none; }
+  .tbtn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #note-grip { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; z-index: 2; }
+  #note-grip::after { content: ''; position: absolute; right: 3px; bottom: 3px; width: 8px; height: 8px;
+    border-right: 2px solid var(--text-2); border-bottom: 2px solid var(--text-2); border-bottom-right-radius: 3px; opacity: .55; }
+  #note-grip-r { position: absolute; top: 34px; right: 0; bottom: 16px; width: 6px; cursor: ew-resize; z-index: 2; }
+  #note-grip-b { position: absolute; left: 0; right: 16px; bottom: 0; height: 6px; cursor: ns-resize; z-index: 2; }
+
   /* ---------- 选中即问浮层 ---------- */
   #ask-pop { position: fixed; z-index: 50; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: 320px; }
   #ask-quote { font-size: 12px; color: var(--text-2); max-height: 64px; overflow: hidden; margin-bottom: 8px; border-left: 3px solid var(--accent-soft); padding-left: 8px; }
@@ -254,6 +309,8 @@
   <button id="dl-btn" class="tbtn" title="下载 PDF" style="display:none" data-icon="download"></button>
   <!-- 在文中查找（Ctrl+F）：入口紧挨下载，实际输入条是浮层，不占顶栏宽度 -->
   <button id="find-open" class="tbtn" title="在文中查找（Ctrl+F）" style="display:none" data-icon="search"></button>
+  <!-- 笔记：入口紧挨搜索；点开是「笔记窗口」（列全部笔记 / 新建 / 编辑） -->
+  <button id="note-open" class="tbtn" title="笔记" style="display:none" data-icon="note"></button>
   <span class="spacer"></span>
   <button id="mode-toggle" class="tbtn" title="切换 滚动/翻页模式" style="display:none" data-icon="paged"></button>
   <span id="pager" style="display:none">
@@ -310,6 +367,32 @@
     <div id="find-grip-b" title="拖动改变高度"></div>
     <div id="find-grip" title="拖动调整大小"></div>
   </div>
+
+  <!-- 笔记窗口：与查找窗同一套交互（标题栏拖动 / 三边缩放 / 位置尺寸记忆）。
+       列表态显示全部笔记，编辑态换成「引用 + 正文 + 保存/删除」。 -->
+  <div id="note-window" role="dialog" aria-label="笔记">
+    <div id="note-head">
+      <span>笔记</span>
+      <span id="note-headcount"></span>
+      <span class="spacer"></span>
+      <button id="note-new" class="tbtn mini" title="把当前选中的文字做成新笔记">＋</button>
+      <button id="note-window-close" class="tbtn mini" title="关闭（Esc）">✕</button>
+    </div>
+    <div id="note-list"></div>
+    <div id="note-editor">
+      <div id="note-quote"></div>
+      <textarea id="note-body" placeholder="写下你的理解、疑问、和别处的联系…（⌘/Ctrl+Enter 保存）"></textarea>
+      <div id="note-actions">
+        <button id="note-delete" class="tbtn mini" title="删除这条笔记">删除</button>
+        <span class="spacer"></span>
+        <button id="note-cancel" class="tbtn mini">取消</button>
+        <button id="note-save" class="tbtn mini primary">保存</button>
+      </div>
+    </div>
+    <div id="note-grip-r" title="拖动改变宽度"></div>
+    <div id="note-grip-b" title="拖动改变高度"></div>
+    <div id="note-grip" title="拖动调整大小"></div>
+  </div>
 </div>
 
 <div id="ask-pop">
@@ -350,6 +433,16 @@
   </div>
 </div>
 
+<!-- 划词后的三动作菜单：提问 / 全局搜索 / 笔记（点「提问」才展开原来的提问弹层） -->
+<div id="sel-menu" role="menu" aria-label="选中文字后的操作">
+  <button id="sel-ask" data-icon="ask" title="围绕这段文字向伴读提问">提问</button>
+  <button id="sel-find" data-icon="search" title="在全文里查找这段文字">全局搜索</button>
+  <button id="sel-note" data-icon="note" title="给这段文字加一条笔记">笔记</button>
+</div>
+
+<!-- 笔记悬停提示：鼠标停在被标注文字上显示笔记内容 -->
+<div id="note-tip"></div>
+
 <div id="toast"></div>
 
 <script>
@@ -377,10 +470,12 @@ const ICONS = {
   spin: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-3.9-3.9"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  note: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  ask: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
 };
 const iconHtml = (name) => `<svg class="ic${name === 'spin' ? ' spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 // 静态按钮按 data-icon 注入一次；动态按钮（翻译/重翻/模式切换）在状态变化时用同一函数换图标
-document.querySelectorAll('#bar [data-icon], #find-window [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
+document.querySelectorAll('#bar [data-icon], #find-window [data-icon], #note-window [data-icon], #sel-menu [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
 const api = (p, opts) => fetch('/paper-reader/api' + p, opts).then(async (r) => {
   if (!r.ok) {
     // 服务端错误体有两种：{error}（参数/权限）与 {reason}（zh/generate 的未启动原因，带完整说明）
@@ -465,6 +560,8 @@ async function openPaper(topic, name, opts = {}) {
   // 按 eqIndex 铺的，先渲染会漏画/残留上一篇的矩形；又必须排在 zhVariant 定稿之后——
   // eqHotEnabled()/renderEqPanel() 都按 zhVariant 决定「译文视图关热区」。失败不影响打开文献。
   await loadFormulas();
+  // 笔记必须在 loadPdf 之前到货：渲染完成后的重画要直接按 notes.list 铺波浪线
+  await loadNotes();
   updateDlBtn();
   updateViewButtons();
   if (viewMode === 'split') {
@@ -483,13 +580,16 @@ async function openPaper(topic, name, opts = {}) {
 function updateDlBtn() {
   const btn = $('dl-btn');
   const findBtn = $('find-open');
+  const noteBtn = $('note-open');
   if (!current) {
     btn.style.display = 'none';
     if (findBtn) findBtn.style.display = 'none';
+    if (noteBtn) noteBtn.style.display = 'none';
     return;
   }
   btn.style.display = '';
   if (findBtn) findBtn.style.display = '';
+  if (noteBtn) noteBtn.style.display = '';
   btn.title = zhVariant === 'zh' ? '下载：纯中文版 PDF'
     : zhVariant === 'dual' ? '下载：中英对照版 PDF' : '下载：原文 PDF';
 }
@@ -1091,6 +1191,556 @@ window.dprFindDebug = () => {
   };
 };
 
+/* ================= 笔记（划词标注 + 可移动笔记窗口）=================
+   存储：服务端 `<论文>.notes.json`（与 `.study.json` 同目录 ⇒ 跟文献走、换浏览器不丢、将来也能被伴读读到）。
+   锚点：页号 + 「该页 DOM 文本层拼接串」里的字符区间。文本层的内容只由 PDF 决定（与缩放/模式无关），
+        所以偏移在重渲染后仍然有效 → 每次渲染完成按偏移重建 Range → 百分比盒子（蓝色波浪线）。
+   为什么不用给 span 加 text-decoration：一个选区常跨多个 span，加类会把整行都画上波浪线。
+   盒子层 pointer-events:none，悬停/点击靠坐标命中测试 —— 绝不挡住划词选字。 */
+const NOTE_WIN_KEY = 'dpr.noteWin';
+const NOTE_BODY_MAX = 20000;
+const notes = { list: [], shown: false, editing: null, isNew: true, armed: false, loading: false };
+let noteWin = { x: null, y: null, w: 330, h: 360 };
+const noteWinEl = $('note-window');
+const selMenuEl = $('sel-menu');
+const noteTipEl = $('note-tip');
+let noteArmTimer = 0;
+let noteHoverRaf = 0;
+let noteHoverId = null;
+let selPoint = { x: 0, y: 0 };   // 三动作菜单/提问弹层的落点
+
+/* ---------- 窗口几何：与查找窗同一套（位置尺寸记在 localStorage） ---------- */
+function noteWinSave() {
+  try {
+    const r = noteWinEl.getBoundingClientRect();
+    localStorage.setItem(NOTE_WIN_KEY, JSON.stringify({
+      x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height),
+    }));
+  } catch { /* 隐私模式记不住：下次回到默认位置 */ }
+}
+function noteWinLoad() {
+  if (!noteWinEl) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem(NOTE_WIN_KEY) || 'null');
+    if (raw) {
+      if (Number.isFinite(raw.w)) noteWin.w = Math.max(260, Math.min(720, raw.w));
+      if (Number.isFinite(raw.h)) noteWin.h = Math.max(200, raw.h);
+      if (Number.isFinite(raw.x) && Number.isFinite(raw.y)) { noteWin.x = raw.x; noteWin.y = raw.y; }
+    }
+  } catch { /* 坏 JSON：用默认值 */ }
+}
+function noteWinPlace() {
+  if (!noteWinEl) return;
+  const w = noteWin.w;
+  const h = Math.min(noteWin.h, Math.max(200, window.innerHeight - 40));
+  let x = noteWin.x;
+  let y = noteWin.y;
+  if (x === null || y === null) {
+    const btn = $('note-open');
+    const r = btn ? btn.getBoundingClientRect() : null;
+    if (r && r.width) { x = r.right - w; y = r.bottom + 6; }
+    else { x = window.innerWidth - w - 26; y = 64; }
+  }
+  x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
+  y = Math.max(8, Math.min(y, window.innerHeight - h - 8));
+  noteWinEl.style.width = w + 'px';
+  noteWinEl.style.height = h + 'px';
+  noteWinEl.style.left = Math.round(x) + 'px';
+  noteWinEl.style.top = Math.round(y) + 'px';
+  noteWin.x = Math.round(x);
+  noteWin.y = Math.round(y);
+}
+function noteWinDrag(e) {
+  if (e.button !== 0 || e.target.closest('button')) return;
+  e.preventDefault();
+  const start = { mx: e.clientX, my: e.clientY, x: noteWinEl.offsetLeft, y: noteWinEl.offsetTop };
+  const move = (ev) => {
+    noteWin.x = start.x + (ev.clientX - start.mx);
+    noteWin.y = start.y + (ev.clientY - start.my);
+    noteWinPlace();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    noteWinSave();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+}
+/** 拖边缘/右下角改大小：dir = 'se'（角）| 'e'（右边缘）| 's'（下边缘） */
+function noteWinResize(e, dir) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const start = { mx: e.clientX, my: e.clientY, w: noteWinEl.offsetWidth, h: noteWinEl.offsetHeight, x: noteWinEl.offsetLeft, y: noteWinEl.offsetTop };
+  const move = (ev) => {
+    if (dir !== 's') noteWin.w = Math.max(260, Math.min(window.innerWidth - 16, start.w + (ev.clientX - start.mx)));
+    if (dir !== 'e') noteWin.h = Math.max(200, Math.min(window.innerHeight - 24, start.h + (ev.clientY - start.my)));
+    noteWin.x = start.x;
+    noteWin.y = start.y;
+    noteWinPlace();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    noteWinSave();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+}
+
+/* ---------- 读写（服务端 <论文>.notes.json） ---------- */
+function notesQs() {
+  return '?topic=' + encodeURIComponent(current.topic) + '&name=' + encodeURIComponent(current.name);
+}
+async function loadNotes() {
+  notes.list = [];
+  notes.editing = null;
+  notes.loading = true;
+  if (noteWinEl) noteWinEl.classList.remove('editing');
+  noteClearLayers();
+  renderNoteList();
+  if (!current) { notes.loading = false; return; }
+  const want = current.topic + '/' + current.name;
+  try {
+    const r = await api('/notes' + notesQs());
+    if (!current || current.topic + '/' + current.name !== want) return;   // 期间换了文献：丢弃
+    notes.list = Array.isArray(r.notes) ? r.notes : [];
+  } catch { /* 笔记读不出来不影响读论文 */ }
+  notes.loading = false;
+  renderNoteList();
+  notesReapply();
+}
+/** 写一条（save）或删一条（delete）；服务端返回整份笔记列表，客户端整体替换 */
+async function notesPost(action, note) {
+  const body = { topic: current.topic, name: current.name, action };
+  if (action === 'delete') body.id = note.id;
+  else body.note = note;
+  const r = await api('/notes', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  notes.list = Array.isArray(r.notes) ? r.notes : notes.list;
+}
+
+/* ---------- 锚点：选区 ⇄ 字符偏移 ---------- */
+/** 一页文本层的「拼接串 + 文本节点表」；at(off) 给 (文本节点, 节点内偏移)，offsetOf(node,off) 反向换算。
+ *  必须用文本节点：Range.setStart(元素, n) 里的 n 是子节点序号（查找高亮踩过这个坑）。 */
+function noteTextHay(pageDiv) {
+  const tl = pageDiv && pageDiv.querySelector('.textLayer');
+  if (!tl) return null;
+  const nodes = [];
+  const startOf = [];
+  let hay = '';
+  const walker = document.createTreeWalker(tl, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const t = n.nodeValue || '';
+    if (!t) continue;
+    nodes.push(n);
+    startOf.push(hay.length);
+    hay += t;
+  }
+  if (!hay) return null;
+  const at = (off) => {
+    let lo = 0;
+    let hi = startOf.length - 1;
+    let idx = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (startOf[mid] <= off) { idx = mid; lo = mid + 1; } else { hi = mid - 1; }
+    }
+    const node = nodes[idx];
+    return [node, Math.max(0, Math.min(off - startOf[idx], node.nodeValue.length))];
+  };
+  const offsetOf = (node, off) => {
+    const i = nodes.indexOf(node);
+    return i < 0 ? null : startOf[i] + off;
+  };
+  return { hay, at, offsetOf, length: hay.length };
+}
+/** 把当前选区换算成 `{page,start,end,doc}`；换算不出来（扫描件/跨页/结构异常）返回 null */
+function noteAnchorFromSelection() {
+  const sel = askSelection;
+  if (!sel || !sel.range || !current) return null;
+  const node = sel.range.startContainer;
+  const el = node && (node.nodeType === 3 ? node.parentElement : node);
+  const pageEl = el && el.closest ? el.closest('.page') : null;
+  if (!pageEl) return null;
+  const page = +(pageEl.dataset.page || 0) || 0;
+  if (!page) return null;
+  const hay = noteTextHay(pageEl);
+  if (!hay) return null;
+  const start = hay.offsetOf(sel.range.startContainer, sel.range.startOffset);
+  const end = hay.offsetOf(sel.range.endContainer, sel.range.endOffset);
+  if (start === null || end === null) return null;
+  const a = Math.min(start, end);
+  const b = Math.max(start, end);
+  if (b - a < 1) return null;
+  // 分屏时在中文列划的词，锚点算的是译文文本层的偏移 → 记下是哪一列，重画时只画回同一列
+  const doc = pageEl.closest('#pdf-pages-zh') ? 'zh' : 'orig';
+  return { page, start: a, end: b, doc, quote: sel.text.slice(0, 400) };
+}
+
+/* ---------- 画波浪线（蓝色，选中文字下方） ---------- */
+function noteClearLayers() {
+  document.querySelectorAll('.noteLayer').forEach((l) => l.remove());
+  noteHideTip();
+}
+function notePaintPageDiv(div) {
+  const tl = div && div.querySelector('.textLayer');
+  const page = +(div && div.dataset && div.dataset.page) || 0;
+  if (!tl || !page) return;
+  const doc = div.closest && div.closest('#pdf-pages-zh') ? 'zh' : 'orig';
+  const list = notes.list.filter((n) => n.anchor && n.anchor.page === page
+    && n.anchor.end > n.anchor.start && (n.anchor.doc || 'orig') === doc);
+  if (!list.length) return;
+  const hay = noteTextHay(div);
+  const rect = tl.getBoundingClientRect();
+  if (!hay || !rect.width || !rect.height) return;
+  // 同一页可能被重画多次（逐页渲染 + 收尾重放）：先清掉这一页旧的装饰层，避免叠出两层波浪线
+  const stale = div.querySelector(':scope > .noteLayer');
+  if (stale) stale.remove();
+  const pct = (v, base) => (v / base * 100).toFixed(3) + '%';
+  const layer = document.createElement('div');
+  layer.className = 'noteLayer';
+  // 与 findLayer 同理：必须插在 textLayer **之前**，否则 paintPage 的 firstChild/lastChild 会取错元素
+  div.insertBefore(layer, tl);
+  for (const n of list) {
+    const a = Math.max(0, Math.min(n.anchor.start, hay.length - 1));
+    const b = Math.max(a + 1, Math.min(n.anchor.end, hay.length));
+    const [na, oa] = hay.at(a);
+    const [nb, ob] = hay.at(b);
+    try {
+      const rng = document.createRange();
+      rng.setStart(na, oa);
+      rng.setEnd(nb, ob);
+      for (const r of rng.getClientRects()) {
+        if (r.width < 0.6 || r.height < 0.6) continue;   // 换行点产生的退化矩形
+        const box = document.createElement('span');
+        box.className = 'note-under';
+        box.dataset.note = n.id;
+        box.style.left = pct(r.left - rect.left, rect.width);
+        box.style.top = pct(r.top - rect.top, rect.height);
+        box.style.width = pct(r.width, rect.width);
+        box.style.height = pct(r.height, rect.height);
+        layer.appendChild(box);
+      }
+    } catch { /* 单条锚点算不出几何：跳过这条，列表里仍能看到 */ }
+  }
+  if (!layer.childElementCount) layer.remove();
+}
+/** 缩放/切模式/换文档会重建整个 DOM：重画全部波浪线 */
+function notesReapply() {
+  noteClearLayers();
+  if (!pdfDoc || !notes.list.length) return;
+  document.querySelectorAll('#pdf-pages .page, #pdf-pages-zh .page').forEach((div) => notePaintPageDiv(div));
+}
+
+/* ---------- 悬停提示 + 点击命中 ---------- */
+function noteById(id) {
+  return notes.list.find((n) => n.id === id) || null;
+}
+function noteFindAt(x, y) {
+  for (const box of document.querySelectorAll('.note-under')) {
+    const r = box.getBoundingClientRect();
+    if (x >= r.left - 1 && x <= r.right + 1 && y >= r.top - 1 && y <= r.bottom + 2) return box.dataset.note || null;
+  }
+  return null;
+}
+function noteHideTip() {
+  if (noteTipEl) noteTipEl.style.display = 'none';
+}
+function noteShowTip(n, x, y) {
+  if (!n || !noteTipEl) { noteHideTip(); return; }
+  const body = String(n.body || '').trim();
+  noteTipEl.textContent = '';
+  const t = document.createElement('span');
+  t.textContent = body.length > 400 ? body.slice(0, 400) + '…' : body;
+  noteTipEl.appendChild(t);
+  const hint = document.createElement('span');
+  hint.className = 'tip-hint';
+  hint.textContent = '点击编辑这条笔记';
+  noteTipEl.appendChild(hint);
+  noteTipEl.style.display = 'block';
+  const r = noteTipEl.getBoundingClientRect();
+  noteTipEl.style.left = Math.max(8, Math.min(x + 12, window.innerWidth - r.width - 8)) + 'px';
+  noteTipEl.style.top = Math.max(8, Math.min(y + 16, window.innerHeight - r.height - 8)) + 'px';
+}
+$('main').addEventListener('mousemove', (e) => {
+  if ((noteWinEl && noteWinEl.contains(e.target)) || (askPop && askPop.contains(e.target)) || (selMenuEl && selMenuEl.contains(e.target))) {
+    noteHideTip();
+    return;
+  }
+  if (noteHoverRaf) return;
+  const x = e.clientX;
+  const y = e.clientY;
+  noteHoverRaf = requestAnimationFrame(() => {
+    noteHoverRaf = 0;
+    const id = noteFindAt(x, y);
+    if (id === noteHoverId && id) { noteShowTip(noteById(id), x, y); return; }
+    noteHoverId = id;
+    if (id) noteShowTip(noteById(id), x, y);
+    else noteHideTip();
+  });
+});
+
+/* ---------- 笔记窗口：列表态 / 编辑态 ---------- */
+function noteWinShow(on) {
+  if (!noteWinEl) return;
+  if (!on) {
+    noteWinEl.classList.remove('on');
+    notes.shown = false;
+    noteHideTip();
+    return;
+  }
+  noteWinEl.classList.add('on');
+  notes.shown = true;
+  noteWinPlace();
+  renderNoteList();
+}
+function noteFmtTime(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || Number.isNaN(d.getTime())) return '';
+  const p = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function renderNoteList() {
+  const list = $('note-list');
+  const head = $('note-headcount');
+  if (!list || !head) return;
+  head.textContent = notes.list.length ? `${notes.list.length} 条` : '';
+  list.textContent = '';
+  if (!notes.list.length) {
+    const empty = document.createElement('div');
+    empty.id = 'note-empty';
+    empty.textContent = notes.loading
+      ? '正在读取笔记…'
+      : '还没有笔记。选中正文里的文字 → 点「笔记」，或点标题栏的 ＋ 新建。笔记保存在这篇文献旁边（<论文>.notes.json），换浏览器也不会丢。';
+    list.appendChild(empty);
+    return;
+  }
+  // 按原文顺序列（没锚定的排最后）
+  const sorted = notes.list.slice().sort((a, b) => {
+    const pa = a.anchor && a.anchor.page ? a.anchor.page : 1e9;
+    const pb = b.anchor && b.anchor.page ? b.anchor.page : 1e9;
+    if (pa !== pb) return pa - pb;
+    return ((a.anchor && a.anchor.start) || 0) - ((b.anchor && b.anchor.start) || 0);
+  });
+  const frag = document.createDocumentFragment();
+  for (const n of sorted) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'note-item';
+    btn.dataset.id = n.id;
+    btn.title = n.anchor && n.anchor.page ? `跳到第 ${n.anchor.page} 页` : '这条笔记没有可定位的原文位置';
+    const meta = document.createElement('span');
+    meta.className = 'ni-meta';
+    meta.textContent = n.anchor && n.anchor.page ? `第 ${n.anchor.page} 页` : '未定位';
+    const time = document.createElement('span');
+    time.className = 'ni-time';
+    time.textContent = noteFmtTime(n.updated || n.created);
+    meta.appendChild(time);
+    const bodyEl = document.createElement('span');
+    bodyEl.className = 'ni-body';
+    const body = String(n.body || '').trim();
+    bodyEl.textContent = body.length > 220 ? body.slice(0, 220) + '…' : body;
+    btn.appendChild(meta);
+    btn.appendChild(bodyEl);
+    if (n.quote) {
+      const q = document.createElement('span');
+      q.className = 'ni-quote';
+      q.textContent = '「' + String(n.quote).replace(/\s+/g, ' ') + '」';
+      btn.appendChild(q);
+    }
+    frag.appendChild(btn);
+  }
+  list.appendChild(frag);
+}
+function noteSetEditing(on) {
+  notes.armed = false;
+  const del = $('note-delete');
+  if (del) { del.textContent = '删除'; del.classList.remove('primary'); }
+  noteWinEl.classList.toggle('editing', !!on);
+  if (!on) { notes.editing = null; notes.isNew = true; }
+}
+function noteStartEdit(note) {
+  const isNew = !notes.list.some((n) => n.id === note.id);
+  notes.editing = note;
+  notes.isNew = isNew;
+  $('note-quote').textContent = note.quote ? '「' + String(note.quote).replace(/\s+/g, ' ').slice(0, 300) + '」' : '（没有引用原文，只留正文）';
+  $('note-body').value = note.body || '';
+  $('note-delete').style.display = isNew ? 'none' : '';
+  noteWinEl.classList.add('editing');
+  noteWinShow(true);
+  setTimeout(() => {
+    const t = $('note-body');
+    if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); }
+  }, 30);
+}
+/** 划词「笔记」：带着引文和锚点直接进编辑态（保存前不落盘） */
+function noteCreateFromSelection() {
+  const sel = askSelection;
+  if (!sel || !current) { toast('先在正文里选中一段文字'); return; }
+  const anchor = noteAnchorFromSelection();
+  noteStartEdit({ quote: sel.text, anchor: anchor || undefined, body: '' });
+  if (!anchor) toast('这段选区没能精确锚定：笔记会留在列表里，但不会画波浪线', 5000);
+}
+function noteCreateBlank() {
+  const sel = askSelection;
+  if (sel && sel.text) { noteCreateFromSelection(); return; }
+  noteStartEdit({ quote: '', body: '' });
+}
+async function noteSave() {
+  const body = $('note-body').value.trim();
+  if (!body) { toast('笔记内容不能为空'); return; }
+  if (!current) return;
+  const old = notes.editing || {};
+  const note = {
+    id: old.id,
+    quote: old.quote || '',
+    anchor: old.anchor || undefined,
+    body: body.slice(0, NOTE_BODY_MAX),
+    created: old.created,
+    updated: old.updated,
+  };
+  $('note-save').disabled = true;
+  try {
+    await notesPost('save', note);
+    noteSetEditing(false);
+    renderNoteList();
+    notesReapply();
+    toast('笔记已保存');
+  } catch (e) { toast('保存失败：' + e.message, 6000); }
+  $('note-save').disabled = false;
+}
+function noteArmDelete() {
+  const btn = $('note-delete');
+  if (!notes.editing || notes.isNew) return;
+  if (!notes.armed) {
+    notes.armed = true;
+    btn.classList.add('primary');
+    btn.textContent = '确认删除';
+    btn.title = '再点一次确认删除这条笔记';
+    clearTimeout(noteArmTimer);
+    noteArmTimer = setTimeout(() => {
+      notes.armed = false;
+      btn.textContent = '删除';
+      btn.classList.remove('primary');
+      btn.title = '删除这条笔记';
+    }, 3000);
+    return;
+  }
+  clearTimeout(noteArmTimer);
+  notes.armed = false;
+  btn.textContent = '删除';
+  btn.classList.remove('primary');
+  void noteDoDelete(notes.editing);
+}
+async function noteDoDelete(note) {
+  if (!note || !note.id) return;
+  try {
+    await notesPost('delete', note);
+    noteSetEditing(false);
+    renderNoteList();
+    notesReapply();
+    toast('笔记已删除');
+  } catch (e) { toast('删除失败：' + e.message, 6000); }
+}
+async function noteGoto(note) {
+  if (!note) return;
+  const a = note.anchor;
+  if (!a || !a.page) { toast('这条笔记没有可定位的原文位置'); return; }
+  await findReadyPage(a.page);
+  notesReapply();
+  const box = document.querySelector(`.note-under[data-note="${note.id}"]`);
+  const target = box || origPageNode(a.page);
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (box) {
+    box.classList.add('flash');
+    setTimeout(() => box.classList.remove('flash'), 900);
+  }
+}
+
+/* ---------- 划词三动作菜单：提问 / 全局搜索 / 笔记 ---------- */
+function selMenuHide() {
+  if (selMenuEl) selMenuEl.classList.remove('on');
+}
+function selMenuShow(x, y) {
+  if (!selMenuEl) return;
+  selMenuEl.classList.add('on');
+  const r = selMenuEl.getBoundingClientRect();
+  selMenuEl.style.left = Math.max(8, Math.min(x, window.innerWidth - r.width - 8)) + 'px';
+  selMenuEl.style.top = Math.max(8, Math.min(y, window.innerHeight - r.height - 8)) + 'px';
+}
+/** 「全局搜索」= 把选中文字塞进查找窗口并跳到第一处（与手打关键词同一条链路，不另做一套搜索） */
+function findSearchText(text) {
+  const q = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!q) { toast('没有可搜索的文字'); return; }
+  const use = q.length > 120 ? q.slice(0, 120) : q;
+  findInputEl.value = use;
+  findWinShow(true);
+  void findRun(use).then(() => findGoto(0)).catch(() => { /* 索引失败：列表里会有说明 */ });
+}
+$('sel-ask').onclick = () => {
+  selMenuHide();
+  if (!askSelection) return;
+  showAskPop({ quote: askSelection.text, x: selPoint.x, y: selPoint.y });
+};
+$('sel-find').onclick = () => {
+  selMenuHide();
+  askPop.style.display = 'none';
+  if (askSelection) findSearchText(askSelection.text);
+};
+$('sel-note').onclick = () => {
+  selMenuHide();
+  askPop.style.display = 'none';
+  noteCreateFromSelection();
+};
+
+/* ---------- 接线 ---------- */
+$('note-open').onclick = () => {
+  if (!current) return;
+  if (noteWinEl.classList.contains('on') && !noteWinEl.classList.contains('editing')) { noteWinShow(false); return; }
+  noteSetEditing(false);
+  noteWinShow(true);
+};
+$('note-window-close').onclick = () => { noteSetEditing(false); noteWinShow(false); };
+$('note-new').onclick = () => noteCreateBlank();
+$('note-save').onclick = () => void noteSave();
+$('note-cancel').onclick = () => noteSetEditing(false);
+$('note-delete').onclick = () => noteArmDelete();
+$('note-list').addEventListener('click', (e) => {
+  const btn = e.target.closest ? e.target.closest('.note-item') : null;
+  if (!btn) return;
+  void noteGoto(noteById(btn.dataset.id));
+});
+$('note-body').addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); void noteSave(); }
+  else if (e.key === 'Escape') { e.preventDefault(); noteSetEditing(false); }
+});
+$('note-head').addEventListener('pointerdown', noteWinDrag);
+$('note-grip').addEventListener('pointerdown', (e) => noteWinResize(e, 'se'));
+$('note-grip-r').addEventListener('pointerdown', (e) => noteWinResize(e, 'e'));
+$('note-grip-b').addEventListener('pointerdown', (e) => noteWinResize(e, 's'));
+window.addEventListener('resize', () => { if (noteWinEl.classList.contains('on')) noteWinPlace(); });
+document.addEventListener('mousedown', (e) => { if (selMenuEl && !selMenuEl.contains(e.target)) selMenuHide(); }, true);
+$('pdf-pane').addEventListener('scroll', () => { selMenuHide(); noteHideTip(); }, { passive: true });
+noteWinLoad();
+
+/** 排查用：控制台执行 dprNotesDebug() 看笔记状态（波浪线不显示时先看 boxes） */
+window.dprNotesDebug = () => ({
+  paper: current ? current.topic + '/' + current.name : null,
+  notes: notes.list.length,
+  anchored: notes.list.filter((n) => n.anchor).length,
+  boxes: document.querySelectorAll('.note-under').length,
+  layers: document.querySelectorAll('.noteLayer').length,
+  editing: notes.editing ? notes.editing.id || '(new)' : null,
+  windowOpen: !!(noteWinEl && noteWinEl.classList.contains('on')),
+});
+
 /* ================= 中英切换 ================= */
 /** 翻译进度条（只在 busy 时出现）：宽度跟着后端 progress.overall，文字给阶段+百分比。 */
 function updateZhProgress() {  const box = $('zh-prog');
@@ -1505,13 +2155,18 @@ async function paintPage(page, div, viewport, token) {
   // 少了这一行，被抢占的收尾会把**上一档缩放**的几何写回 EQ_BY_PAGE → 点击热区整体偏移。
   if (token !== renderToken) return;
   paintEqLayer(div, viewport, +div.dataset.page);
+  // 笔记波浪线：滚动模式懒加载、翻页模式单页渲染时也要画，不能只靠 rerender 收尾那一次
+  notePaintPageDiv(div);
 }
 
 /** 当前模式的全量重渲入口：缩放/DPR/换文档/换变体统一走这里。
  *  分屏（模式 B）是第三套布局，转到 renderSplit()；renderPaged/renderAllPages 的既有语义**不变**。 */
 function rerender() {
-  // 渲染完成后再补画查找高亮：缩放/切模式把 DOM 整个重建，旧的高亮层随之消失。
-  const done = () => { try { findReapply(); } catch { /* 高亮是装饰，失败不影响阅读 */ } };
+  // 渲染完成后再补画查找高亮与笔记波浪线：缩放/切模式把 DOM 整个重建，旧的装饰层随之消失。
+  const done = () => {
+    try { findReapply(); } catch { /* 高亮是装饰，失败不影响阅读 */ }
+    try { notesReapply(); } catch { /* 同上 */ }
+  };
   if (viewMode === 'split') return renderSplit().then(done);
   return (pageMode === 'paged' ? renderPaged() : renderAllPages()).then(done);
 }
@@ -2122,6 +2777,8 @@ document.addEventListener('mousedown', (e) => { downPt = { x: e.clientX, y: e.cl
 
 document.addEventListener('mouseup', (e) => {
   if (askPop.contains(e.target)) return;
+  if (noteWinEl && noteWinEl.contains(e.target)) return;
+  if (selMenuEl && selMenuEl.contains(e.target)) return;
   setTimeout(() => {
     const moved = downPt ? Math.abs(e.clientX - downPt.x) + Math.abs(e.clientY - downPt.y) > 4 : false;
     downPt = null;
@@ -2130,10 +2787,17 @@ document.addEventListener('mouseup', (e) => {
     if (!text || !current) {
       // 无选区（或没有当前文献）时才尝试公式点击 —— 有选区时「划词提问」优先，绝不抢。
       if (!text && !moved && current) {
+        // 点在被标注的文字上 → 直接编辑那条笔记（笔记优先于公式热区）
+        const nid = noteFindAt(e.clientX, e.clientY);
+        if (nid) {
+          const n = noteById(nid);
+          if (n) { selMenuHide(); askPop.style.display = 'none'; noteStartEdit(n); return; }
+        }
         const hit = hitTestFormula(e);
         if (hit) { citeFormula(hit.eq, e.clientX, e.clientY + 6); return; }
       }
       askPop.style.display = 'none';
+      selMenuHide();
       return;
     }
     const node = sel.anchorNode && sel.anchorNode.parentElement;
@@ -2155,7 +2819,10 @@ document.addEventListener('mouseup', (e) => {
       const r0 = sel.getRangeAt(0);
       if (r0 && typeof r0.cloneRange === 'function') askSelection.range = r0.cloneRange();
     } catch { /* 选区已失效：保持无 range */ }
-    showAskPop({ quote: text, x: e.clientX, y: range.bottom + 8 });
+    // 划词后先给「提问 / 全局搜索 / 笔记」三动作小菜单；点「提问」才展开原来的提问弹层
+    selPoint = { x: e.clientX, y: Math.min(range.bottom + 8, window.innerHeight - 60) };
+    askPop.style.display = 'none';
+    selMenuShow(selPoint.x, selPoint.y);
   }, 10);
 });
 document.addEventListener('mousedown', (e) => { if (!askPop.contains(e.target)) askPop.style.display = 'none'; });

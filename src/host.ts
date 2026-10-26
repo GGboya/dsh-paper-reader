@@ -81,6 +81,7 @@ import {
   writeMineruConfig,
 } from './mineru-config.ts'
 import { noteOrigin } from './origin.ts'
+import { deleteNote, isNoteError, readNotes, upsertNote } from './notes.js'
 
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse
@@ -841,6 +842,53 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       json(res, 200, await readFormulaIndex(ref))
       return
     }
+    
+    /* ── 笔记（每篇一个 <论文>.notes.json，与 .txt/.study.json 同目录）──────────────
+   读只读、写要过写路径边界；笔记是用户数据，格式错误只回 400 + 可读中文文案。
+   笔记文件不存在 → 返回空列表（而不是 404）：新论文天然没有笔记，阅读器不必特判。 */
+    if (sub === '/api/notes' && req.method === 'POST') {
+      const rawBody = (await readBody(req));
+      if (!(typeof rawBody === 'object' && rawBody !== null)) {
+        return json(res,400,{error:"非法请求体",code:"bad-request"})
+      }
+      const body = rawBody as {
+        topic?: string;
+        name?: string;
+        action?: string;
+        id?: string;
+        note?: unknown;
+      };
+      try {
+          if (typeof body.topic !== 'string' || !body.topic || typeof body.name !== 'string' || !body.name)
+            return json(res, 400, { error: '缺少 topic / name', code: 'bad-request' });
+
+          // 只提取需要字段，构造符合类型的对象，path不传
+          const locateArg: {topic:string; name:string} = {
+            topic: body.topic,
+            name: body.name
+          };
+
+          // rejectWritePath只检测path，传一个只有path的空对象即可（path=undefined）
+          if (rejectWritePath({path: undefined}, res))
+            return;
+
+          const ref = locateForWrite(locateArg);
+          const file = body.action === 'delete'
+            ? await deleteNote(ref.pdfPath, body.id)
+            : await upsertNote(ref.pdfPath, body.note);
+        json(res, 200, file);
+      }
+      catch (err) {
+          if (isNoteError(err)) {
+              json(res, 400, { error: err.message, code: err.code });
+              return;
+          }
+          if (!manageFail(res, err))
+              throw err;
+      }
+      return;
+    }
+
 
     /* ── 划词翻译（公式保留，契约 docs/selection-translate-requirements.md §3.9）─────
        客户端只送「按页 + 按 display 归属切好的 chunk」；行内公式的还原（选区文本 ↔ MinerU
