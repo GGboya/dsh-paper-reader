@@ -373,7 +373,10 @@ export function registerTools(ctx: Context, config: PluginConfig) {
             }
           : {}),
       })
-      if (embedding.hits.length > 0) hits = fuseHybridCandidates(hits, embedding.hits, recallSize)
+      // 融合候选保持 RRF 相关性序直到最终选定 k 条，选定之后再恢复原文序展示（issue #13：
+      // 融合层若先按原文排序，下面 slice(0, k) 会按文档位置截取，把最相关的片段挤出去）。
+      const fused = embedding.hits.length > 0
+      if (fused) hits = fuseHybridCandidates(hits, embedding.hits, recallSize)
       if (!wideRecall) hits = hits.slice(0, k)
       if (embedding.degraded) {
         console.warn('[dsh-paper-reader] 嵌入检索降级为纯关键词:', embedding.degraded)
@@ -390,6 +393,9 @@ export function registerTools(ctx: Context, config: PluginConfig) {
         }
       }
       if (!reranked) hits = hits.slice(0, k)
+      // 展示序：融合路径在**选定 top-k 之后**恢复原文顺序（重排成功路径在 rerankHits 内部已做）；
+      // 纯关键词路径维持相关性序不变（既有行为，未配置嵌入/重排时逐字节一致）。
+      if (fused && !reranked) hits = hits.slice().sort((a, b) => a.chunk.index - b.chunk.index)
       return {
         paper: `${ref.topic}/${ref.name}`,
         query: args.query,

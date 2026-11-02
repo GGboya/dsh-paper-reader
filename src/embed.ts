@@ -24,13 +24,23 @@ export interface EmbedConfig {
   model?: string
   /** 单次请求超时毫秒，默认 30000 */
   timeoutMs?: number
-  /** 每批提交的分块数，默认 32 */
+  /** 每批提交的分块数，默认 10（见 EMBED_DEFAULTS 注释） */
   batchSize?: number
   /** 语义召回候选数（进融合的语义候选上限），默认 20 */
   candidateSize?: number
 }
 
-export const EMBED_DEFAULTS = { batchSize: 32, timeoutMs: 30_000, candidateSize: 20 } as const
+export const EMBED_DEFAULTS = {
+  /**
+   * 保守默认：主流 OpenAI 兼容端点的单批上限参差——阿里云百炼 text-embedding-v3/v4 是 10 条、
+   * qwen3.7-text-embedding 是 20 条（issue #14），OpenAI 官方则宽松得多。取已知最严格的 10：
+   * 对宽松端点只是多几个小请求，对严格端点则是「开箱即用 vs 首次检索必失败」的差别。
+   * 端点允许更大批量时可在设置面板 / profile 调高。
+   */
+  batchSize: 10,
+  timeoutMs: 30_000,
+  candidateSize: 20,
+} as const
 
 /** 嵌入链路错误的统一类型：调用方据此**整体降级**为纯关键词，不把它抛给用户。 */
 export class EmbedError extends Error {
@@ -343,6 +353,9 @@ export function embeddingRecall(
  * RRF 融合（Reciprocal Rank Fusion，k=60）：关键词候选 ∪ 语义候选 → 按**名次**加权求和 → 去重。
  * 为什么用名次而不是原始分数：关键词分（词频×词长）与余弦相似度量纲完全不同，直接相加没有意义。
  *
+ * **返回序 = RRF 相关性序**（issue #13）：调用方必须先按本序截取 top-k，再按 chunk.index 排展示序。
+ * 这里绝不预先按原文排序——否则上层 `slice(0, k)` 会按文档位置而非相关性截取，丢掉更相关的片段。
+ *
  * **实际语义（F-E1 如实记录，算法有意如此，不是 bug）**：
  *   - 只吃名次、**完全不看分数大小**：关键词第 i 名与语义第 j 名的贡献分别是 1/(60+i) 与 1/(60+j)，
  *     所以语义第 j 名会压过关键词第 i 名（当 j < i）——两列候选会**交替占用**最终 top-k 名额；
@@ -380,8 +393,18 @@ export function fuseHybridCandidates(keyword: SearchHit[], semantic: SearchHit[]
     })
     .slice(0, Math.max(1, limit))
     .map((idx) => byChunk.get(idx)!)
-  picked.sort((a, b) => a.chunk.index - b.chunk.index) // 与 searchChunks 一致：按原文顺序返回
-  return picked
+  return picked // 保持 RRF 相关性序；展示用的原文序由调用方在**选定 top-k 之后**再排（issue #13）
+}
+
+/**
+ * 端点按模型限制单批条数时的典型拒绝文案特征（如百炼：`batch size is invalid, it should
+ * not be larger than 20`）。命中就附一句可操作建议——降级原因必须能指导用户自救，
+ * 不能只甩端点原文（issue #14）。只做提示，不做自动拆批重试：错误文案各家不一，
+ * 盲目匹配重试反而可能对着任意 400 反复打请求。
+ */
+export function batchLimitHint(message: string): string | null {
+  const re = /batch\s*size|too\s+many\s+(inputs?|texts?|items?)|input.{0,40}(larger|exceed|limit|maximum)|(larger|exceed|maximum).{0,40}batch/i
+  return re.test(message) ? '端点可能限制了单批嵌入条数：在「嵌入模型检索」设置里调低批大小（或 profile config.embed 的 batchSize）后重试' : null
 }
 
 // ── 检索侧入口：惰性 + 缓存 + 降级（tools.ts 只调这一个函数）─────────────
@@ -436,6 +459,7 @@ export async function embeddingRecallFor(o: EmbedRecallOptions): Promise<EmbedRe
     return { hits, configured: true, used: hits.length > 0, fromCache, degraded: null }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return { hits: [], configured: true, used: false, fromCache: false, degraded: msg }
+    const hint = batchLimitHint(msg)
+    return { hits: [], configured: true, used: false, fromCache: false, degraded: hint ? `${msg}；${hint}` : msg }
   }
 }

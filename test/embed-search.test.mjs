@@ -186,6 +186,54 @@ test('A3 预检：三项缺失 / 端点不可达 / 正常端点（返回维度�
   }
 })
 
+test('A3b 预检按生效批大小真打一批（issue #14）：连接 ≠ 批可用，端点限流当场暴露', async () => {
+  const srv = await startEmbedServer()
+  // 限定单批 ≤ 20 条的端点（百炼 qwen3.7-text-embedding 的真实上限，超限回 400）
+  const limitedReq = []
+  const limited = createServer((req, res) => {
+    const acc = []
+    req.on('data', (c) => acc.push(c))
+    req.on('end', () => {
+      const parsed = JSON.parse(Buffer.concat(acc).toString('utf8'))
+      const inputs = Array.isArray(parsed.input) ? parsed.input : [parsed.input]
+      limitedReq.push(inputs.length)
+      if (inputs.length > 20) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 'InvalidParameter', message: `batch size is invalid, it should not be larger than 20, cur text batch:${inputs.length}` } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ object: 'list', data: inputs.map((_, i) => ({ object: 'embedding', index: i, embedding: [1, 0, 0] })) }))
+    })
+  })
+  await new Promise((r) => limited.listen(0, '127.0.0.1', r))
+  const limitedUrl = `http://127.0.0.1:${limited.address().port}/v1`
+  try {
+    // ① 预检发送的输入条数 = 生效批大小（默认 10），不再只发一条
+    const ok = await testEmbedEndpoint(REQ(srv.url))
+    assert.equal(ok.ok, true)
+    assert.match(ok.detail, /维度 3/)
+    assert.match(ok.detail, /单批 10 条已验证/)
+    assert.equal(srv.inputs.length, 10, '预检按默认批大小打一批（每条都是独立短文本）')
+    // ② 显式 batchSize 也被遵守
+    srv.inputs.length = 0
+    const ok3 = await testEmbedEndpoint({ ...REQ(srv.url), batchSize: 3 })
+    assert.match(ok3.detail, /单批 3 条已验证/)
+    assert.equal(srv.inputs.length, 3)
+    // ③ 批上限 20 的端点：batchSize 32 的预检必须失败（旧行为只发 1 条 → 预检通过 → 首次检索才炸）
+    const over = await testEmbedEndpoint({ ...REQ(limitedUrl), batchSize: 32 })
+    assert.equal(over.ok, false, '超限批预检必须失败，把问题拦在保存时')
+    assert.match(over.detail, /batch size is invalid/, '错误文案透传端点原文')
+    // ④ 降到 20 以内 → 预检通过
+    const fit = await testEmbedEndpoint({ ...REQ(limitedUrl), batchSize: 20 })
+    assert.equal(fit.ok, true)
+    assert.deepEqual(limitedReq, [32, 20], '限定端点确实收到了 32/20 两批')
+  } finally {
+    await srv.close()
+    await new Promise((r) => limited.close(r))
+  }
+})
+
 test('A4 路由：GET 只回掩码、POST 预检失败不落盘成功才落盘、DELETE 回落', async () => {
   const home = tempDir('dpr-embed-routes-home-')
   const data = tempDir('dpr-embed-routes-data-')
@@ -230,6 +278,22 @@ test('A4 路由：GET 只回掩码、POST 预检失败不落盘成功才落盘�
       assert.equal(get1.hasApiKey, true)
       assert.equal(get1.apiKeyHint, 'sk-…cdef')
       assert.equal(JSON.stringify(get1).includes('sk-real-key-abcdef'), false, '明文 key 不回传')
+      // 批大小（issue #14）：可经面板保存、GET 回显；非法值 400 不落盘；预检按生效批大小打一批
+      const savedBatch = await fetch(`${base}/api/embed/config`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ baseUrl: srv.url, apiKey: 'sk-real-key-abcdef', model: 'mock-embed-3', batchSize: 20 }),
+      })
+      assert.equal(savedBatch.status, 200)
+      const get2 = await (await fetch(`${base}/api/embed/config`)).json()
+      assert.equal(get2.batchSize, 20, '保存的批大小要回显')
+      assert.equal(srv.inputs.filter((t) => t.startsWith('connectivity check')).length >= 20, true, '预检按批大小真打一批')
+      const badBatch = await fetch(`${base}/api/embed/config`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ baseUrl: srv.url, apiKey: 'sk-real-key-abcdef', model: 'mock-embed-3', batchSize: 0 }),
+      })
+      assert.equal(badBatch.status, 400, '批大小 0 越界')
+      const get3 = await (await fetch(`${base}/api/embed/config`)).json()
+      assert.equal(get3.batchSize, 20, '非法值不落盘，原值保持')
       // DELETE → 回落（文件没了）
       const del = await fetch(`${base}/api/embed/config`, { method: 'DELETE' })
       assert.equal(del.status, 200)
@@ -268,6 +332,18 @@ test('B1 客户端：按 batchSize 分批提交，顺序与条数保持', async 
     assert.deepEqual(srv.inputs, chunks.map((c) => c.text), '提交的就是分块文本本身（顺序一致）')
     assert.equal(srv.bodies[0].auth, 'Bearer sk-test-key-123456')
     assert.match(srv.bodies[0].url, /\/v1\/embeddings$/)
+  } finally {
+    await srv.close()
+  }
+})
+
+test('B1b 默认批大小 = 10（issue #14）：不传 batchSize 时按 10 分批，兼容百炼类端点最严上限', async () => {
+  const srv = await startEmbedServer()
+  try {
+    const chunks = mkChunks(Array.from({ length: 23 }, (_, i) => `chunk ${i + 1}`))
+    await ensureChunkVectors({ cachePath: join(tempDir(), 'x.embeddings.json'), chunks, req: REQ(srv.url) })
+    const sizes = srv.bodies.map((b) => JSON.parse(b.body).input.length)
+    assert.deepEqual(sizes, [10, 10, 3], '默认按 10 一批（23 块 → 10/10/3），不再是 32')
   } finally {
     await srv.close()
   }
@@ -516,13 +592,28 @@ test('D4 F-E1：5 条关键词命中 + 5 条不相交语义候选、k=5 的实�
   const keyword = [mk(1, 90), mk(2, 80), mk(3, 70), mk(4, 60), mk(5, 50)]
   const semantic = [mk(11, 0.9), mk(12, 0.8), mk(13, 0.7), mk(14, 0.6), mk(15, 0.5)]
   const fused = fuseHybridCandidates(keyword, semantic, 5)
-  assert.deepEqual(fused.map((h) => h.chunk.index), [1, 2, 3, 11, 12], '实际（文档序）：关键词前三 + 语义前二')
+  // 返回序 = RRF 相关性序（issue #13 后不再预先按文档序排）：同分处关键词列优先 → 交替占用
+  assert.deepEqual(fused.map((h) => h.chunk.index), [1, 11, 2, 12, 3], '实际（RRF 序）：关键词/语义交替占位')
   assert.equal(fused.length, 5)
   // 名次融合的两条可观测性质（与上面的结果互为印证）
   const overlap = fuseHybridCandidates([mk(1, 5)], [mk(1, 0.1)], 1)
   assert.deepEqual(overlap.map((h) => h.chunk.index), [1], '两列都命中的片段获得两份贡献 → 排最前')
   const tie = fuseHybridCandidates([mk(7, 1)], [mk(9, 0.99)], 2)
   assert.deepEqual(tie.map((h) => h.chunk.index), [7, 9], '精确同分时关键词那列优先（此处名字次相同）')
+})
+
+test('D5 先按相关性选定、后按原文序展示：融合层不得在截取 top-k 前按文档序排序（issue #13 最小复现）', () => {
+  const mk = (index, score) => ({ chunk: { index, start: index, end: index + 1, text: `c${index}` }, score, page: 1 })
+  const chunks = Array.from({ length: 20 }, (_, i) => mk(i + 1, 0))
+  // 关键词零命中；语义相关性 #20 > #19 > … > #1（余弦分随序号递增）
+  const semantic = chunks.map((c, i) => ({ ...c, score: (i + 1) / 20 })).sort((a, b) => b.score - a.score)
+  const fused = fuseHybridCandidates([], semantic, 15)
+  assert.equal(fused.length, 15, '融合正确选出较大的候选集')
+  // 调用方 slice(0, 3) 拿到的必须是最相关的三段（按 RRF 序），而不是文档位置最靠前的三段
+  assert.deepEqual(fused.slice(0, 3).map((h) => h.chunk.index), [20, 19, 18], '截取按相关性，不按文档位置')
+  // 选定之后调用方自行按 chunk.index 排展示序（tools.ts 的职责）
+  const display = fused.slice(0, 3).sort((a, b) => a.chunk.index - b.chunk.index)
+  assert.deepEqual(display.map((h) => h.chunk.index), [18, 19, 20], '展示序按原文顺序')
 })
 
 test('D3 未配置嵌入：configured=false、零请求、结果与纯关键词逐字节一致', async () => {
@@ -550,6 +641,27 @@ test('D3 未配置嵌入：configured=false、零请求、结果与纯关键词�
 })
 
 // ── E. 降级：如实标注、不抛错 ───────────────────────────────────────────
+
+test('E0 批上限降级提示（issue #14）：疑似批超限的失败原因附「调低批大小」的可操作建议', async () => {
+  // 单元：典型批上限文案命中，普通错误不误伤
+  assert.match(embed.batchLimitHint('嵌入端点返回 HTTP 400：{"error":"batch size is invalid, it should not be larger than 20, cur text batch:32"}') ?? '', /调低批大小/)
+  assert.match(embed.batchLimitHint('Input list has too many items, max 10 per request') ?? '', /调低批大小/)
+  assert.equal(embed.batchLimitHint('嵌入端点返回 HTTP 401：invalid api key'), null, '普通错误不附批大小提示')
+  // 集成：端点 400（批上限文案）→ degraded 带端点原文 + 提示
+  const srv = await startEmbedServer()
+  srv.fail = { status: 400, message: 'batch size is invalid, it should not be larger than 20, cur text batch:32' }
+  try {
+    const r = await embeddingRecallFor({
+      configured: true, req: REQ(srv.url), cachePath: join(tempDir(), 'x.embeddings.json'),
+      chunks: mkChunks(['alpha']), pages: null, query: 'q',
+    })
+    assert.equal(r.used, false)
+    assert.match(r.degraded, /batch size is invalid/, '端点原文保留')
+    assert.match(r.degraded, /调低批大小/, '附可操作提示')
+  } finally {
+    await srv.close()
+  }
+})
 
 test('E1 端点不可达 / HTTP 错误 / 非数值 → degraded 有原因、hits 为空、不抛错', async () => {
   const dir = tempDir()
@@ -842,5 +954,66 @@ test('J4 工具层：来源门控 —— pdfjs 论文的 Q_{t} 查询不做归�
   } finally {
     rmSync(dirM, { recursive: true, force: true })
     rmSync(dirP, { recursive: true, force: true })
+  }
+})
+
+// ── J5/J6（issue #13 回归）：候选按相关性选定 top-k，选定后才按原文序展示 ──────
+// 语料 6 段（每段 < 1500、两段 > 1500 → 各自成块），s0.NN 标记控制 mock 向量方向：
+// 语义相关性 #4(0.90) > #6(0.80) > #2(0.50) > #1(0.30) > #5(0.20) > #3(0.10)。
+// 关键词零命中（查询词不在语料里）→ k=3 必须选中 {2,4,6}（修复前按文档序截取会返回 [1,2,3]）。
+const ISSUE13_CORPUS = [
+  ['P1 s0.30', 0.3], ['P2 s0.50', 0.5], ['P3 s0.10', 0.1],
+  ['P4 s0.90', 0.9], ['P5 s0.20', 0.2], ['P6 s0.80', 0.8],
+].map(([tag, _]) => `${tag} marker. ${'filler '.repeat(180)}`).join('\n\n')
+
+function issue13Server() {
+  return startEmbedServer({
+    // 带 s0.NN 标记的文本 → 方向 [s, 1-s, 0]（与查询 [1,0,0] 的余弦随 s 单调增）；查询本身无标记 → [1,0,0]
+    vectorFor: (t, dim) => {
+      const m = /s0\.(\d+)/.exec(t)
+      if (!m || dim < 3) return [1, ...Array.from({ length: dim - 1 }, () => 0)]
+      const s = Number(m[1]) / 100
+      return [s, 1 - s, 0]
+    },
+  })
+}
+
+test('J5 工具层：融合候选按相关性截取 top-k、选定后按原文序展示（issue #13）', async () => {
+  const dir = tempDir()
+  const srv = await issue13Server()
+  try {
+    const pdf = seedPaper(dir, ISSUE13_CORPUS, 'mineru-local')
+    const tool = makeSearchTool(dir, { embed: { baseUrl: srv.url, apiKey: 'sk-j5-key-123456', model: 'mock-embed-3' } })
+    assert.equal(searchChunks(chunkText(ISSUE13_CORPUS, 1500), null, 'semantic probe', 3).length, 0, '前提：关键词零命中')
+    const out = await tool.execute({ path: pdf, query: 'semantic probe', k: 3 }, {})
+    assert.equal(out.embedding.used, true)
+    assert.equal(out.embedding.degraded, null)
+    // 选中的必须是最相关的 {2,4,6}，展示按原文顺序（修复前：文档序前 3 → [1,2,3]）
+    assert.deepEqual(out.hits.map((h) => h.chunk), [2, 4, 6], 'top-k 按语义相关性选定')
+  } finally {
+    await srv.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('J6 工具层：重排失败退回融合序 top-k（不再按文档序截断），展示仍按原文序（issue #13）', async () => {
+  const dir = tempDir()
+  const srv = await issue13Server()
+  const prevTsKey = process.env.TYPESAFE_API_KEY // 防本机真实 key 介入重排
+  delete process.env.TYPESAFE_API_KEY
+  try {
+    const pdf = seedPaper(dir, ISSUE13_CORPUS, 'mineru-local')
+    // 配了重排（不可达端点 + 100ms 预算）→ rerankHits 抛错走 fallback
+    const tool = makeSearchTool(dir, {
+      embed: { baseUrl: srv.url, apiKey: 'sk-j6-key-123456', model: 'mock-embed-3' },
+      typesafe: { apiKey: 'ts-j6-mock-key', baseUrl: 'http://127.0.0.1:1', deadlineMs: 100 },
+    })
+    const out = await tool.execute({ path: pdf, query: 'semantic probe', k: 3 }, {})
+    assert.equal(out.reranked, false, '重排失败必须如实标注')
+    assert.deepEqual(out.hits.map((h) => h.chunk), [2, 4, 6], 'fallback 按融合相关性序截取，不按文档序')
+  } finally {
+    if (prevTsKey !== undefined) process.env.TYPESAFE_API_KEY = prevTsKey
+    await srv.close()
+    rmSync(dir, { recursive: true, force: true })
   }
 })

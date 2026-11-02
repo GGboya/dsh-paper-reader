@@ -10,7 +10,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { dshHome } from './library.ts'
 import { maskApiKey } from './translate-config.ts'
-import { EmbedError, requestEmbeddings, type EmbedConfig } from './embed.ts'
+import { EmbedError, EMBED_DEFAULTS, requestEmbeddings, type EmbedConfig } from './embed.ts'
 
 export { maskApiKey }
 
@@ -94,13 +94,16 @@ export async function resolveEmbedConfig(
 }
 
 /**
- * 连接预检：拿一个极小的输入打一发 /embeddings，确认 url/key/model 三者匹配且返回维度正常。
+ * 连接预检：按生效批大小打一发 /embeddings，确认 url/key/model 三者匹配且返回维度正常。
  * 必要性同翻译/重排：嵌入失败是**静默降级**，key 或模型名填错用户很难察觉，落盘前先拦。
+ * 批大小也一并验证（issue #14）：部分端点按模型限制单批条数（如百炼 10/20 条），只发一条
+ * 输入的预检通过了不代表默认批大小可用——首次检索才 400 就太晚。多出的几条短输入成本可忽略。
  */
 export async function testEmbedEndpoint(cfg: EmbedConfig): Promise<{ ok: boolean; detail?: string }> {
   if (!cfg.baseUrl?.trim()) return { ok: false, detail: '端点 URL 不能为空' }
   if (!cfg.apiKey?.trim()) return { ok: false, detail: 'API Key 不能为空' }
   if (!cfg.model?.trim()) return { ok: false, detail: '嵌入模型名不能为空' }
+  const batchSize = Math.max(1, Math.min(cfg.batchSize ?? EMBED_DEFAULTS.batchSize, 2048))
   try {
     const [vec] = await requestEmbeddings(
       {
@@ -109,10 +112,10 @@ export async function testEmbedEndpoint(cfg: EmbedConfig): Promise<{ ok: boolean
         model: cfg.model.trim(),
         timeoutMs: cfg.timeoutMs ?? 30_000,
       },
-      ['connectivity check'],
+      Array.from({ length: batchSize }, (_, i) => `connectivity check ${i + 1}`),
     )
     if (!vec || vec.length === 0) return { ok: false, detail: '端点返回了空向量' }
-    return { ok: true, detail: `维度 ${vec.length}` }
+    return { ok: true, detail: `维度 ${vec.length}（单批 ${batchSize} 条已验证）` }
   } catch (err) {
     if (err instanceof EmbedError) return { ok: false, detail: err.message }
     return { ok: false, detail: err instanceof Error ? err.message : String(err) }

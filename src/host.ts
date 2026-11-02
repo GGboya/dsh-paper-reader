@@ -1150,16 +1150,18 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         model: cfg.model ?? '',
         hasApiKey: Boolean(cfg.apiKey),
         apiKeyHint: cfg.apiKey ? maskEmbedApiKey(cfg.apiKey) : '',
+        // 未显式配置时回 null（前端显示默认值占位）；生效值可能是 profile 来的，一并回显
+        batchSize: cfg.batchSize ?? null,
         enabled,
         source,
       })
       return
     }
 
-    // POST：baseUrl/model/key 三项齐全是启用条件；key 留空 = 沿用已存的那把。
-    // 校验 → 预检（真打一发 /embeddings）→ 通了才落盘：嵌入失败是静默降级，填错很难察觉。
+    // POST：baseUrl/model/key 三项齐全是启用条件；key 留空 = 沿用已存的那把；batchSize 可选。
+    // 校验 → 预检（按生效批大小真打一发 /embeddings）→ 通了才落盘：嵌入失败是静默降级，填错很难察觉。
     if (sub === '/api/embed/config' && req.method === 'POST') {
-      const body = (await readBody(req)) as { baseUrl?: string; apiKey?: string; model?: string }
+      const body = (await readBody(req)) as { baseUrl?: string; apiKey?: string; model?: string; batchSize?: number | string }
       const baseUrl = body.baseUrl?.trim() ?? ''
       const model = body.model?.trim() ?? ''
       const prev = await readEmbedConfig()
@@ -1176,12 +1178,31 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: 'API Key 不能为空' })
         return
       }
-      const test = await testEmbedEndpoint({ baseUrl, apiKey, model })
+      // 批大小：留空 = 不落这项（回落 profile / 默认 10）；填了必须是 1–2048 的整数
+      let batchSize: number | undefined
+      const rawBatch = body.batchSize
+      if (rawBatch !== undefined && rawBatch !== null && String(rawBatch).trim() !== '') {
+        const n = Number(rawBatch)
+        if (!Number.isInteger(n) || n < 1 || n > 2048) {
+          json(res, 400, { error: '批大小需为 1–2048 的整数（端点限制更小时调低，如百炼部分模型为 10/20）' })
+          return
+        }
+        batchSize = n
+      }
+      const test = await testEmbedEndpoint({ baseUrl, apiKey, model, ...(batchSize !== undefined ? { batchSize } : {}) })
       if (!test.ok) {
         json(res, 400, { error: `连接测试失败：${test.detail ?? '未知原因'}` })
         return
       }
-      await writeEmbedConfig({ baseUrl, apiKey, model })
+      // 面板没纳管的字段（timeoutMs/candidateSize）沿用已落盘的值，不被保存动作意外抹掉
+      await writeEmbedConfig({
+        baseUrl,
+        apiKey,
+        model,
+        ...(batchSize !== undefined ? { batchSize } : {}),
+        ...(prev?.timeoutMs !== undefined ? { timeoutMs: prev.timeoutMs } : {}),
+        ...(prev?.candidateSize !== undefined ? { candidateSize: prev.candidateSize } : {}),
+      })
       json(res, 200, { ok: true })
       return
     }
