@@ -8,7 +8,7 @@
 // 阅读器重渲染/缩放后按同一偏移重建 Range，所以这里只当不透明数据校验范围，不解释其语义。
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 export interface NoteAnchor {
@@ -128,11 +128,13 @@ export async function readNotes(pdfPath: string): Promise<NotesFile> {
     };
 }
 
-/** 写：先写同目录临时文件再 rename（半截文件永远不会被读到）。 */
+/** 写：先写同目录临时文件再 rename（半截文件永远不会被读到）。
+ *  临时名必须是 `${path}.tmp-<pid>-<hex>`：library-manage.ts 的 TMP_RE 只认这种形态，
+ *  中断残留才会被 listArtifacts / 删除 / 改名当作这篇文献的临时产物一并处理。 */
 export async function writeNotes(pdfPath: string, file: NotesFile): Promise<void> {
     const path = notesPathFor(pdfPath);
     await mkdir(dirname(path), { recursive: true });
-    const tmp = join(dirname(path), `.notes-tmp-${process.pid}-${randomUUID().slice(0, 8)}`);
+    const tmp = `${path}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
     await writeFile(tmp, JSON.stringify(file, null, 2) + '\n', 'utf8');
     await rename(tmp, path);
 }
@@ -154,7 +156,11 @@ export function validateNoteInput(raw: unknown): PaperNote {
     return out;
 }
 
-/** 新建或更新一条（按 id 判重）；返回整份文件，客户端整体替换即可。 */
+/** 新建或更新一条（按 id 判重）；返回整份文件，客户端整体替换即可。
+ *
+ *  已知限制（单用户插件，接受）：这里是整文件 read-modify-write，没有跨进程锁。同一篇文献在两个
+ *  标签页同时保存时可能丢写（后写的覆盖先写的）；若保存与删除/改名并发，还可能按旧路径重建
+ *  `.notes.json`。要彻底解决需引入文件锁或按条追加的存储，暂不在本轮范围。 */
 export async function upsertNote(pdfPath: string, input: unknown): Promise<NotesFile> {
     const incoming = validateNoteInput(input);
     const file = await readNotes(pdfPath);
@@ -181,7 +187,8 @@ export async function upsertNote(pdfPath: string, input: unknown): Promise<Notes
     return file;
 }
 
-/** 删除一条；找不到就当作已删除（幂等，避免双开两边点删除时报错）。 */
+/** 删除一条；找不到就当作已删除（幂等，避免双开两边点删除时报错）。
+ *  与 upsertNote 相同：整文件 read-modify-write、无锁，并发保存/删除可能丢写（见该函数注释）。 */
 export async function deleteNote(pdfPath: string, id: unknown): Promise<NotesFile> {
     const key = typeof id === 'string' ? id.trim() : '';
     if (!key) throw new NoteError('缺少要删除的笔记 id');

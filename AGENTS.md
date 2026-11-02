@@ -78,7 +78,7 @@ lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管)
 ## 数据与目录约定
 
 - 文献库默认 `~/.dsh-paper-reader/data`，可在 profile 的 `cordis.patch.yml` 改（可直指 pdfqa 的 `data/` 复用缓存）。
-- 文献产物命名：`<文献>.pdf/.txt/.pages.json/.transcript.json/.mineru.md/.mineru.json/.embeddings.json/.study.json`，译文变体 `<文献>-en.pdf/-zh.pdf/-dual.pdf`（中断残留 `.tmp-*`）。
+- 文献产物命名：`<文献>.pdf/.txt/.pages.json/.transcript.json/.mineru.md/.mineru.json/.embeddings.json/.study.json/.notes.json`，译文变体 `<文献>-en.pdf/-zh.pdf/-dual.pdf`（中断残留 `.tmp-*`）。
 - 删除 = 移入 `data/.trash/<时间戳>/`（带 manifest，可手工恢复）；路径穿越（`..`/绝对路径/符号链接逃逸）一律拒绝；中途失败自动回滚。
 
 ## 功能细节文档

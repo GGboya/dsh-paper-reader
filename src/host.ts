@@ -846,47 +846,49 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     /* ── 笔记（每篇一个 <论文>.notes.json，与 .txt/.study.json 同目录）──────────────
    读只读、写要过写路径边界；笔记是用户数据，格式错误只回 400 + 可读中文文案。
    笔记文件不存在 → 返回空列表（而不是 404）：新论文天然没有笔记，阅读器不必特判。 */
+    if (sub === '/api/notes' && req.method === 'GET') {
+      // 笔记只认 topic + name（与写路由同一口径）：不接受 path 直指任意文件，
+      // 否则用户数据可以被一个 URL 参数带到库外。其余读路由的 404 语义保持不变。
+      const u = new URL(url)
+      u.searchParams.delete('path')
+      const ref = locate(u)
+      json(res, 200, await readNotes(ref.pdfPath))
+      return
+    }
     if (sub === '/api/notes' && req.method === 'POST') {
-      const rawBody = (await readBody(req));
+      const rawBody = await readBody(req)
       if (!(typeof rawBody === 'object' && rawBody !== null)) {
-        return json(res,400,{error:"非法请求体",code:"bad-request"})
+        json(res, 400, { error: '非法请求体', code: 'bad-request' })
+        return
       }
       const body = rawBody as {
-        topic?: string;
-        name?: string;
-        action?: string;
-        id?: string;
-        note?: unknown;
-      };
+        topic?: string
+        name?: string
+        action?: string
+        id?: string
+        note?: unknown
+        path?: unknown
+      }
       try {
-          if (typeof body.topic !== 'string' || !body.topic || typeof body.name !== 'string' || !body.name)
-            return json(res, 400, { error: '缺少 topic / name', code: 'bad-request' });
-
-          // 只提取需要字段，构造符合类型的对象，path不传
-          const locateArg: {topic:string; name:string} = {
-            topic: body.topic,
-            name: body.name
-          };
-
-          // rejectWritePath只检测path，传一个只有path的空对象即可（path=undefined）
-          if (rejectWritePath({path: undefined}, res))
-            return;
-
-          const ref = locateForWrite(locateArg);
-          const file = body.action === 'delete'
-            ? await deleteNote(ref.pdfPath, body.id)
-            : await upsertNote(ref.pdfPath, body.note);
-        json(res, 200, file);
+        if (typeof body.topic !== 'string' || !body.topic || typeof body.name !== 'string' || !body.name) {
+          json(res, 400, { error: '缺少 topic / name', code: 'bad-request' })
+          return
+        }
+        // 写路径只认 topic + name：显式拒绝 path（与删除/重命名路由同一形态）
+        if (rejectWritePath(body, res)) return
+        const ref = locateForWrite({ topic: body.topic, name: body.name })
+        const file = body.action === 'delete'
+          ? await deleteNote(ref.pdfPath, body.id)
+          : await upsertNote(ref.pdfPath, body.note)
+        json(res, 200, file)
+      } catch (err) {
+        if (isNoteError(err)) {
+          json(res, 400, { error: err.message, code: err.code })
+          return
+        }
+        if (!manageFail(res, err)) throw err
       }
-      catch (err) {
-          if (isNoteError(err)) {
-              json(res, 400, { error: err.message, code: err.code });
-              return;
-          }
-          if (!manageFail(res, err))
-              throw err;
-      }
-      return;
+      return
     }
 
 

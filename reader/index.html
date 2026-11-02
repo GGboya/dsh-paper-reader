@@ -203,14 +203,8 @@
     border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.18);
     padding: 8px 10px; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; pointer-events: none; }
   #note-tip .tip-hint { display: block; margin-top: 4px; color: var(--text-2); font-size: 11px; }
-  /* 划词三动作小菜单（提问 / 全局搜索 / 笔记） */
-  #sel-menu { position: fixed; z-index: 52; display: none; gap: 2px; padding: 4px; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 9px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
-  #sel-menu.on { display: flex; }
-  #sel-menu button { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 10px; border: none;
-    border-radius: 6px; background: none; color: var(--text); font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
-  #sel-menu button:hover { background: var(--accent-soft); color: var(--accent); }
-  #sel-menu svg.ic { width: 15px; height: 15px; }
+  /* 气泡里的「笔记 / 全局搜索」：与「译」并列的小动作按钮，不改变原提问链路 */
+  #ask-note, #ask-find { background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--text-2); cursor: pointer; }
   /* 笔记窗口：与查找窗同一套（可拖动 / 拖边框缩放 / 位置记忆）。列表与编辑器切换显示。 */
   #note-window { position: fixed; z-index: 46; display: none; flex-direction: column; width: 330px; height: 360px;
     min-width: 260px; min-height: 200px; background: var(--panel); border: 1px solid var(--border);
@@ -401,6 +395,8 @@
   <div id="ask-actions">
     <button id="ask-copy" style="display:none">复制 LaTeX</button>
     <button id="ask-translate" style="display:none" title="翻译选中内容（含公式时用 MinerU 的 LaTeX 还原）">译</button>
+    <button id="ask-note" style="display:none" title="给这段文字加一条笔记">笔记</button>
+    <button id="ask-find" style="display:none" title="在全文里查找这段文字">全局搜索</button>
     <button id="ask-cancel">取消</button>
     <button id="ask-send">提问</button>
   </div>
@@ -431,13 +427,6 @@
     <button id="cfg-cancel">取消</button>
     <button id="cfg-save">保存</button>
   </div>
-</div>
-
-<!-- 划词后的三动作菜单：提问 / 全局搜索 / 笔记（点「提问」才展开原来的提问弹层） -->
-<div id="sel-menu" role="menu" aria-label="选中文字后的操作">
-  <button id="sel-ask" data-icon="ask" title="围绕这段文字向伴读提问">提问</button>
-  <button id="sel-find" data-icon="search" title="在全文里查找这段文字">全局搜索</button>
-  <button id="sel-note" data-icon="note" title="给这段文字加一条笔记">笔记</button>
 </div>
 
 <!-- 笔记悬停提示：鼠标停在被标注文字上显示笔记内容 -->
@@ -475,7 +464,7 @@ const ICONS = {
 };
 const iconHtml = (name) => `<svg class="ic${name === 'spin' ? ' spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 // 静态按钮按 data-icon 注入一次；动态按钮（翻译/重翻/模式切换）在状态变化时用同一函数换图标
-document.querySelectorAll('#bar [data-icon], #find-window [data-icon], #note-window [data-icon], #sel-menu [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
+document.querySelectorAll('#bar [data-icon], #find-window [data-icon], #note-window [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
 const api = (p, opts) => fetch('/paper-reader/api' + p, opts).then(async (r) => {
   if (!r.ok) {
     // 服务端错误体有两种：{error}（参数/权限）与 {reason}（zh/generate 的未启动原因，带完整说明）
@@ -556,21 +545,23 @@ async function openPaper(topic, name, opts = {}) {
   $('zh-toggle').classList.toggle('active', zhVariant !== null);
   // 译文版页宽与原文不同（对照双栏≈2×），分屏每列只有一半宽 ⇒ 都先进适宽
   if (zhVariant || viewMode === 'split') { fitMode = true; fitBtn.classList.add('active'); }
+  // 笔记与公式索引都必须在首次 paintPage 之前到货：paintPage 直接按 notes.list 铺波浪线。
+  // 两者互不依赖，并行拉取；笔记读失败不阻塞 PDF（loadNotes 内部吞错并保留空列表）。
+  const notesReady = loadNotes().catch(() => { /* 读失败：本页只是没有波浪线，不影响读论文 */ });
   // 公式索引（MinerU content_list）：**必须在 loadPdf 之前到货**——热区是在 paintPage 里
   // 按 eqIndex 铺的，先渲染会漏画/残留上一篇的矩形；又必须排在 zhVariant 定稿之后——
   // eqHotEnabled()/renderEqPanel() 都按 zhVariant 决定「译文视图关热区」。失败不影响打开文献。
   await loadFormulas();
-  // 笔记必须在 loadPdf 之前到货：渲染完成后的重画要直接按 notes.list 铺波浪线
-  await loadNotes();
   updateDlBtn();
   updateViewButtons();
   if (viewMode === 'split') {
+    await notesReady; // 分屏两列由 openSplit 安排渲染，这里只需保证笔记在首帧前就绪
     await openSplit(); // 内部自己拉原文 + -zh.pdf 两个文档
   } else {
     // R-02：原地换文献时**无条件**退掉分屏（幂等）——否则新论文有 -zh.pdf、而持久化视图又不是
     // split 时，refreshZhState 的回落守卫不触发，中文列会留着**上一篇**的 PDF（pdfDocZh 也不释放）。
     teardownSplit();
-    await loadPdf(pdfUrl(zhVariant));
+    await loadPdf(pdfUrl(zhVariant), { beforePaint: notesReady });
   }
   if (opts.page) jumpTo(opts.page, opts.q); // 不 await：跳转内部自带「等页面渲出来」轮询
 }
@@ -1202,12 +1193,10 @@ const NOTE_BODY_MAX = 20000;
 const notes = { list: [], shown: false, editing: null, isNew: true, armed: false, loading: false };
 let noteWin = { x: null, y: null, w: 330, h: 360 };
 const noteWinEl = $('note-window');
-const selMenuEl = $('sel-menu');
 const noteTipEl = $('note-tip');
 let noteArmTimer = 0;
 let noteHoverRaf = 0;
 let noteHoverId = null;
-let selPoint = { x: 0, y: 0 };   // 三动作菜单/提问弹层的落点
 
 /* ---------- 窗口几何：与查找窗同一套（位置尺寸记在 localStorage） ---------- */
 function noteWinSave() {
@@ -1470,7 +1459,7 @@ function noteShowTip(n, x, y) {
   noteTipEl.style.top = Math.max(8, Math.min(y + 16, window.innerHeight - r.height - 8)) + 'px';
 }
 $('main').addEventListener('mousemove', (e) => {
-  if ((noteWinEl && noteWinEl.contains(e.target)) || (askPop && askPop.contains(e.target)) || (selMenuEl && selMenuEl.contains(e.target))) {
+  if ((noteWinEl && noteWinEl.contains(e.target)) || (askPop && askPop.contains(e.target))) {
     noteHideTip();
     return;
   }
@@ -1655,7 +1644,11 @@ async function noteGoto(note) {
   if (!a || !a.page) { toast('这条笔记没有可定位的原文位置'); return; }
   await findReadyPage(a.page);
   notesReapply();
-  const box = document.querySelector(`.note-under[data-note="${note.id}"]`);
+  // 不把 id 拼进 CSS 选择器：服务端只截长度、不限字符集，id 含引号/括号会抛 DOMException。
+  let box = null;
+  for (const b of document.querySelectorAll('.note-under')) {
+    if (b.dataset.note === note.id) { box = b; break; }
+  }
   const target = box || origPageNode(a.page);
   if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
   if (box) {
@@ -1664,17 +1657,7 @@ async function noteGoto(note) {
   }
 }
 
-/* ---------- 划词三动作菜单：提问 / 全局搜索 / 笔记 ---------- */
-function selMenuHide() {
-  if (selMenuEl) selMenuEl.classList.remove('on');
-}
-function selMenuShow(x, y) {
-  if (!selMenuEl) return;
-  selMenuEl.classList.add('on');
-  const r = selMenuEl.getBoundingClientRect();
-  selMenuEl.style.left = Math.max(8, Math.min(x, window.innerWidth - r.width - 8)) + 'px';
-  selMenuEl.style.top = Math.max(8, Math.min(y, window.innerHeight - r.height - 8)) + 'px';
-}
+/* ---------- 气泡里的附加动作：笔记 / 全局搜索 ---------- */
 /** 「全局搜索」= 把选中文字塞进查找窗口并跳到第一处（与手打关键词同一条链路，不另做一套搜索） */
 function findSearchText(text) {
   const q = String(text || '').replace(/\s+/g, ' ').trim();
@@ -1684,18 +1667,11 @@ function findSearchText(text) {
   findWinShow(true);
   void findRun(use).then(() => findGoto(0)).catch(() => { /* 索引失败：列表里会有说明 */ });
 }
-$('sel-ask').onclick = () => {
-  selMenuHide();
-  if (!askSelection) return;
-  showAskPop({ quote: askSelection.text, x: selPoint.x, y: selPoint.y });
-};
-$('sel-find').onclick = () => {
-  selMenuHide();
+$('ask-find').onclick = () => {
   askPop.style.display = 'none';
   if (askSelection) findSearchText(askSelection.text);
 };
-$('sel-note').onclick = () => {
-  selMenuHide();
+$('ask-note').onclick = () => {
   askPop.style.display = 'none';
   noteCreateFromSelection();
 };
@@ -1721,13 +1697,20 @@ $('note-body').addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); void noteSave(); }
   else if (e.key === 'Escape') { e.preventDefault(); noteSetEditing(false); }
 });
+// 全局 Esc：标题栏写着「关闭（Esc）」就必须真的能关。编辑态里先退出编辑（上面的 textarea
+// 处理器已 preventDefault，这里靠 defaultPrevented 避免同一次按键把窗口也一起关掉）。
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.defaultPrevented) return;
+  if (!noteWinEl || !noteWinEl.classList.contains('on')) return;
+  if (noteWinEl.classList.contains('editing')) noteSetEditing(false);
+  else noteWinShow(false);
+});
 $('note-head').addEventListener('pointerdown', noteWinDrag);
 $('note-grip').addEventListener('pointerdown', (e) => noteWinResize(e, 'se'));
 $('note-grip-r').addEventListener('pointerdown', (e) => noteWinResize(e, 'e'));
 $('note-grip-b').addEventListener('pointerdown', (e) => noteWinResize(e, 's'));
 window.addEventListener('resize', () => { if (noteWinEl.classList.contains('on')) noteWinPlace(); });
-document.addEventListener('mousedown', (e) => { if (selMenuEl && !selMenuEl.contains(e.target)) selMenuHide(); }, true);
-$('pdf-pane').addEventListener('scroll', () => { selMenuHide(); noteHideTip(); }, { passive: true });
+$('pdf-pane').addEventListener('scroll', () => { noteHideTip(); }, { passive: true });
 noteWinLoad();
 
 /** 排查用：控制台执行 dprNotesDebug() 看笔记状态（波浪线不显示时先看 boxes） */
@@ -2099,6 +2082,8 @@ async function loadPdf(url, opts = {}) {
   // 翻页控件与模式切换按钮：文档就绪后才出现
   $('pager').style.display = '';
   $('mode-toggle').style.display = '';
+  // 笔记请求与 PDF 文档加载并行；首次渲染前才等它（见 openPaper 的 beforePaint）
+  if (opts.beforePaint) await opts.beforePaint;
   // 分屏（模式 B）自己安排两列的渲染与适宽：这里只把原文文档装上，不触发单列渲染
   if (opts.deferRender) return;
   if (fitMode) { fitToWidth(); return; } // fitToWidth 内部 setZoom → rerender
@@ -2763,6 +2748,10 @@ function showAskPop(o) {
       && (askSelection.doc ?? 'orig') === 'orig'
       && askSelection.text.length <= MAX_SELECTION_CHARS
       ? 'inline-block' : 'none';
+  // 笔记 / 全局搜索：只对文字选区出现（公式引用没有可标注/可搜索的正文）
+  const textSel = !!(askSelection && askSelection.kind === 'text');
+  $('ask-note').style.display = textSel ? 'inline-block' : 'none';
+  $('ask-find').style.display = textSel ? 'inline-block' : 'none';
   hideTrPop(); // 新选区/新引用出现即收起上一个译文气泡（同一锚点必然重叠）
   invalidateTranslate(); // R-01：新选区/新引用必须让在飞请求失效，否则旧译文会盖到新锚点上
   askPop.style.display = 'block';
@@ -2778,7 +2767,6 @@ document.addEventListener('mousedown', (e) => { downPt = { x: e.clientX, y: e.cl
 document.addEventListener('mouseup', (e) => {
   if (askPop.contains(e.target)) return;
   if (noteWinEl && noteWinEl.contains(e.target)) return;
-  if (selMenuEl && selMenuEl.contains(e.target)) return;
   setTimeout(() => {
     const moved = downPt ? Math.abs(e.clientX - downPt.x) + Math.abs(e.clientY - downPt.y) > 4 : false;
     downPt = null;
@@ -2791,13 +2779,12 @@ document.addEventListener('mouseup', (e) => {
         const nid = noteFindAt(e.clientX, e.clientY);
         if (nid) {
           const n = noteById(nid);
-          if (n) { selMenuHide(); askPop.style.display = 'none'; noteStartEdit(n); return; }
+          if (n) { askPop.style.display = 'none'; noteStartEdit(n); return; }
         }
         const hit = hitTestFormula(e);
         if (hit) { citeFormula(hit.eq, e.clientX, e.clientY + 6); return; }
       }
       askPop.style.display = 'none';
-      selMenuHide();
       return;
     }
     const node = sel.anchorNode && sel.anchorNode.parentElement;
@@ -2819,10 +2806,9 @@ document.addEventListener('mouseup', (e) => {
       const r0 = sel.getRangeAt(0);
       if (r0 && typeof r0.cloneRange === 'function') askSelection.range = r0.cloneRange();
     } catch { /* 选区已失效：保持无 range */ }
-    // 划词后先给「提问 / 全局搜索 / 笔记」三动作小菜单；点「提问」才展开原来的提问弹层
-    selPoint = { x: e.clientX, y: Math.min(range.bottom + 8, window.innerHeight - 60) };
-    askPop.style.display = 'none';
-    selMenuShow(selPoint.x, selPoint.y);
+    // 划词后**直接**弹回 v1.6.0 的「选中即问」气泡（E11/R-01/R-07 与 docs/features.md 的契约）；
+    // 笔记 / 全局搜索作为气泡里的小按钮，不再多一层菜单。
+    showAskPop({ quote: text, x: e.clientX, y: Math.min(range.bottom + 8, window.innerHeight - 60) });
   }, 10);
 });
 document.addEventListener('mousedown', (e) => { if (!askPop.contains(e.target)) askPop.style.display = 'none'; });

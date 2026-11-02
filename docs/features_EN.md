@@ -8,6 +8,7 @@ The README lists only the core capabilities; prerequisites, costs, known limitat
 - [MinerU parsing: scanned PDFs & click-to-cite formulas](#mineru-parsing-scanned-pdfs--click-to-cite-formulas)
 - [Embedding semantic search](#embedding-semantic-search)
 - [Selection translation (formulas preserved)](#selection-translation-formulas-preserved)
+- [Notes](#notes)
 - [Bilingual split view (two modes)](#bilingual-split-view-two-modes)
 - [Library management details](#library-management-details)
 
@@ -78,6 +79,18 @@ That bubble has **no** "insert into chat" and **no** "copy" button, and the plug
 - A **literal `$`** inside the selection (a real dollar sign printed in the text) can, in an extreme shape, produce a false "N formulas were not preserved" note. Recorded; it does not affect the translation itself.
 - **No formula replacement in the Chinese / dual views** (the bbox only holds for original pages), which is why the "译" button only appears in the original view.
 
+## Notes
+
+**How to use**: selecting text still opens the original "select-to-ask" bubble exactly as before, now with two extra small buttons — **Note** saves the passage with its page, and **Global search** finds that passage in the document. Annotated text gets a blue wavy underline; hover to read the note, click to edit or delete it. The #notes button in the toolbar opens the notes window, which shares the find window's behaviour (draggable, edge-resizable, position remembered); the list is ordered by page and clicking an entry jumps back and flashes the source. Notes taken in the Chinese column of the split view jump back correctly too.
+
+**Where they live**: one `<paper>.notes.json` per paper, next to `.txt` / `.study.json`. Notes follow the paper file — they survive a browser change, and move with the library if you take it to another machine; they also move with the paper on rename/delete (deletion goes to the trash and is recoverable). The file is plain JSON, so you can back it up or migrate it by hand.
+
+**Known limitations (stated plainly)**:
+
+- **No cross-tab lock**: saving is a whole-file read-modify-write. If the same paper is saved from two tabs at once, the later write wins (a note can be lost); saving concurrently with delete/rename can, in an extreme race, recreate the notes file at the old path. Accepted for a single-user plugin.
+- Anchors are character ranges in that page's text layer. If the PDF itself is replaced or re-parsed so its text layer changes, the wavy underline may no longer match; the note body is still there and the list entry jumps to the page.
+- A corrupted notes file (hand-edited invalid JSON) reads as an empty list rather than blocking the paper; fix it by replacing/removing that `.notes.json`.
+
 ## One-click Chinese: live progress & no more truncated paragraphs
 
 **Progress bar (top bar, shown while generating)**: a slim bar plus stage text (e.g. "Translate Paragraphs · 76%", "Add Fonts (0/10) · 90%"), tracking babeldoc's overall progress. Translations started **elsewhere** keep showing progress too (another session, or after refreshing the page, polling resumes automatically); the bar disappears on completion and the existing success/failure notice takes over.
@@ -120,8 +133,8 @@ Two toolbar buttons; switch any time and **click again to return to the original
 ## Library management details
 
 - Deletion = **moved to trash** `data/.trash/<timestamp>/` (with a manifest); move files back into the topic folder to recover. No auto-cleanup or one-click restore UI in this version
-- Files moved to trash = the paper's same-named artifacts: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is **not** deleted (it lives in dsh's session store)
+- Files moved to trash = the paper's same-named artifacts: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, `.notes.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is **not** deleted (it lives in dsh's session store)
 - **Preconditions**: deletion/rename is refused while the paper has a running session, a translation in progress, or another delete/rename in flight
 - **Safety boundary**: deletes/renames only ever touch the library directory; path traversal (`..`, absolute paths, symlink escapes) is rejected; a mid-way failure rolls back already-moved files
-- After a rename: transcripts/translations/study profiles move along; past chat sessions are **kept** but no longer listed under the new name (session ids encode the old name); case-only renames work on macOS/Windows
+- After a rename: transcripts/translations/study profiles/notes move along; past chat sessions are **kept** but no longer listed under the new name (session ids encode the old name); case-only renames work on macOS/Windows
 - Oddly named files placed into `data/` by hand (e.g. `.hidden.pdf`) can still be deleted/renamed — nothing becomes a visible-but-undeletable orphan
