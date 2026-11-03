@@ -81,7 +81,7 @@ import {
   writeMineruConfig,
 } from './mineru-config.ts'
 import { noteOrigin } from './origin.ts'
-import { deleteNote, isNoteError, readNotes, upsertNote } from './notes.js'
+import { deleteNote, isNoteError, readNotes, upsertNote } from './notes.ts'
 
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse

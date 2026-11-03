@@ -81,7 +81,7 @@ That bubble has **no** "insert into chat" and **no** "copy" button, and the plug
 
 ## Notes
 
-**How to use**: selecting text still opens the original "select-to-ask" bubble exactly as before, now with two extra small buttons — **Note** saves the passage with its page, and **Global search** finds that passage in the document. Annotated text gets a blue wavy underline; hover to read the note, click to edit or delete it. The #notes button in the toolbar opens the notes window, which shares the find window's behaviour (draggable, edge-resizable, position remembered); the list is ordered by page and clicking an entry jumps back and flashes the source. Notes taken in the Chinese column of the split view jump back correctly too.
+**How to use**: selecting text still opens the original "select-to-ask" bubble exactly as before, now with two extra small buttons — **Note** saves the passage with its page, and **Global search** finds that passage in the document. Annotated text gets a blue wavy underline; hover to read the note, click to edit or delete it. The **Notes** button in the toolbar opens the notes window, which shares the find window's behaviour (draggable, edge-resizable, position remembered); the list is ordered by page and clicking an entry jumps back and flashes the source. Notes taken in the Chinese column of the split view jump back correctly too.
 
 **Where they live**: one `<paper>.notes.json` per paper, next to `.txt` / `.study.json`. Notes follow the paper file — they survive a browser change, and move with the library if you take it to another machine; they also move with the paper on rename/delete (deletion goes to the trash and is recoverable). The file is plain JSON, so you can back it up or migrate it by hand.
 
