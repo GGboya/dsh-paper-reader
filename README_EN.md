@@ -26,6 +26,7 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 - 📏 **No more truncated paragraphs + live progress**: translation runs through `babeldoc-driver.py` — per-input output budgets (instead of babeldoc's hard-wired 2048), auto split-and-retry on `finish_reason=length`; a top-bar progress bar shows live stage progress like "Translate Paragraphs 76% (521/798)", and the driver retries with lower reasoning effort when the endpoint refuses to disable thinking
 - 🈯 **Selection translation (formulas preserved)** (v1.6.1): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
 - 🖥️ **Bilingual side-by-side / split view** (v1.6.1): a doubled-width对照 page or a two-pane split with synchronised scrolling — switch any time, remembered per paper
+- 📝 **Notes**: selecting text still opens the original "select-to-ask" bubble; new small **Note** and **Global search** buttons sit in that bubble. Annotated text gets a blue wavy underline — hover to read the note, click to edit or delete. The notes window matches the find window (draggable, edge-resizable, position remembered), lists notes by page, and jumps back to the source. Notes live in `<paper>.notes.json` beside the paper, so they follow it across browsers
 - 🗂️ **Library management**: rename/delete topics and papers; deletion goes to a recoverable trash
 - ➕ **Optional add-ons** (off by default): MinerU parsing — scanned PDFs become readable, formulas become **Click to cite a formula** and searchable; an embeddings endpoint — plain-language semantic search
 
@@ -71,7 +72,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # same command 
 
 ## Library management (safety notes)
 
-- Deletion = **moved to trash** `data/.trash/` (with a manifest; move files back to recover); it handles every artifact of the paper: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is not deleted. Papers with a running session or an in-flight translation are refused up front; path traversal is rejected and mid-way failures roll back — details in [docs/features_EN.md](docs/features_EN.md)
+- Deletion = **moved to trash** `data/.trash/` (with a manifest; move files back to recover); it handles every artifact of the paper: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, `.notes.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is not deleted. Papers with a running session or an in-flight translation are refused up front; path traversal is rejected and mid-way failures roll back — details in [docs/features_EN.md](docs/features_EN.md)
 
 ## Contributing
 

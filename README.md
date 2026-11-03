@@ -26,6 +26,7 @@
 - 📏 **长段落不截断 + 实时进度**：翻译由 `babeldoc-driver.py` 驱动 babeldoc —— 按输入估算输出预算（不再吃 babeldoc 写死的 2048），`finish_reason=length` 自动拆段重译；顶栏进度条实时显示「翻译段落 76%（521/798）」这样的阶段进度，端点拒绝关闭推理时自动降推理强度重试
 - 🈯 **划词翻译（公式保留）**（v1.6.1）：选中点「译」出纯译文气泡；选区含公式时用 MinerU 识别的 LaTeX 替换文本层乱码、要求模型原样保留
 - 🖥️ **中英对照 / 分屏**（v1.6.1）：并排对照页或左右分屏同步滚动，随时切换、按文献记忆
+- 📝 **笔记**：划词仍直接弹回「选中即问」气泡（与旧版一致），气泡里新增「笔记」「全局搜索」小按钮；记过的文字下方画蓝色波浪线，鼠标停上去看笔记内容、点一下改或删；笔记窗口与查找窗同一套交互（可拖动、拖边框缩放、位置记忆），批量列表按页排序、点条目跳回原文。笔记存在 `<文献>.notes.json`（跟文献走，换浏览器不丢）
 - 🗂️ **文献管理**：专题/论文改名、删除进回收站可恢复
 - ➕ **可选增强**（默认关）：MinerU 解析——扫描件可读、公式可点引用可检索；嵌入端点——大白话命中术语段落
 
@@ -71,7 +72,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # 升级也是�
 
 ## 文献管理（安全说明）
 
-- 删除 = **移入回收站** `data/.trash/`（带 manifest，移回即恢复）；会处理该文献的全部产物：`<文献>.pdf`、`.txt`、`.pages.json`、`.transcript.json`、`.mineru.md`、`.mineru.json`、`.embeddings.json`、`.study.json` 与译文变体 `<文献>-en.pdf` / `-zh.pdf` / `-dual.pdf`（含 `.tmp-*` 残留）；伴读会话历史不删。运行中会话/翻译中的文献会被前置拒绝；路径穿越一律拒绝、失败自动回滚——细则见 [docs/features.md](docs/features.md)
+- 删除 = **移入回收站** `data/.trash/`（带 manifest，移回即恢复）；会处理该文献的全部产物：`<文献>.pdf`、`.txt`、`.pages.json`、`.transcript.json`、`.mineru.md`、`.mineru.json`、`.embeddings.json`、`.study.json`、`.notes.json` 与译文变体 `<文献>-en.pdf` / `-zh.pdf` / `-dual.pdf`（含 `.tmp-*` 残留）；伴读会话历史不删。运行中会话/翻译中的文献会被前置拒绝；路径穿越一律拒绝、失败自动回滚——细则见 [docs/features.md](docs/features.md)
 
 ## 参与开发
 

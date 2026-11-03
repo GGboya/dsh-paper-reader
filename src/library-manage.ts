@@ -186,12 +186,16 @@ export function resolveExistingTopicDir(dataDir: string, topic: unknown): string
 // （t4 评审 F1）。少它的后果：① 改名后档案仍挂旧名 → readStudy 找不到，用户以为进度全丢；
 // ② 删除时不进回收站、moved/skipped 都不报告；③ 残留条目既不是文献也不是专题，任何 API 都
 // 清不掉，永久阻塞删专题（409 topic-not-empty）。本次归位：改名连带、删除移入回收站。
-export const PAPER_STEM_SUFFIXES = ['.pdf', '.txt', '.pages.json', '.transcript.json', '.mineru.md', '.mineru.json', '.embeddings.json', '.study.json'] as const
+//
+// `.notes.json` = 阅读器划词笔记（src/notes.ts）。不登记时同样的三种后果会再演一次：
+// 改名后笔记留在旧名下（阅读器读不到）、删除不回收、残留的 `P.notes.json` 让删专题 409
+// 而界面里已无可删文献。放在这里与 `.study.json` 同组，改名/删除自然连带。
+export const PAPER_STEM_SUFFIXES = ['.pdf', '.txt', '.pages.json', '.transcript.json', '.mineru.md', '.mineru.json', '.embeddings.json', '.study.json', '.notes.json'] as const
 export const PDF2ZH_VARIANT_SUFFIXES = ['-en', '-zh', '-dual'] as const
 /** atomicTempPath(): `${path}.tmp-${pid}-${uuid.slice(0,8)}`（src/transcribe.ts）。 */
 const TMP_RE = /\.tmp-\d+-[0-9a-f]{8}$/
 
-export type ArtifactKind = 'pdf' | 'cache' | 'mineru' | 'embed' | 'study' | 'variant' | 'tmp'
+export type ArtifactKind = 'pdf' | 'cache' | 'mineru' | 'embed' | 'study' | 'note' | 'variant' | 'tmp'
 
 export interface ManagedFile {
   /** 文件名（不含目录） */
@@ -224,6 +228,7 @@ function kindOf(paperName: string, entry: string): ArtifactKind {
   if (base === paperName + '.mineru.json' || base === paperName + '.mineru.md') return isTmp ? 'tmp' : 'mineru'
   if (base === paperName + '.embeddings.json') return isTmp ? 'tmp' : 'embed'
   if (base === paperName + '.study.json') return isTmp ? 'tmp' : 'study'
+  if (base === paperName + '.notes.json') return isTmp ? 'tmp' : 'note'
   return isTmp ? 'tmp' : 'cache'
 }
 
@@ -243,8 +248,8 @@ export function listArtifacts(topicDir: string, paperName: string): ManagedFile[
     if (st.isDirectory()) continue
     out.push({ name: e.name, kind: kindOf(paperName, e.name), bytes: st.size, symlink: st.isSymbolicLink() })
   }
-  // 阅读序稳定输出：先变体/缓存，`.pdf` 最后（删除与重命名都靠这个顺序；study 也要排在 .pdf 前）
-  const order: ArtifactKind[] = ['variant', 'mineru', 'embed', 'study', 'cache', 'tmp', 'pdf']
+  // 阅读序稳定输出：先变体/缓存，`.pdf` 最后（删除与重命名都靠这个顺序；study/note 也要排在 .pdf 前）
+  const order: ArtifactKind[] = ['variant', 'mineru', 'embed', 'study', 'note', 'cache', 'tmp', 'pdf']
   return out.sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.name.localeCompare(b.name))
 }
 
