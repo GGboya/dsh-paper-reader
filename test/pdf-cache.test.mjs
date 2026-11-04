@@ -153,14 +153,15 @@ function loadReaderWithDocs(getDocument) {
       setZoom: (z) => { zoomScale = z }, setFit: (v) => { fitMode = v },
       getChildren: () => $('pdf-pages').children,
       getEqByPage: () => EQ_BY_PAGE,
+      renderLazy, getLazyView: () => lazyView,
     };`, ctx, { filename: 'reader-inline.js' })
   ctx.__t.setEnsure(async () => {})
-  return { t: ctx.__t, doc }
+  return { t: ctx.__t, doc, ctx }
 }
 
-function stubDoc(name, log) {
+function stubDoc(name, log, pages = 2) {
   return {
-    numPages: 2,
+    numPages: pages,
     destroy: async () => { log.push('destroy:' + name) },
     getPage: async () => ({
       getViewport: ({ scale }) => ({ width: 100 * scale, height: 100 * scale, scale }),
@@ -305,4 +306,67 @@ test('V3 resetViewCache 只释放非活动文档（GC），活动文档留给 lo
   assert.ok(log.includes('destroy:orig'), '非活动的原文文档必须被释放')
   assert.ok(!log.includes('destroy:zh'), '活动文档不得被 reset 误释放（由调用方负责）')
   assert.equal(T.getActiveKey(), 'zh', 'reset 只清缓存，不擅自改活动视图')
+})
+
+test('V4 长文档滚动模式懒渲染：只画当前页，进入视口补画，远离释放', async () => {
+  const log = []
+  const docs = { orig: stubDoc('orig', log, 16), zh: stubDoc('zh', log, 16) }
+  const r = prepReader(({ url }) => ({ promise: Promise.resolve(String(url).includes('variant=zh') ? docs.zh : docs.orig), destroy: async () => {} }), docs)
+  const { t: T, ctx } = r
+  ctx.IntersectionObserver = class {
+    constructor(fn) { (ctx.__ios ||= []).push(fn) }
+    observe() {} unobserve() {} disconnect() {}
+  }
+  T.setFit(false)
+  T.setZoom(1)
+  await T.renderLazy()
+  const lv = T.getLazyView()
+  assert.ok(lv, '必须建立懒视图')
+  assert.equal(lv.pages.size, 16, '所有页都应有占位节点')
+  const kids = T.getChildren()
+  assert.equal(kids.length, 16)
+  assert.ok(kids[0].children.length > 0, '当前页必须已画')
+  assert.equal(kids[1].children.length, 0, '视口外页面保持占位（不铺 canvas/TextLayer）')
+  assert.equal(kids[1].dataset.rendered, '0')
+
+  // 模拟第 2 页进入视口：补画（第 0 个 observer 是懒渲染的，第 1 个是当前页探测）
+  ctx.__ios[0]([{ target: kids[1], isIntersecting: true, intersectionRatio: 1 }])
+  for (let i = 0; i < 20 && kids[1].children.length === 0; i++) await new Promise((r) => setTimeout(r, 0))
+  await new Promise((r) => setTimeout(r, 10)) // 等 paintPage 收尾（painting 标记清除）
+  assert.ok(kids[1].children.length > 0, '进入视口后必须补画该页')
+  assert.equal(kids[1].dataset.rendered, '1')
+
+  // 模拟第 2 页远离视口：释放 canvas/TextLayer，恢复占位
+  ctx.__ios[0]([{ target: kids[1], isIntersecting: false, intersectionRatio: 0 }])
+  assert.equal(kids[1].children.length, 0, '远离视口后必须释放该页')
+  assert.equal(kids[1].dataset.rendered, '0')
+})
+
+test('V5 懒渲染视图也能进双视图缓存：预加载/切回不重新加载，目标页已画', async () => {
+  const log = []
+  const docs = { orig: stubDoc('orig', log, 16), zh: stubDoc('zh', log, 16) }
+  let loads = 0
+  const r = prepReader(({ url }) => {
+    loads++
+    return { promise: Promise.resolve(String(url).includes('variant=zh') ? docs.zh : docs.orig), destroy: async () => {} }
+  }, docs)
+  const { t: T, ctx } = r
+  ctx.IntersectionObserver = class { constructor() {} observe() {} unobserve() {} disconnect() {} }
+  T.setFit(false)
+  T.setZoom(1)
+  await T.renderLazy()
+  T.saveActiveView()
+  await T.preloadView('zh')
+  assert.ok(T.getViewCache().has('zh'))
+  assert.equal(loads, 1)
+  assert.equal(await T.activateView('zh'), true)
+  assert.equal(T.getActiveKey(), 'zh')
+  assert.equal(T.getChildren().length, 16)
+  assert.ok(T.getChildren()[0].children.length > 0, '缓存里的当前页必须已画')
+  assert.equal(loads, 1, '切译文不得重新 getDocument')
+  assert.equal(await T.activateView('orig'), true)
+  assert.equal(T.getActiveKey(), 'orig')
+  assert.equal(T.getChildren().length, 16)
+  assert.ok(T.getChildren()[0].children.length > 0, '切回原文当前页必须已画')
+  assert.equal(loads, 1)
 })
