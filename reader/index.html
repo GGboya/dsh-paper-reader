@@ -411,7 +411,7 @@
 
 <div id="cfg-pop">
   <h3>翻译端点</h3>
-  <div id="cfg-hint">选预设供应商，或选「自定义」填任意 OpenAI 兼容端点（通义 / 本地 vLLM 等）。保存前会先测试连接。</div>
+  <div id="cfg-hint">选预设供应商，或选「自定义」填任意 OpenAI 兼容端点（通义 / 本地 vLLM 等）。OpenCode Go 需先在 OpenCode Console 订阅并复制 API Key。保存前会先测试连接。</div>
   <div id="cfg-source"></div>
   <label for="cfg-provider">供应商</label>
   <select id="cfg-provider"></select>
@@ -1946,6 +1946,9 @@ const PROVIDERS = [
   { id: 'deepseek', name: 'DeepSeek',  baseUrl: 'https://api.deepseek.com',                     models: ['deepseek-v4-pro', 'deepseek-flash'] },
   { id: 'glm',      name: '智谱 GLM',   baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4', models: ['glm-5.3-flash', 'glm-5.3', 'glm-4.6'] },
   { id: 'kimi',     name: 'Kimi',      baseUrl: 'https://api.kimi.com/coding/v1',              models: ['k3'] },
+  // OpenCode Go：订阅后到 OpenCode Console 复制 API Key；模型列表以控制台为准（此处只做输入建议）。
+  // 服务端会对 opencode.ai 的请求自带 x-opencode-session（见 src/opencode.ts）。
+  { id: 'opencode', name: 'OpenCode Go', baseUrl: 'https://opencode.ai/inference/go/openai/v1', models: ['deepseek-v4.1-flash', 'glm-5.3-flash', 'kimi-k3.1-pro', 'qwen3.8-flash', 'minimax-m3.1-flash'] },
 ];
 const normUrl = (u) => (u || '').trim().replace(/\/+$/, '');
 // 按 baseUrl 反查预设（打开表单时回显选中项）；查不到就是 custom

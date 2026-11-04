@@ -14,6 +14,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { dshHome } from "./library.js";
 import { ensureBabeldoc } from "./babeldoc-install.js";
+import { isOpenCodeEndpoint, openCodeDriverEnv, openCodeSessionId } from "./opencode.js";
 
 /** 文献引用（paperRefFor 的返回形状；本模块只用到 pdfPath / name / topic）。 */
 export interface TranslatePaperRef {
@@ -343,6 +344,11 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
     busy.set(ref.pdfPath, null); // 清掉安装阶段说明，回到「翻译进行中」
     const stem = basename(ref.pdfPath, extname(ref.pdfPath));
     const dstStem = ref.pdfPath.slice(0, -extname(ref.pdfPath).length);
+    // OpenCode Go：整篇翻译是一个「会话」，同一篇论文（含之后的划词翻译）共用一个稳定 ID，
+    // 经环境变量交给驱动脚本，由它加进每次 LLM 请求的 x-opencode-session。其它端点不加任何东西。
+    const ocSession = isOpenCodeEndpoint(ep.baseUrl)
+        ? await openCodeSessionId(`paper:${ref.topic ?? ''}/${ref.name ?? stem}`)
+        : '';
     // 推理型模型（glm-5.x / k3 / deepseek-flash）默认每段都先跑隐藏推理，翻译慢好几倍还偶尔返回空。
     // 这三家的 OpenAI 兼容端点都接受 DeepSeek 风格 thinking 开关（babeldoc --openai-thinking 即发该字段）；
     // 自定义端点不加——OpenAI 官方等严格校验参数的端点会因未知字段 400。
@@ -398,7 +404,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
         const child = spawnError
             ? null
             : spawn(cmd, args, {
-                env: { ...process.env, HF_ENDPOINT: 'https://hf-mirror.com', PYTHONIOENCODING: 'utf-8' },
+                env: { ...process.env, HF_ENDPOINT: 'https://hf-mirror.com', PYTHONIOENCODING: 'utf-8', ...openCodeDriverEnv(ep.baseUrl, ocSession) },
                 windowsHide: true,
                 stdio: ['ignore', logFd, logFd],
             });
