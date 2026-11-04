@@ -588,7 +588,7 @@ test('R7 变异自检：把关键实现改坏，R1/R2/R6 的判据必须能抓�
   assert.ok(m1, 'M1（删 paintEqLayer）必须被 R1 判据抓住')
 
   // M2：renderPaged 里不清几何 → 换页后旧页几何残留
-  const m2 = await detect(mutate("  container.innerHTML = '';\n  clearEqGeometry(); // 同上：翻页模式下换页/缩放时，旧页几何与 hover 残留必须一起作废（否则命中整体偏移）\n", "  container.innerHTML = '';\n"), async (script) => {
+  const m2 = await detect(mutate("    curPage = pageNo;\n    container.innerHTML = '';\n    clearEqGeometry(); // 同上：翻页模式下换页/缩放时，旧页几何与 hover 残留必须一起作废（否则命中整体偏移）\n", "    curPage = pageNo;\n    container.innerHTML = '';\n"), async (script) => {
     const R = loadReader({ script }); R.t.setEq(IDX); R.t.setVariant(null); R.t.setZoom(1); R.t.setPageMode('paged')
     R.t.setPdfDoc(realDocStub); R.t.setCurPage(EQ_PAGES[0]); await R.t.renderPaged()
     R.t.setCurPage(EQ_PAGES[1]); await R.t.renderPaged()

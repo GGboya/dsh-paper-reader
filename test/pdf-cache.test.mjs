@@ -1,10 +1,11 @@
-// test/pdf-cache.test.mjs — PDF 传输缓存与阅读器文档生命周期（性能修复第一批）。
+// test/pdf-cache.test.mjs — PDF 传输缓存与阅读器文档生命周期（性能修复）。
 //
-// 守两件事：
+// 守三件事：
 //   1. /api/pdf 带 ETag/Last-Modified；客户端 If-None-Match 命中时 304，不再重传整份 PDF；
 //      文件 mtime/size 变化（重新翻译）后 ETag 必须变化，不能回旧译文。
 //   2. 阅读器 loadPdf 换文档时释放旧 PDFDocumentProxy；并发加载只允许最后一个生效，
 //      晚到的旧请求必须自行 destroy（否则 worker/页面缓存泄漏，切换越用越卡）。
+//   3. 原文/译文双视图缓存：预加载后切换不再 getDocument/不重画；切回原文恢复公式几何。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -14,6 +15,7 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
+import { readReaderScript } from './reader-script.mjs'
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const dist = (m) => join(REPO, 'dist', m)
@@ -84,13 +86,12 @@ test('H1 /api/pdf：ETag 命中 304；文件变化后 ETag 变化；download 头
 
 /* ══════════ 阅读器：loadPdf 的 GC / 并发顺序 ══════════ */
 
-const SCRIPT = readFileSync(join(REPO, 'reader', 'index.html'), 'utf8')
-  .replaceAll('\r\n', '\n').replaceAll('\r', '\n')
-  .match(/<script>\n([\s\S]*)\n<\/script>/)[1]
+const SCRIPT = readReaderScript(join(REPO, 'reader', 'index.html')).script
 
 function makeEl(tag = 'div') {
   const el = {
-    tagName: tag.toUpperCase(), style: {}, dataset: {}, children: [], className: '', classes: new Set(),
+    tagName: tag.toUpperCase(), style: { setProperty() {}, removeProperty() {}, getPropertyValue: () => '' },
+    dataset: {}, children: [], className: '', classes: new Set(),
     textContent: '', value: '', innerHTML: '',
     classList: {
       add: (c) => el.classes.add(c), remove: (c) => el.classes.delete(c),
@@ -107,6 +108,11 @@ function makeEl(tag = 'div') {
   }
   Object.defineProperty(el, 'firstChild', { get: () => el.children[0] ?? null })
   Object.defineProperty(el, 'lastChild', { get: () => el.children[el.children.length - 1] ?? null })
+  let innerHtml = ''
+  Object.defineProperty(el, 'innerHTML', {
+    get: () => innerHtml,
+    set: (v) => { innerHtml = v; if (v === '') el.children = [] },
+  })
   return el
 }
 
@@ -139,9 +145,17 @@ function loadReaderWithDocs(getDocument) {
       setPdfDoc: (d) => { pdfDoc = d }, getPdfDoc: () => pdfDoc,
       getFindDoc: () => find.doc, destroyPdfDoc,
       getLoadSeq: () => pdfLoadSeq, getRenderToken: () => renderToken,
+      activateView, preloadView, resetViewCache, saveActiveView, attachView,
+      getActiveKey: () => activeKey, getViewCache: () => viewCache, getViewDocs: () => viewDocs,
+      setView: (v) => { viewMode = v }, setVariant: (v) => { zhVariant = v },
+      setCurrent: (c) => { current = c }, setPageMode: (m) => { pageMode = m },
+      setEq: (i) => { eqIndex = i }, renderAllPages, renderPaged, rerender,
+      setZoom: (z) => { zoomScale = z }, setFit: (v) => { fitMode = v },
+      getChildren: () => $('pdf-pages').children,
+      getEqByPage: () => EQ_BY_PAGE,
     };`, ctx, { filename: 'reader-inline.js' })
   ctx.__t.setEnsure(async () => {})
-  return ctx.__t
+  return { t: ctx.__t, doc }
 }
 
 function stubDoc(name, log) {
@@ -159,7 +173,7 @@ function stubDoc(name, log) {
 test('R1 loadPdf 换文档时释放旧 PDFDocumentProxy（GC）', async () => {
   const log = []
   const docs = { u1: stubDoc('d1', log), u2: stubDoc('d2', log) }
-  const T = loadReaderWithDocs(({ url }) => ({ promise: Promise.resolve(docs[url]), destroy: async () => log.push('task-destroy:' + url) }))
+  const { t: T } = loadReaderWithDocs(({ url }) => ({ promise: Promise.resolve(docs[url]), destroy: async () => log.push('task-destroy:' + url) }))
   T.setPdfDoc(null)
   assert.equal(await T.loadPdf('u1', { deferRender: true }), true)
   assert.equal(T.getPdfDoc(), docs.u1)
@@ -179,7 +193,7 @@ test('R2 loadPdf 并发：晚到的旧请求自行销毁，不覆盖新文档', 
     resolvers[url] = resolve
     return { promise, destroy: async () => log.push('task-destroy:' + url) }
   }
-  const T = loadReaderWithDocs(getDocument)
+  const { t: T } = loadReaderWithDocs(getDocument)
   T.setPdfDoc(null)
   const pa = T.loadPdf('a', { deferRender: true })
   const pb = T.loadPdf('b', { deferRender: true })
@@ -192,4 +206,103 @@ test('R2 loadPdf 并发：晚到的旧请求自行销毁，不覆盖新文档', 
   assert.equal(T.getPdfDoc(), docs.b, '旧文档不得覆盖新文档')
   assert.ok(log.includes('task-destroy:a'), '晚到的旧任务必须自行 destroy')
   assert.ok(!log.includes('destroy:b'), '当前文档不得被旧请求误释放')
+})
+
+/* ══════════ 阅读器：双视图缓存 / 无缝切换 ══════════ */
+
+function prepReader(getDocument, docs) {
+  const r = loadReaderWithDocs(getDocument)
+  const { t: T, doc } = r
+  doc.getElementById('pdf-pane').clientHeight = 800
+  doc.getElementById('pdf-pane').clientWidth = 1000
+  doc.getElementById('pdf-pane-zh').clientHeight = 800
+  doc.getElementById('pdf-pane-zh').clientWidth = 1000
+  T.setEnsure(async () => {})
+  T.setCurrent({ topic: 't', name: 'p' })
+  T.setVariant(null)
+  T.setView('orig')
+  T.setPageMode('scroll')
+  T.setFit(false)
+  T.setZoom(1)
+  T.setEq({ source: 'none', reason: null, bboxSpace: 'normalized-1000', equations: [] })
+  T.setPdfDoc(docs.orig)
+  return r
+}
+
+test('V1 预加载译文后切换：不重新 getDocument/不重画，节点原样换入', async () => {
+  const log = []
+  const docs = { orig: stubDoc('orig', log), zh: stubDoc('zh', log) }
+  let loads = 0
+  const getDocument = ({ url }) => {
+    loads++
+    const key = String(url).includes('variant=zh') ? 'zh' : 'orig'
+    return { promise: Promise.resolve(docs[key]), destroy: async () => log.push('task-destroy:' + key) }
+  }
+  const { t: T } = prepReader(getDocument, docs)
+  T.setEq({
+    source: 'mineru-local', reason: null, bboxSpace: 'normalized-1000',
+    equations: [{ id: 'e1', index: 1, page: 1, latex: '\\alpha', bbox: [10, 10, 50, 50] }],
+  })
+  T.setFit(false)
+  await T.renderAllPages()          // 首帧原文
+  const beforeNodes = T.getChildren().length
+  assert.equal(beforeNodes, 2, '原文应渲染 2 页')
+  assert.equal(T.getEqByPage().get(1)?.length, 1, '原文首帧应写入公式几何')
+  await T.preloadView('zh')          // 空闲预渲染译文（此时原文仍是活动视图）
+  assert.ok(T.getViewCache().has('zh'), '预加载完成后必须有 zh 缓存')
+  assert.equal(loads, 1, '预加载只 getDocument 一次')
+  assert.equal(T.getEqByPage().get(1)?.length, 1, '预渲染译文不得清掉原文列的公式几何')
+
+  assert.equal(await T.activateView('zh'), true)
+  assert.equal(T.getActiveKey(), 'zh')
+  assert.equal(T.getPdfDoc(), docs.zh)
+  assert.equal(T.getChildren().length, 2, '应换上预加载的 2 个页节点')
+  assert.equal(loads, 1, '切换不得再 getDocument')
+  assert.equal(T.getEqByPage().size, 0, '译文视图不得命中原文公式几何')
+
+  assert.equal(await T.activateView('orig'), true)
+  assert.equal(T.getActiveKey(), 'orig')
+  assert.equal(T.getPdfDoc(), docs.orig)
+  assert.equal(T.getChildren().length, beforeNodes, '切回原文必须恢复原节点')
+  assert.equal(T.getEqByPage().get(1)?.length, 1, '切回原文必须恢复公式几何')
+  assert.equal(loads, 1, '来回切换都不得重新加载')
+})
+
+test('V2 未预加载时首次切换加载并渲染；之后来回切换零加载', async () => {
+  const log = []
+  const docs = { orig: stubDoc('orig', log), zh: stubDoc('zh', log) }
+  let loads = 0
+  const getDocument = ({ url }) => {
+    loads++
+    const key = String(url).includes('variant=zh') ? 'zh' : 'orig'
+    return { promise: Promise.resolve(docs[key]), destroy: async () => log.push('task-destroy:' + key) }
+  }
+  const { t: T } = prepReader(getDocument, docs)
+  T.setFit(false)
+  await T.renderAllPages()
+  assert.equal(await T.activateView('zh'), true)
+  assert.equal(loads, 1, '首次切译文只加载一次')
+  assert.equal(T.getActiveKey(), 'zh')
+  assert.equal(T.getChildren().length, 2)
+  await T.activateView('orig')
+  await T.activateView('zh')
+  assert.equal(loads, 1, '缓存命中后不得重新加载')
+})
+
+test('V3 resetViewCache 只释放非活动文档（GC），活动文档留给 loadPdf/调用方', async () => {
+  const log = []
+  const docs = { orig: stubDoc('orig', log), zh: stubDoc('zh', log) }
+  const getDocument = ({ url }) => {
+    const key = String(url).includes('variant=zh') ? 'zh' : 'orig'
+    return { promise: Promise.resolve(docs[key]), destroy: async () => log.push('destroy:' + key) }
+  }
+  const { t: T } = prepReader(getDocument, docs)
+  T.setFit(false)
+  await T.renderAllPages()
+  await T.activateView('zh') // 保存 orig、加载 zh
+  assert.equal(T.getActiveKey(), 'zh')
+  await T.resetViewCache()
+  assert.ok(log.includes('destroy:orig'), '非活动的原文文档必须被释放')
+  assert.ok(!log.includes('destroy:zh'), '活动文档不得被 reset 误释放（由调用方负责）')
+  assert.equal(T.getActiveKey(), 'zh', 'reset 只清缓存，不擅自改活动视图')
 })
