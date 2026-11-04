@@ -9,6 +9,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { TranslateEndpoint } from './translate.ts'
 import { dshHome } from './library.ts'
+import { isOpenCodeEndpoint, openCodeSessionHeaders, openCodeSessionId } from './opencode.ts'
 // 预检会把端点响应体片段拼进错误文案，必须先脱敏（否则端点回显 Authorization 时 key 会泄露）。
 // 这里复用 MinerU 客户端里已经过三轮评审的 sanitizeDetail（含 URL 编码 / JSON 转义 / 短 key
 // 词边界处理）。mineru.ts 运行时只 import node:zlib（对 mineru-config.ts 是 type-only import），
@@ -97,10 +98,16 @@ export function maskApiKey(key: string): string {
 export async function testTranslateEndpoint(ep: TranslateEndpoint): Promise<{ ok: boolean; detail?: string }> {
   const { baseUrl, apiKey, model } = ep
   if (!baseUrl || !apiKey || !model) return { ok: false, detail: '端点配置不完整（需要 url + key + 模型）' }
+  // OpenCode Go 的预检请求也要带会话头（文档要求每次推理请求都带）；其它端点空对象，零行为变化
+  const headers: Record<string, string> = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }
+  if (isOpenCodeEndpoint(baseUrl)) {
+    const sessionId = await openCodeSessionId(`translate-precheck:${baseUrl.replace(/\/+$/, '')}|${model}`)
+    Object.assign(headers, openCodeSessionHeaders(baseUrl, sessionId))
+  }
   try {
     const r = await fetch(baseUrl.replace(/\/+$/, '') + '/chat/completions', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      headers,
       // max_tokens:1 —— 只要能证明鉴权与模型名有效，不产生实际费用
       body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 }),
       signal: AbortSignal.timeout(15_000),

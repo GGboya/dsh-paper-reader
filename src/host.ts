@@ -82,6 +82,7 @@ import {
 } from './mineru-config.ts'
 import { noteOrigin } from './origin.ts'
 import { deleteNote, isNoteError, readNotes, upsertNote } from './notes.ts'
+import { isOpenCodeEndpoint, openCodeSessionId } from './opencode.ts'
 
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse
@@ -953,8 +954,12 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       }
       const index = await readTextBlockIndex(ref)
       const asm = assembleSource(chunks, index)
+      // OpenCode Go：同一篇论文的划词翻译共用一个稳定会话 ID（与整篇译文同一 scope）
+      const ocSession = isOpenCodeEndpoint(endpoint.baseUrl)
+        ? await openCodeSessionId(`paper:${ref.topic}/${ref.name}`)
+        : ''
       try {
-        const r = await translateSelection(endpoint, asm.source)
+        const r = await translateSelection(endpoint, asm.source, ocSession ? { openCodeSessionId: ocSession } : {})
         json(res, 200, {
           translation: r.translation,
           model: r.model,

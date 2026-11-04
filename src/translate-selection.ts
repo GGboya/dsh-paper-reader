@@ -18,6 +18,7 @@
 import { createHash } from 'node:crypto'
 import { compactLatex, type TextBlockIndex } from './formulas.ts'
 import { sanitizeDetail } from './mineru.ts'
+import { isOpenCodeEndpoint, openCodeSessionHeaders, openCodeSessionId } from './opencode.ts'
 import type { TranslateEndpoint } from './translate.ts'
 
 /* ── 冻结参数表（§3.4；调参必须回改需求文档）────────────────────────────── */
@@ -741,6 +742,11 @@ export interface TranslateSelectionDeps {
   fetchImpl?: FetchLike
   timeoutMs?: number
   cache?: TranslateSelectionCache
+  /**
+   * OpenCode Go 的稳定会话 ID。宿主按「同一篇论文」传入（同一篇论文的划词翻译共用一个）；
+   * 省略时按「端点 + 模型」派生（同一端点稳定）。仅在端点指向 opencode.ai 时才会用到。
+   */
+  openCodeSessionId?: string
   /** 便于测试与排障留痕；默认 no-op，只打印白名单字段 */
   log?: (info: { model: string; status: number; ms: number; chars: number }) => void
 }
@@ -787,7 +793,12 @@ export async function translateSelection(
 
   const fetchImpl = (deps.fetchImpl ?? (globalThis.fetch as FetchLike))
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions'
-  const headers = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }
+  const headers: Record<string, string> = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }
+  if (isOpenCodeEndpoint(baseUrl)) {
+    // OpenCode Go 要求每次推理请求都带稳定的会话 ID：同一篇论文跨请求、跨重启都不变
+    const sessionId = deps.openCodeSessionId ?? await openCodeSessionId(`translate-selection:${baseUrl.replace(/\/+$/, '')}|${model}`)
+    Object.assign(headers, openCodeSessionHeaders(baseUrl, sessionId))
+  }
   const started = Date.now()
   const send = async (body: Record<string, unknown>): Promise<Response> => {
     try {

@@ -68,7 +68,9 @@ function runPython(code) {
       // -B：不写 __pycache__（VC1 守卫会把 runtime/ 下多出来的东西当越界改动）
       return { out: execFileSync(bin, ['-I', '-B', '-c', code], { encoding: 'utf8', timeout: 20000 }) }
     } catch (e) {
-      if (e.code === 'ENOENT') continue
+      // ENOENT：没装；status：找到了但起不来（Windows 的 python3.exe 常是应用商店占位符，
+      // 探测直接 exit 9009）。两种情况都按「本机没有可用 python」跳过，不把环境问题判成红。
+      if (e.code === 'ENOENT' || typeof e.status === 'number') continue
       throw e
     }
   }
