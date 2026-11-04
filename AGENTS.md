@@ -53,6 +53,9 @@ src/
   babeldoc-install.ts 纯函数：无 Python 环境时自动安装 babeldoc（uv → 托管 Python → venv）
   translate-selection.ts 纯函数：划词翻译（公式保留——行内公式与 MinerU 块文本对齐还原、提示词契约、逐公式保全校验、内存 LRU）
   rerank.ts     纯函数：search_paper 语义重排（TypeSafe/Jev，无凭据时退回关键词排序）
+  notes.ts      纯函数：文献级笔记（`<论文>.notes.json` 读写、anchor 只当不透明区间校验）
+  origin.ts     纯函数：从插件路由的 Host 头捕获 dsh web 服务外部地址（工具输出链接基址）
+  opencode.ts   纯函数：OpenCode Go 端点识别 + x-opencode-session 稳定会话 ID（0600 secret 派生，scope 明文不落盘；非 opencode.ai 端点零行为变化）
 cordis.patch.yml      bundle 声明插件本体 + 可选「论文伴读」agent preset（dsh-agent-preset；persona 完整提示词 + compaction）
 reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）
 lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管) + PDF 页签 + 主面板

@@ -72,6 +72,8 @@ That bubble has **no** "insert into chat" and **no** "copy" button, and the plug
 | 3 | An artifact exists but one passage could not be aligned | Only the alignable parts are restored; the bubble says "some formulas could not be restored" |
 | 4 | A very short selection (fewer than 4 effective characters, e.g. the lone `F`) | No restoration (not enough signal); the bubble says "selection too short, formula not restored" |
 
+**OpenCode Go endpoints**: the "OpenCode Go" provider preset (`https://opencode.ai/inference/go/openai/v1`) requires an OpenCode Console subscription and its API key; model names follow the console (the preset list is only an input suggestion). Go asks every inference request to carry a stable `x-opencode-session` ID, and for `opencode.ai` endpoints the plugin **sends it automatically** on all three LLM paths (selection translate, whole-paper Chinese version, and the pre-save connection test). Whole-paper and selection translation share one ID per paper, stable across restarts; the ID is derived from a random 0600 secret under `$DSH_HOME/.dsh-paper-reader/` and **contains neither the paper name nor the key**. Other endpoints are unaffected — not a single extra header.
+
 **Known limitations (stated plainly, not glossed over)**:
 
 - **No request has ever been sent to a real LLM endpoint**: all development verification used a fake upstream (to avoid spending money and to avoid using your key). "Does the model really keep formulas verbatim" is backed by two decidable assertions — a **byte-level prompt contract** and a **per-formula check on the reply** — but there is no end-to-end run against a real provider key.
