@@ -22,6 +22,7 @@ import {
   caseVariantCollisions,
   encodedEscapeError,
   assertInside as assertInsideShared,
+  existingEntryName,
   isPaperDir,
   isPaperPDF,
   listPapers,
@@ -1111,6 +1112,27 @@ export function sameFileForRename(src: FileIdentity, dst: FileIdentity, sameEntr
 }
 
 /**
+ * 两个路径是否指向**同一个目录项**（大小写-only 改名在大小写不敏感盘上的放行判据）。
+ * 不能用 `realpathSync(a) === realpathSync(b)`：macOS 的 realpath 保留**请求拼写**（不归一成
+ * 磁盘真名），`…/OldName` 与 `…/oldname` 字符串恒不等 ⇒ case-only 改名在 macOS 被误判冲突
+ * （PR#8 集成时 macOS 实测）。
+ * 也不能只比 `(dev, ino)`：**hardlink 的两个目录项就是同一个 inode**，会把 C4 要拦的
+ * 「同 inode 不同目录项」放行成覆盖。同一目录项的判据是：同一父目录内、fold 匹配到
+ * **同一个磁盘真名**（existingEntryName）；exFAT/SMB 上 ino 恒 0 的一贯保守口径由
+ * sameFileForRename 承担（文件场景），这里只判目录项同一性。
+ */
+export function samePathEntity(a: string, b: string): boolean {
+  const pa = dirname(a)
+  const pb = dirname(b)
+  if (pa !== pb) return false // 不同父目录：不可能是同一目录项的两个拼写
+  try {
+    return existingEntryName(pa, basename(a)) === existingEntryName(pb, basename(b))
+  } catch {
+    return false // 父目录不可读 → 保守按冲突（与原 realpath 失败分支同语义）
+  }
+}
+
+/**
  * 重命名文献（新布局）：**先整体 rename 论文目录** `<old>/` → `<new>/`，再在目录内把
  * `<old><后缀>` 逐个改名为 `<new><后缀>`（方案 §B1.3 #13）。
  * 两步之间不原子 ⇒ 中途失败按逆序回滚（内部文件名 → 目录名），并如实报 `rename-partial`/`file-busy`。
@@ -1131,8 +1153,9 @@ export function renamePaper(dataDir: string, topic: unknown, name: unknown, newN
   const targetDir = join(topicDir, newName)
   if (existsSync(targetDir)) {
     // 大小写-only 改名（同一目录）放行
-    let same = false
-    try { same = realpathSync(targetDir) === realpathSync(paperDirAbs) } catch { /* 目标不可读 → 视为冲突 */ }
+    // macOS realpath 保留请求拼写、字符串比较恒不等（case-only 改名在 macOS 曾被误拦）；
+    // 「同一目录项」由 samePathEntity 判（同父目录 + fold 同一磁盘真名）
+    const same = samePathEntity(targetDir, paperDirAbs)
     if (!same) throw new ManageError('target-exists', 409, `已存在同名文献：${newName}`, { conflicts: [newName] })
   }
 
@@ -1154,8 +1177,7 @@ export function renamePaper(dataDir: string, topic: unknown, name: unknown, newN
     let sameFile = false
     try {
       const srcStat = lstatSync(srcAbs)
-      let sameEntry = false
-      try { sameEntry = realpathSync(srcAbs) === realpathSync(dstAbs) } catch { /* 任一路径不可解析 → 保守判冲突 */ }
+      const sameEntry = samePathEntity(srcAbs, dstAbs)
       sameFile = sameFileForRename(srcStat, targetStat, sameEntry)
     } catch { /* 源不可读 → 按冲突处理 */ }
     if (!sameFile) innerClash.push(toName)
@@ -1243,7 +1265,7 @@ function renameLegacyPaper(dataDir: string, topicDir: string, paperName: string,
     if (!existsSync(target)) continue
     let same = false
     try {
-      same = realpathSync(target) === realpathSync(join(topicDir, f.name))
+      same = samePathEntity(target, join(topicDir, f.name))
     } catch { /* 目标不可读 → 视为冲突 */ }
     if (!same) clash.push(basename(target))
   }

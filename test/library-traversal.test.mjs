@@ -126,19 +126,15 @@ test('正常功能零回归：中文专题、空格与 .-_ 名、大小写改名
   assert.ok(r1.length >= 1)
   assert.ok(existsSync(join(data, '默认专题 2', 'Renamed-2.0_new.pdf')))
 
-  // 大小写改名：按**实测**的文件系统大小写敏感性分支（不硬编码 darwin）
-  //  · 敏感（ext4）：改名成功；
-  //  · 不敏感（APFS/NTFS）：`casea.pdf` 与 `CaseA.pdf` 同一文件 → 409 target-exists（上游认可的正确行为）。
+  // 大小写改名：按**实测**的文件系统大小写敏感性分支（不硬编码 darwin）。
+  // 修复轮裁定（R5-C4-CASEONLY，取代早前「不敏感盘一律 409」）：大小写-only 改名是
+  // **同一目录项的重新拼写**，两个平台都放行；不敏感盘上 existsSync 折叠拼写恒 true，
+  // 断言用 readdir 的磁盘真名（放行后真名换成新拼写）。
   writeFileSync(join(data, '默认专题 2', 'CaseA.pdf'), 'case')
-  if (caseInsensitiveFs) {
-    assert.throws(() => L.renamePaper(data, '默认专题 2', 'CaseA', 'casea'), (e) => e?.code === 'target-exists',
-      '大小写不敏感 FS 上应 409 target-exists')
-    assert.ok(existsSync(join(data, '默认专题 2', 'CaseA.pdf')), '冲突时源文件必须原样')
-  } else {
-    const r2 = L.renamePaper(data, '默认专题 2', 'CaseA', 'casea')
-    assert.ok(r2.includes('CaseA.pdf'))
-    assert.ok(existsSync(join(data, '默认专题 2', 'casea.pdf')))
-  }
+  const r2 = L.renamePaper(data, '默认专题 2', 'CaseA', 'casea')
+  assert.ok(r2.includes('CaseA.pdf'))
+  const names2 = readdirSync(join(data, '默认专题 2'))
+  assert.ok(names2.includes('casea.pdf') && !names2.includes('CaseA.pdf'), `磁盘真名必须是新拼写：${names2.join(',')}`)
 })
 
 test('路由层：越界 topic 返回 400 可读文案，且不泄露 dataDir 绝对路径', async () => {

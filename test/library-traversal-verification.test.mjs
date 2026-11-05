@@ -698,14 +698,11 @@ test('V11 正常功能：多变体产物删除 / 精确 stem / 中文专题 / �
   //    · 大小写不敏感（APFS 默认 / NTFS）：`casea.pdf` 与 `CaseA.pdf` 是同一个文件 → 产物名逐个
   //      命中「已存在」→ 409 target-exists。上游对同类的原话是「源码返回 409 是对的，补平台分支即可」。
   writeFileSync(join(dir2, 'CaseA.pdf'), 'c')
-  if (caseInsensitiveFs) {
-    assert.throws(() => L.renamePaper(w.data, 'T', 'CaseA', 'casea'), (e) => e?.code === 'target-exists',
-      '大小写不敏感 FS 上应 409 target-exists（上游认可的正确行为）')
-    assert.ok(existsSync(join(dir2, 'CaseA.pdf')), '冲突时源文件必须原样')
-  } else {
-    assert.deepEqual(L.renamePaper(w.data, 'T', 'CaseA', 'casea'), ['CaseA.pdf'])
-    assert.ok(existsSync(join(dir2, 'casea.pdf')))
-  }
+  // 修复轮裁定（R5-C4-CASEONLY）：大小写-only 改名 = 同一目录项的重新拼写，两平台都放行；
+  // 不敏感盘上 existsSync 折叠拼写恒 true，断言用 readdir 的磁盘真名。
+  assert.deepEqual(L.renamePaper(w.data, 'T', 'CaseA', 'casea'), ['CaseA.pdf'])
+  const caseNames = readdirSync(dir2)
+  assert.ok(caseNames.includes('casea.pdf') && !caseNames.includes('CaseA.pdf'), `磁盘真名必须是新拼写：${caseNames.join(',')}`)
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

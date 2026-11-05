@@ -105,7 +105,9 @@ test('C4 接线：renamePaper 逐文件预检必须调用 sameFileForRename（�
   assert.ok(end > start)
   const seg = src.slice(start, end)
   assert.match(seg, /sameFileForRename\(srcStat, targetStat, sameEntry\)/, '预检必须走纯函数（ino/dev 守卫）')
-  assert.match(seg, /realpathSync\(srcAbs\) === realpathSync\(dstAbs\)/, '例外还必须要求「同一目录项」')
+  // 例外判据随 macOS 集成修复更新：realpathSync 字符串相等在 macOS 保留请求拼写、恒不等；
+  // 「同一目录项」改由 samePathEntity 判（同父目录 + fold 同一磁盘真名，hardlink 判不同目录项）
+  assert.match(seg, /samePathEntity\(srcAbs, dstAbs\)/, '例外还必须要求「同一目录项」')
   assert.ok(!/targetStat\.ino === srcStat\.ino/.test(seg), '绝不能再裸比 ino（ino=0 平台会误放行覆盖）')
 })
 
@@ -160,7 +162,12 @@ test('create-topic 大小写变体 → 409 点名磁盘真名（ext4 不再并�
     )
     if (insensitive) {
       // 平台事实（不硬编码平台名）：不敏感盘上两个拼写本来就是同一个目录别名（旧实现 200 假成功）。
-      assert.equal(realpathSync(join(data, 'Alpha', 'casetopic')), realpathSync(join(data, 'Alpha', 'CaseTopic')))
+      // macOS realpath 保留**请求拼写**（不归一成磁盘真名），直接字符串比较恒不等；
+      // 不敏感盘上 fold 相等即同一实体，按小写归一比较。
+      assert.equal(
+        realpathSync(join(data, 'Alpha', 'casetopic')).toLowerCase(),
+        realpathSync(join(data, 'Alpha', 'CaseTopic')).toLowerCase(),
+      )
     } else {
       // 平台事实：敏感盘上旧行为会并存两个目录；我们仍统一拒绝（与 upload B4 口径一致，避免分裂）。
       assert.equal(existsSync(join(data, 'Alpha', 'casetopic')), false)

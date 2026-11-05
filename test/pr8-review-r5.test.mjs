@@ -182,7 +182,9 @@ test('R5-C4-CASEONLY 合法的大小写-only 论文改名仍放行（不得被 C
     const r = M.renamePaper(data, 'T', 'OldName', 'oldname')
     assert.equal(r.ok, true, '大小写-only 改名是合法操作（同一次改名映射回自身），必须放行')
     assert.equal(existsSync(join(data, 'T', 'oldname', 'oldname.pdf')), true, `落点必须是新大小写：${JSON.stringify(readdirSync(join(data, 'T')))}`)
-    assert.equal(existsSync(join(data, 'T', 'OldName')), false, '旧名目录必须消失')
+    // existsSync 在大小写不敏感盘上折叠拼写（OldName 命中 oldname 恒 true）；
+    // 断言磁盘真名层面旧拼写消失（readdir 返回的是目录项真名）
+    assert.equal(readdirSync(join(data, 'T')).includes('OldName'), false, '旧名目录必须消失')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -205,9 +207,13 @@ test('R5-CREATE-CASE 已存在仅大小写不同的同级专题 ⇒ 409 + 点名
     assert.match(r.txt, /CaseTopic/, `错误文案必须点名磁盘真名：${r.txt}`)
     assert.deepEqual(snap(data), before, '被拒的创建不得改动文献库')
     if (CASE_INSENSITIVE) {
-      // 不敏感盘：两个拼写本来就是同一个目录别名（旧实现的 200 是假成功）
-      assert.equal(realpathSync(join(data, 'Alpha', 'casetopic')), realpathSync(join(data, 'Alpha', 'CaseTopic')),
-        '不敏感盘上 casetopic 与 CaseTopic 必须是同一目录实体')
+      // 不敏感盘：两个拼写本来就是同一个目录别名（旧实现的 200 是假成功）。
+      // macOS realpath 保留请求拼写（不归一成磁盘真名），按小写归一比较；fold 相等即同一实体。
+      assert.equal(
+        realpathSync(join(data, 'Alpha', 'casetopic')).toLowerCase(),
+        realpathSync(join(data, 'Alpha', 'CaseTopic')).toLowerCase(),
+        '不敏感盘上 casetopic 与 CaseTopic 必须是同一目录实体',
+      )
     } else {
       assert.equal(existsSync(join(data, 'Alpha', 'casetopic')), false, '敏感盘上绝不许建出第二个大小写变体')
     }

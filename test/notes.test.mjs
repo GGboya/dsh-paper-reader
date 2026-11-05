@@ -300,7 +300,8 @@ test('N11 renamePaper / deletePaper：笔记跟着改名、跟着进回收站（
     const res = deletePaper(root, 't', 'p2')
     assert.ok(res.moved.includes('p2.notes.json'), '删除必须回收笔记')
     const bundle = join(root, '.trash', res.trashRel.replace(/^\.trash[\\/]/, ''))
-    assert.ok(existsSync(join(bundle, 'p2.notes.json')), '笔记应可在回收站恢复')
+    // PR#8 F3：回收站保留论文名层级 `<bundle>/<论文名>/<文件>`（manifest.trashSubdir 同口径）
+    assert.ok(existsSync(join(bundle, 'p2', 'p2.notes.json')), '笔记应可在回收站恢复')
     assert.ok(existsSync(join(root, 't', 'q.pdf')), '别的文献不受影响')
   } finally {
     rmSync(root, { recursive: true, force: true })

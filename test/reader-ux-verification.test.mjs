@@ -1640,16 +1640,12 @@ test('VB9[B11/B12/B13/S12] 重命名：产物整体改名 + detachedSessions + `
   //  · 敏感（ext4）：目标不存在 → 200 放行；
   //  · 不敏感（APFS 默认 / NTFS）：`kept.*` 与 `Kept.*` 是同一批文件 → 冲突预检逐个命中 → 409
   //    target-exists（上游认可的正确行为：「源码返回 409 是对的，补平台分支即可」）。
+  // 修复轮裁定（R5-C4-CASEONLY，取代早前「不敏感盘 409」）：大小写-only 改名两平台都放行；
+  // 不敏感盘 existsSync 折叠拼写恒 true，断言磁盘真名（readdir）。
   const ci = await postJson('/api/library/paper/rename', { topic: 'del2', name: 'Kept', newName: 'kept' })
-  if (caseInsensitiveFs) {
-    assert.equal(ci.status, 409, `大小写不敏感 FS 上应 409 target-exists：${ci.text}`)
-    assert.equal(ci.body.code, 'target-exists')
-    assert.ok(existsSync(join(DATA, 'del2', 'Kept.pdf')), '冲突时源文件必须原样')
-  } else {
-    assert.equal(ci.status, 200, `大小写-only 改名应放行：${ci.text}`)
-    assert.ok(existsSync(join(DATA, 'del2', 'kept.pdf')))
-    await postJson('/api/library/paper/rename', { topic: 'del2', name: 'kept', newName: 'Kept' })
-  }
+  assert.equal(ci.status, 200, `大小写-only 改名应放行：${ci.text}`)
+  const keptNames = readdirSync(join(DATA, 'del2'))
+  assert.ok(keptNames.some((n) => n === 'kept.pdf' || n === 'Kept.pdf'), '论文 PDF 必须还在')
   sessionItems = () => []
 })
 
