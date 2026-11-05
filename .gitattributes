@@ -1,0 +1,15 @@
+# 统一换行：仓库内文本文件一律以 LF 存储与检出。
+# 背景：仓库此前没有任何换行策略，整棵树被工具按 CRLF 重写过一次（99 文件假 diff），
+# 而 test/windows-esm-guard.test.mjs C4 明确要求 reader/index.html 的 <script> 提取与行尾无关。
+* text=auto eol=lf
+
+# 二进制资源：不要做行尾转换与文本 diff
+*.png binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
