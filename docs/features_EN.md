@@ -10,6 +10,10 @@ The README lists only the core capabilities; prerequisites, costs, known limitat
 - [Selection translation (formulas preserved)](#selection-translation-formulas-preserved)
 - [Notes](#notes)
 - [Bilingual split view (two modes)](#bilingual-split-view-two-modes)
+- [PDF dark mode](#pdf-dark-mode)
+- [Per-paper folders (incl. old-library migration)](#per-paper-folders-incl-old-library-migration)
+- [Nested subtopics](#nested-subtopics)
+- [Scoped asking](#scoped-asking)
 - [Library management details](#library-management-details)
 
 ## Guided reading & stage checks
@@ -132,9 +136,44 @@ Two toolbar buttons; switch any time and **click again to return to the original
 - **Width**: the split view needs a panel at least **640px** wide; narrower, clicking "分屏" only explains and does **not** switch. Shrinking below 640px while split falls back to the original automatically.
 - **Interaction with existing features**: while split, the left pane is the ordinary original view — **formula hotspots stay clickable** (the right pane neither participates in hit-testing nor gets a hotspot layer), the formula panel keeps working, and the "中" toggle is disabled during split (to avoid conflicting semantics). Switching to the Chinese / dual view still disables hotspots, exactly as before (the bbox only holds for original pages).
 
+## PDF dark mode
+
+When dsh switches to its dark theme, the PDF reading area follows (**follow** is the default). The settings panel and the reader's "A" toolbar button share one config — changing either applies everywhere.
+
+- **Four strength presets**: levels 0–3 from measured curves (white maps to 0 / 6 / 13 / 19), plus brightness / contrast sliders (0.5–1, overriding the preset); theme options are follow / never dark / force light / force dark.
+- **How it works & the cost**: whole-page inversion with hue rotation back — **not a content-aware true night mode**. Photos, figures, and colour charts visibly desaturate and shift (measured: pure red `[255,0,0]` becomes pink `[229,134,134]`). For figure-heavy pages, switch it off temporarily (one click).
+- **Downloads/exports are always the original bytes**: inversion happens only on screen.
+
+## Per-paper folders (incl. old-library migration)
+
+The new layout gathers every artifact of a paper into one folder `<topic>/<paper>/`: the `.pdf`, translation variants, transcript, study file, and notes all live there, and rename/delete moves the whole folder together.
+
+An existing flat library (artifacts loose in the topic folder) **does not need manual moving**:
+
+- The in-app migration entry produces a **dry-run report first** (which files move, any conflicts); nothing happens until you confirm.
+- The migration is **idempotent, interruptible, and revertible**: copy-first-then-delete, any interruption can be resumed by re-running; every step is logged, and one `--rollback` restores everything along the log.
+- CLI form: `npm run migrate` (i.e. `node dist/migrate.js`), flags `--data-dir <dir>`, `--dry-run` (default; read-only, changes nothing) / `--apply` / `--rollback <log>`, `--yes`, `--no-hash`; usage errors exit 64, and a corrupt migration log **fails loudly pointing at the line** instead of the classic "rolled back 0 files" false success.
+- Running transcriptions or translations block migration (409 busy); execution yields the event loop file-by-file and does not freeze other requests.
+
+## Nested subtopics
+
+Topics can contain subtopics to any depth (limits: 16 levels, 100 chars per segment); rename and move-under-another-parent are supported.
+
+- Deleting a non-empty topic still goes through the clear-plan + typed-name confirmation: the plan lists every paper in the **entire subtree**, and any paper with a running session or in-flight translation blocks the delete (409) — you never see just the first level.
+- Creating / renaming / uploading runs **collision prechecks**: hitting an existing paper folder, old flat-layout artifacts, or a same-name-different-case object is a 409 naming the real on-disk entry — data is never silently shadowed.
+- Over-long topic names from old libraries (beyond current limits) can still be **deleted, renamed, and cleared** (boundary operations skip the length limit); you just cannot create new structures with those names.
+
+## Scoped asking
+
+When asking, you can pick a scope: **this paper** (default) or **this topic (including all subtopics)**. Only that scope's directory contents and retrieval hits reach the model; out-of-scope content never appears.
+
+- **Honest budget**: body text + hit fragments share a 40,000-character cap, manifests cap at 2,000; truncation is marked per paper (`full` / `truncated` / `omitted-no-room`…), and wholesale omissions say exactly who was omitted — no silent shrinking.
+- **Honest name conflicts**: same-named papers inside a scope (different subtopics) are both explicitly omitted (`omitted-duplicate`) with reasons — one is never quietly picked over the other.
+- **Missing scopes error**: a topic that was renamed or deleted returns 404 rather than assembling an empty-but-normal-looking scope.
+
 ## Library management details
 
-- Deletion = **moved to trash** `data/.trash/<timestamp>/` (with a manifest); move files back into the topic folder to recover. No auto-cleanup or one-click restore UI in this version
+- Deletion = **moved to trash** `data/.trash/<timestamp>/` (with a manifest); move files back into the paper folder to recover. No auto-cleanup or one-click restore UI in this version
 - Files moved to trash = the paper's same-named artifacts: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, `.notes.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is **not** deleted (it lives in dsh's session store)
 - **Preconditions**: deletion/rename is refused while the paper has a running session, a translation in progress, or another delete/rename in flight
 - **Safety boundary**: deletes/renames only ever touch the library directory; path traversal (`..`, absolute paths, symlink escapes) is rejected; a mid-way failure rolls back already-moved files

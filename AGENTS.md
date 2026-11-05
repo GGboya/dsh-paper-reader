@@ -41,7 +41,10 @@ src/
   host.ts       webServer 路由（/paper-reader/*），connection.requestRejection 鉴权；
                 sessionController.create/prompt + follow SSE 桥（论文入口不默认套用 preset）
   library.ts    纯函数：文献库目录约定与解析（.txt/.pages.json/.transcript.json/.mineru.* 产物路径）
-  library-manage.ts 纯函数：删除/重命名（回收站、精确 stem、路径穿越防护、批量清空）
+  library-manage.ts 纯函数：删除/重命名（回收站、精确 stem、路径穿越防护、批量清空）；嵌套专题边界（boundaryOnly 不查长度上限）、碰撞预检（论文目录祖先/平铺产物/大小写变体）
+  migrate.ts    纯函数：旧平铺布局 → 按论文分文件夹迁移（干跑报告/先复制后删/幂等可复跑/按日志回滚；CLI 默认 dry-run、退出码契约、坏日志逐行显式报错）
+  theme-config.ts 纯函数：PDF 深色模式配置（follow/off/light/dark + 四档强度 + brightness/contrast 滑杆，0600）
+  scope.ts      纯函数：按范围提问（专题子树展开、正文+命中预算 40k 逐篇 coverage、同名 omitted-duplicate、cutToCodePoint re-export）
   transcribe.ts 纯函数：pdf.js 提取 + 页码偏移表 + MinerU 后端选择与缓存来源语义
   mineru.ts     纯函数：MinerU 客户端（本地 /tasks 轮询；mineru.net v4 云端 + 最小 ZIP 读取器）
   mineru-config.ts / embed-config.ts / translate-config.ts / typesafe-config.ts 纯函数：各端点配置读写（0600）+ 预检
@@ -81,6 +84,7 @@ lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管)
 ## 数据与目录约定
 
 - 文献库默认 `~/.dsh-paper-reader/data`，可在 profile 的 `cordis.patch.yml` 改（可直指 pdfqa 的 `data/` 复用缓存）。
+- 布局：专题可嵌套（`<专题>/<子专题>/…`，上限 16 层）；每篇论文的全部产物收进 `<专题>/<论文>/` 一个文件夹。旧平铺库**兼容读**（`listPapers` 带 `legacy: true`，同名时文件夹优先），新写入一律落论文文件夹；旧库由迁移工具收纳（`npm run migrate`，默认 dry-run）。
 - 文献产物命名：`<文献>.pdf/.txt/.pages.json/.transcript.json/.mineru.md/.mineru.json/.embeddings.json/.study.json/.notes.json`，译文变体 `<文献>-en.pdf/-zh.pdf/-dual.pdf`（中断残留 `.tmp-*`）。
 - 删除 = 移入 `data/.trash/<时间戳>/`（带 manifest，可手工恢复）；路径穿越（`..`/绝对路径/符号链接逃逸）一律拒绝；中途失败自动回滚。
 

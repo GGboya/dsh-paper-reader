@@ -93,7 +93,7 @@ import {
   writeMineruConfig,
 } from './mineru-config.ts'
 // preset 已随 dsh 0.2.x 迁移到 cordis.patch.yml 声明式注册（main a675b9f）：
-// host 不再 installPaperPreset，session 创建也不默认套用 agentPreset。
+// host 不再安装 preset，会话创建也不默认套用任何 preset。
 import {
   MigrationAborted,
   MigrationError,
