@@ -10,6 +10,7 @@ The README lists only the core capabilities; prerequisites, costs, known limitat
 - [Selection translation (formulas preserved)](#selection-translation-formulas-preserved)
 - [Notes](#notes)
 - [Bilingual split view (two modes)](#bilingual-split-view-two-modes)
+- [Long-document performance & view switching](#long-document-performance--view-switching)
 - [Library management details](#library-management-details)
 
 ## Guided reading & stage checks
@@ -131,6 +132,23 @@ Two toolbar buttons; switch any time and **click again to return to the original
 - **Synchronised scrolling**: scrolling either pane moves the other to the **same page + same in-page ratio**; whichever pane you are scrolling leads, so the two never fight each other. In paged mode (`▣`) both panes show the same page. **If the Chinese PDF has a different page count, the panes are mapped proportionally** and a one-off notice appears in the status bar.
 - **Width**: the split view needs a panel at least **640px** wide; narrower, clicking "分屏" only explains and does **not** switch. Shrinking below 640px while split falls back to the original automatically.
 - **Interaction with existing features**: while split, the left pane is the ordinary original view — **formula hotspots stay clickable** (the right pane neither participates in hit-testing nor gets a hotspot layer), the formula panel keeps working, and the "中" toggle is disabled during split (to avoid conflicting semantics). Switching to the Chinese / dual view still disables hotspots, exactly as before (the bbox only holds for original pages).
+
+## Long-document performance & view switching
+
+Aimed at papers of dozens or hundreds of pages, and at reading that keeps flipping between the original and the Chinese version.
+
+- **Lazy rendering while scrolling**: in scroll mode with 12+ pages, only pages near the viewport (roughly one and a half screens of margin above and below) get a canvas and text layer; the rest stay as **equal-height placeholders** — so the scrollbar length and page numbers are correct from the start and never grow while you scroll. Pages that leave the viewport release their canvas bitmap (formula hotspots are invalidated with them and rebuilt on return), so long documents no longer accumulate memory as you scroll.
+- **Paged mode** already renders only the current page; documents under 12 pages still render in full (faster, and no placeholder flicker).
+- **Switching between original and Chinese no longer reloads**: each view (original / Chinese / bilingual) keeps its own cache of already-painted page nodes, so switching just re-attaches the DOM — no re-parsing the PDF, no repainting; zoom, page number, scroll position and formula geometry come back with it. When idle the translation is pre-rendered into a hidden pane, so even the first switch is usually instant.
+- **Switching language or reopening a paper no longer re-sends the PDF**: `/api/pdf` sends an `ETag` (file mtime + size) and `Last-Modified`, so the browser gets a 304 on a hit; **re-translating changes the file and therefore the ETag**, so you never see a stale translation.
+
+**Known limits (stated plainly)**：
+
+- Lazy rendering is scroll-mode only; where `IntersectionObserver` is unavailable it falls back to full rendering — never to blank pages.
+- Text on placeholder pages is not in the DOM, but **find-in-document is unaffected** — its index is built on the pdf.js text layer rather than the DOM, so the whole paper stays searchable and a jump paints the target page first.
+- There is a brief empty placeholder between a page entering the viewport and being painted; that is the cost of on-demand rendering, and not pre-rendering farther pages is what keeps memory in check.
+- Formula hotspots and note underlines exist only for **painted pages**; they are filled in when you scroll back or jump.
+- Very long bilingual documents (e.g. a `-dual.pdf` with doubled page width) held in the view cache at the same time noticeably raise memory use; switching papers releases inactive documents automatically.
 
 ## Library management details
 
