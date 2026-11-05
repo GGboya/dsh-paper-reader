@@ -63,13 +63,19 @@ function locate(dataDir: string, args: LocateArgs, exec?: { agent?: { id?: strin
   return resolvePaper(dataDir, refArgs)
 }
 
-/** 从伴读会话 id 反解论文（dpr-<base64url(topic/name)>[-N]）；非伴读会话返回 null。 */
+/**
+ * 从伴读会话 id 反解论文（dpr-<base64url(topic/name)>[-N]）；非伴读会话返回 null。
+ *
+ * **必须 lastIndexOf('/')**：topic 是**路径**（嵌套子专题 `A/B`），只有论文名保证不含 `/`。
+ * 用第一个 `/` 切会把 `A/B/P` 解成 topic=`A` / name=`B/P`（PR #8 评审必修 A：深度 ≥2 的论文
+ * 「不带 name 提问」时全都报「找不到 B/P」）。扁平 `T/P` 与非法 id（无 `/`、空 name、末尾 `/`）语义不变。
+ */
 export function paperFromSessionId(sessionId: string | undefined): { topic: string; name: string } | null {
   if (!sessionId?.startsWith('dpr-')) return null
   try {
     const body = sessionId.slice(4).replace(/-\d+$/, '')
     const decoded = Buffer.from(body, 'base64url').toString('utf8')
-    const sep = decoded.indexOf('/')
+    const sep = decoded.lastIndexOf('/')
     if (sep <= 0 || sep === decoded.length - 1) return null
     return { topic: decoded.slice(0, sep), name: decoded.slice(sep + 1) }
   } catch {

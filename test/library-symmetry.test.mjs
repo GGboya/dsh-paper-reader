@@ -85,13 +85,15 @@ test('R7：upload 能创建的边界名字（控制字符/前导点/超长/空�
     for (const n of names) {
       const r = await postRaw('/api/library/upload', pdf, { 'x-dpr-topic': 'T', 'x-dpr-name': encodeURIComponent(n) })
       assert.equal(r.status, 200, `upload ${JSON.stringify(n.slice(0, 20))} 应 200：${r.status} ${r.txt}`)
-      assert.ok(existsSync(join(w.data, 'T', n)), `upload 后 ${n.slice(0, 20)} 应落盘`)
+      // 布局改造后：落点是 <topic>/<论文名>/<论文名>.pdf（论文名 = 文件名去 .pdf）
+      assert.ok(existsSync(join(w.data, 'T', n.slice(0, -4), n)), `upload 后 ${n.slice(0, 20)} 应落盘`)
     }
     // 逐个删除必须成功（delete 只做边界类校验）
     for (const n of names) {
       const stem = n.slice(0, -4)
       const r = await postJson('/api/library/delete-paper', { topic: 'T', name: stem })
       assert.equal(r.status, 200, `delete ${JSON.stringify(stem.slice(0, 20))} 应 200：${r.status} ${r.txt}`)
+      assert.ok(!existsSync(join(w.data, 'T', stem)), `delete 后 ${stem.slice(0, 20)} 的论文文件夹应消失`)
       assert.ok(!existsSync(join(w.data, 'T', n)), `delete 后 ${n.slice(0, 20)} 应消失`)
     }
   } finally { srv.close() }

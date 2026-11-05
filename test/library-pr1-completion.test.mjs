@@ -120,14 +120,15 @@ test('R2：upload 的 x-dpr-topic 越界/符号链接全部 4xx，库外递归�
     const ok1 = await postRaw2('/api/library/upload', pdf, { 'x-dpr-topic': 'T', 'x-dpr-name': 'Legit.pdf' })
     assert.equal(ok1.status, 200, ok1.txt)
     assert.equal(ok1.body.name, 'Legit')
-    assert.equal(readFileSync(join(w.data, 'T', 'Legit.pdf'), 'utf8'), 'X'.repeat(200))
+    // 布局改造后：上传落点是**论文文件夹** <topic>/<论文名>/<论文名>.pdf
+    assert.equal(readFileSync(join(w.data, 'T', 'Legit', 'Legit.pdf'), 'utf8'), 'X'.repeat(200))
 
     const zhTopic = encodeURIComponent('默认专题')
     const ok2 = await postRaw2('/api/library/upload', pdf, { 'x-dpr-topic': zhTopic, 'x-dpr-name': encodeURIComponent('中文.pdf') })
     assert.equal(ok2.status, 200, ok2.txt)
     assert.equal(ok2.body.topic, '默认专题')
     assert.equal(ok2.body.name, '中文')
-    assert.equal(readFileSync(join(w.data, '默认专题', '中文.pdf'), 'utf8'), 'X'.repeat(200))
+    assert.equal(readFileSync(join(w.data, '默认专题', '中文', '中文.pdf'), 'utf8'), 'X'.repeat(200))
   } finally { srv2.close() }
 })
 

@@ -135,8 +135,10 @@ test('R14：已有丑名字（前导点/控制字符）的文献仍能被改名�
     for (const [from, to] of pairs) {
       const r = await postJson('/api/library/rename-paper', { topic: 'T', name: from, to })
       assert.equal(r.status, 200, `rename ${JSON.stringify(from)} → ${to} 应 200：${r.status} ${r.txt}`)
-      assert.ok(existsSync(join(w.data, 'T', to + '.pdf')), `改名后 ${to}.pdf 应存在`)
-      assert.ok(!existsSync(join(w.data, 'T', from + '.pdf')), `旧名 ${from}.pdf 应消失`)
+      // 布局改造后：论文是一个文件夹 <topic>/<论文名>/，改名 = 文件夹改名 + 内部文件名改名
+      assert.ok(existsSync(join(w.data, 'T', to, to + '.pdf')), `改名后 ${to}/${to}.pdf 应存在`)
+      assert.ok(!existsSync(join(w.data, 'T', from)), `旧论文文件夹 ${from}/ 应消失`)
+      assert.ok(!existsSync(join(w.data, 'T', from + '.pdf')), `旧名 ${from}.pdf 不应再存在`)
     }
   } finally { srv.close() }
 })
@@ -154,6 +156,7 @@ test('R7 对称性复核：文献上传后列表可见、删除后磁盘消失',
     assert.ok(list.body.papers.some((p) => p.topic === 'T' && p.name === 'SymmetryCheck'), '上传后应列表可见')
     const del = await postJson('/api/library/delete-paper', { topic: 'T', name: 'SymmetryCheck' })
     assert.equal(del.status, 200, del.txt)
-    assert.ok(!existsSync(join(w.data, 'T', 'SymmetryCheck.pdf')), '删除后磁盘应消失')
+    assert.ok(!existsSync(join(w.data, 'T', 'SymmetryCheck')), '删除后论文文件夹应从磁盘消失')
+    assert.ok(!existsSync(join(w.data, 'T', 'SymmetryCheck', 'SymmetryCheck.pdf')), '删除后 PDF 应消失')
   } finally { srv.close() }
 })

@@ -283,7 +283,8 @@ test('T5 upload：≥6 种恶意 topic 全 4xx 带 code、快照零变化；符�
   try { symlinkSync(OUTSIDE, join(DATA, 'link-topic'), 'dir') } catch { /* 已存在 */ }
   const before = snap(DATA)
   const beforeOut = snap(OUTSIDE)
-  const evil = ['..', '../x', '/abs-topic', 'a/b', 'a\\b', '.hidden-topic', 'x\u0000topic', 'a..b']
+  // ⚠️ `a/b` 不再是恶意输入（topic 升级为相对路径，逐段校验）；换成真正会逃逸的 `a/../b`
+  const evil = ['..', '../x', '/abs-topic', 'a/../b', 'a\\b', '.hidden-topic', 'x\u0000topic', 'a..b']
   for (const topic of evil) {
     const r = await api('/api/library/upload', {
       method: 'POST',
@@ -310,7 +311,8 @@ test('T5 upload：≥6 种恶意 topic 全 4xx 带 code、快照零变化；符�
   })
   assert.equal(ok.status, 200, ok.text)
   assert.equal(ok.body.name, 'My Paper')
-  assert.ok(existsSync(join(DATA, 'ok-topic', 'My Paper.pdf')))
+  // 布局改造后：落点是 <topic>/<论文名>/<论文名>.pdf
+  assert.ok(existsSync(join(DATA, 'ok-topic', 'My Paper', 'My Paper.pdf')))
 })
 
 /* ── T6 弹窗「不删清单」与 delete-plan 同源 ─────────────────────────────── */
@@ -401,7 +403,7 @@ test('T9 不变式未回退：穿越输入全 4xx、`.pdf` 最后移、回收站
   assert.equal(del.body.moved[del.body.moved.length - 1], 'Victim.pdf', '`.pdf` 必须最后移')
   const bundle = join(DATA, '.trash', String(del.body.trashRel).replace(/^\.trash[\\/]/, ''))
   assert.ok(existsSync(join(bundle, 'manifest.json')))
-  assert.ok(existsSync(join(bundle, 'Victim.pdf')), '回收站里应能找到被删的 PDF（可恢复）')
+  assert.ok(existsSync(join(bundle, 'Victim', 'Victim.pdf')), '回收站里应能找到被删的 PDF（论文名层级，可恢复）')
   assert.deepEqual(readdirSync(dir), [])
   assert.deepEqual(diffSnap(beforeOut, snap(OUTSIDE)), [], '库外目录零变化')
   assert.equal(readFileSync(sentinelOut, 'utf8'), 'untouched')

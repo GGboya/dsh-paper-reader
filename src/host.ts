@@ -2,14 +2,22 @@
 // 壳层代码：只做 HTTP ↔ 纯函数核心(library/transcribe)的转接。
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createReadStream, existsSync, readFileSync, realpathSync } from 'node:fs'
+import { createReadStream, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { basename, join, resolve } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { PluginConfig } from './tools.ts'
 import {
+  caseVariantCollisions,
+  existingEntryName,
+  flatArtifactNames,
+  isPaperDir,
   listPapers,
+  listTopicTree,
   listTopics,
+  paperDirAncestor,
+  paperPdfPath,
+  paperRefFor,
   resolveDataDir,
   resolvePaper,
   resolveUploadTopic,
@@ -32,8 +40,12 @@ import {
   renameTopic,
   resolveTopicDir,
   validateName,
+  validateTopicPath,
+  type TopicClearPaperPlan,
+  type TopicClearUnit,
 } from './library-manage.ts'
 import { readFormulaIndex, readTextBlockIndex } from './formulas.ts'
+import { buildScopeContext, type AskScope } from './scope.ts'
 import {
   MAX_CHUNKS,
   MAX_LATEX_CHARS,
@@ -80,9 +92,28 @@ import {
   testMineruLocal,
   writeMineruConfig,
 } from './mineru-config.ts'
+// preset 已随 dsh 0.2.x 迁移到 cordis.patch.yml 声明式注册（main a675b9f）：
+// host 不再 installPaperPreset，session 创建也不默认套用 agentPreset。
+import {
+  MigrationAborted,
+  MigrationError,
+  formatMigrationReport,
+  lastMigrationLog,
+  migrationLogDir,
+  planMigration,
+  rollbackMigration,
+  runMigrationAsync,
+} from './migrate.ts'
 import { noteOrigin } from './origin.ts'
 import { deleteNote, isNoteError, readNotes, upsertNote } from './notes.ts'
 import { isOpenCodeEndpoint, openCodeSessionId } from './opencode.ts'
+import {
+  clearThemeConfig,
+  readThemeConfig,
+  themePayload,
+  validateThemePatch,
+  writeThemeConfig,
+} from './theme-config.ts'
 
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse
@@ -263,6 +294,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
 
   /** 专题目录 → dsh 工作区（幂等，进程内缓存）。会话挂到工作区后原生 composer 才可用。 */
   const workspaceCache = new Map<string, string>()
+  /** 删/改/清空一个专题（可能是路径）后，把**整棵子树**的工作区缓存键清掉（方案 §B2.4）。 */
+  const dropWorkspaceCache = (topicPath: string) => {
+    const base = join(dataDir, ...topicPath.split('/').filter(Boolean))
+    const prefix = base.endsWith(sep) ? base : base + sep
+    for (const k of [...workspaceCache.keys()]) {
+      if (k === base || k.startsWith(prefix)) workspaceCache.delete(k)
+    }
+  }
   const ensureTopicWorkspace = async (topic: string): Promise<string | undefined> => {
     const dir = join(dataDir, topic)
     const cached = workspaceCache.get(dir)
@@ -385,6 +424,49 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
   }
 
+  /** 正在转录的文献（`topic\u0000name`）：/migrate 的 busy 门用（评审 E3）。 */
+  const activeTranscribes = new Set<string>()
+
+  /**
+   * 该范围（或其子树）是否有写操作在途。读路径**不阻塞**（方案 §B3.2：fail-soft），
+   * 只在提示里如实说「正在被修改，本次只给了 N 篇」。
+   *
+   * 修 G3（评审 G 次级）：inflight 的 key 是 `paper\u0000<topic>\u0000<name>` /
+   * `topic\u0000<topicPath>`，旧实现拿 `scopePath`（`topic/name`，斜杠分隔）做 `k.includes(...)`
+   * ⇒ paper 范围**永远匹配不上**，busy 提示是死代码。现在先把 key 解析成「被操作的路径」再做
+   * 双向前缀判定：范围包含在途操作（自己的子树正在被改）或被在途操作包含（祖先专题正在被
+   * 清空/改名/迁移）。`migrate` 在途同样视为「正在被修改」（它确实在动整个库的文件）。
+   */
+  const scopeBusy = (scopePath: string): boolean => {
+    for (const k of inflight) {
+      const parts = k.split('\u0000')
+      let subject: string | null = null
+      if (parts[0] === 'migrate') return true
+      if (parts[0] === 'topic' && parts.length === 2) subject = parts[1] ?? null
+      else if (parts[0] === 'paper' && parts.length === 3) subject = `${parts[1] ?? ''}/${parts[2] ?? ''}`
+      if (!subject) continue
+      if (subject === scopePath || subject.startsWith(scopePath + '/') || scopePath.startsWith(subject + '/')) return true
+    }
+    return false
+  }
+
+  /** 全库在飞译文（评审 E3 的 busy 门）：迁移会搬走这些论文的产物，必须等它们完成。 */
+  const translationBusyPapers = (): string[] => {
+    const out: string[] = []
+    for (const p of listPapers(dataDir)) {
+      try {
+        if (zhStatus(paperRefFor(dataDir, p.topic, p.name)).busy) out.push(`${p.topic}/${p.name}`)
+      } catch { /* 读不到的单篇不阻塞迁移（迁移自己会如实报 unreadable/冲突） */ }
+    }
+    return out
+  }
+
+  /** 清空单元树 → 逐篇清单（评审 D：占用巡检与确认清单都必须覆盖整棵子树，不能只看根层 papers）。 */
+  const flattenClearPapers = (unit: TopicClearUnit): TopicClearPaperPlan[] => [
+    ...unit.papers,
+    ...unit.subtopics.flatMap((s) => flattenClearPapers(s)),
+  ]
+
   /** 「文献不存在」的统一出口：404 + 不含服务端绝对路径的文案（原先普通 Error 会冒泡成 500 并带路径）。 */
   const notFound = (what: string) => new ManageError('not-found', 404, what)
 
@@ -480,8 +562,11 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
 
     if (sub === '/api/library' && req.method === 'GET') {
-      const papers = listPapers(dataDir).map((p) => ({ ...p, pdfPath: join(dataDir, p.topic, p.name + '.pdf') }))
-      json(res, 200, { dataDir, topics: listTopics(dataDir), papers })
+      // F-C：pdfPath 必须按**该篇实际所在布局**给（新布局论文夹 / 旧布局平铺）。
+      // 写死新布局会让未迁移旧库里的平铺论文 pdfPath 指向不存在的路径（直接影响用户现在正在用的库）。
+      const papers = listPapers(dataDir).map((p) => ({ ...p, pdfPath: paperPdfPath(dataDir, p.topic, p.name) }))
+      // topics 保持「一级子目录」语义（既有调用方/测试），新增 tree = 完整嵌套树（子专题 UI 用）
+      json(res, 200, { dataDir, topics: listTopics(dataDir), papers, tree: listTopicTree(dataDir) })
       return
     }
 
@@ -491,9 +576,45 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     if (sub === '/api/library/topic' && req.method === 'POST') {
       const body = (await readBody(req)) as { name?: string }
       try {
-        const name = validateName(body.name, 'topic')
+        // name 是**相对路径**（`A` / `A/B`）：逐段词法校验 + 「已存在的祖先必须是库内真目录」。
+        // mkdir(recursive) 天然能一次建多级（方案 §B2.2「天然建多级」）；这里挡的是父链里**已存在**的那几段
+        // ——符号链接 / 指向库外的段一律拒（不隐式穿越），不存在的段交给 mkdir 创建。
+        const name = validateTopicPath(body.name, false)
         const root = realDataDir(dataDir)
-        const dir = join(root, name)
+        const segs = name.split('/')
+        const leaf = segs[segs.length - 1]!
+        const parentSegs = segs.slice(0, -1)
+        // C1（评审 C1）：已存在的祖先段若是**论文目录** → 409。论文目录不能再当专题父：
+        // listPapers 在论文目录处停止递归，在其下新建的专题会整体从列表/树/范围提问里消失。
+        const paperParent = paperDirAncestor(root, parentSegs)
+        if (paperParent) {
+          throw new ManageError('target-exists', 409, `父级是论文目录，不能在其下创建专题：${paperParent}`, { conflicts: [paperParent] })
+        }
+        // C2（评审 C2）：同层已有同名**旧平铺论文**产物 → 409。建出同名目录后「文件夹优先」规则
+        // 会把旧平铺论文永久遮蔽（列表/树看不见、planPaperDelete 404、产物从 API 不可删）。
+        // 只看 topic 内部（parentSegs 非空）：dataDir 根层的平铺文件不是文献，不构成遮蔽。
+        if (parentSegs.length > 0) {
+          const flat = flatArtifactNames(join(root, ...parentSegs), leaf)
+          if (flat.length > 0) {
+            throw new ManageError('target-exists', 409, `同层已有旧布局论文：${flat.join('、')}（请先迁移或改名，否则它会被同名专题遮蔽）`, { conflicts: flat })
+          }
+        }
+        // 评审 REV1-① / t11：目标同级已有**仅大小写不同**的条目 ⇒ 409 并点名磁盘真名。
+        // 不敏感盘上 mkdir 会命中既有目录别名（旧实现 return 200 = 假成功）；敏感盘上会并存
+        // `CaseTopic` + `casetopic` 两个近同名专题。upload 已经拒这类（B4），此处对齐同一口径。
+        const caseClash = caseVariantCollisions(join(root, ...parentSegs), leaf)
+        if (caseClash.length > 0) {
+          throw new ManageError('target-exists', 409, `同层已有仅大小写不同的同名对象：${caseClash.join('、')}（大小写不敏感的文件系统上会互相吞掉）`, { conflicts: caseClash })
+        }
+        for (let i = 1; i < segs.length; i++) {
+          if (!existsSync(join(root, ...segs.slice(0, i)))) break
+          resolveTopicDir(dataDir, segs.slice(0, i).join('/'))
+        }
+        const dir = join(root, ...segs)
+        // 目标本身已是论文目录（嵌套层）→ 409：它在列表里会被当成论文，永远不是可用的专题。
+        if (parentSegs.length > 0 && isPaperDir(dir)) {
+          throw new ManageError('target-exists', 409, `已存在同名论文：${leaf}（不能当专题）`, { conflicts: [leaf] })
+        }
         // 已存在 → 必须是真目录且不是符号链接（与 upload 同一条链路）；不存在 → 词法层已保证不越界
         if (existsSync(dir)) resolveTopicDir(dataDir, name)
         else assertInside(root, dir)
@@ -514,9 +635,11 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: '缺少 x-dpr-topic / x-dpr-name 头', code: 'bad-request' })
         return
       }
-      // 词法层：与其余 CRUD 同强度（../ / \ 隐藏名 控制字符 超长 空串）
-      const errName = validateEntryName(topic)
-      if (errName) { json(res, 400, { error: errName, code: 'bad-name' }); return }
+      // 词法层：topic 是**相对路径**，逐段同强度校验（../ / \ 隐藏名 控制字符 超长 空串/层级上限）
+      let topicPath: string
+      try {
+        topicPath = validateTopicPath(topic, false)
+      } catch (err) { if (!manageFail(res, err)) throw err; return }
       if (!filename.toLowerCase().endsWith('.pdf')) {
         json(res, 400, { error: '只支持 PDF 文件', code: 'bad-request' })
         return
@@ -532,12 +655,54 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       // 顺序：目标目录的全部校验都在**读 body 之前**——越界目标不消费请求体、不碰盘。
       let dir: string
       try {
-        dir = resolveUploadTopic(dataDir, topic)
+        dir = resolveUploadTopic(dataDir, topicPath)
       } catch (err) { json(res, 400, { error: readableError(err), code: 'escape-rejected' }); return }
       // 我们的加严：上游放行「real 落在库内」的符号链接专题，我们一律拒（评审 §B 点名表扬）。
       try {
-        if (existsSync(dir)) resolveTopicDir(dataDir, topic.trim())
+        if (existsSync(dir)) resolveTopicDir(dataDir, topicPath)
         else assertInside(realDataDir(dataDir), dir)
+      } catch (err) {
+        if (libFail(res, err)) return
+        throw err
+      }
+      // ── 写侧布局碰撞预检（评审 B/C1）：**在消费请求体之前**完成（既有约定：越界/碰撞目标不读 body、不碰盘）──
+      // ① C1：topic 路径上任何一段（第 2 段起）已是**论文目录** ⇒ 409。论文目录不会再被递归，
+      //    往里上传的新论文会从列表/树/范围提问里整体消失。
+      // ② B1/B2：目标 `<topicDir>/<stem>/` 已存在（子专题目录 / 论文目录 / 同名文件）⇒ 409。
+      //    把子专题变成论文目录会让其下论文整体消失；覆盖已有论文目录会吞数据。
+      // ③ B2：同层已有**旧平铺论文**同名产物（`<stem>.pdf/.txt/.study.json/...`）⇒ 409。
+      //    「文件夹优先」规则会永久遮蔽它们（学习进度不可见、产物从 API 不可删）。
+      // ④ B3：仅大小写不同的同名目录 / 平铺文件 ⇒ 409，文案点名磁盘上的真实冲突对象。
+      try {
+        const root = realDataDir(dataDir)
+        const paperSeg = paperDirAncestor(root, topicPath.split('/'))
+        if (paperSeg) {
+          throw new ManageError('target-exists', 409, `专题路径落在论文目录里，不能上传：${paperSeg}`, { conflicts: [paperSeg] })
+        }
+        const targetPaperDir = join(dir, stem)
+        let targetStat: ReturnType<typeof lstatSync> | null = null
+        try { targetStat = lstatSync(targetPaperDir) } catch { /* 目标尚不存在 → 继续查同层产物 */ }
+        if (targetStat) {
+          const actual = existingEntryName(dir, stem)
+          if (targetStat.isSymbolicLink()) {
+            throw new ManageError('escape-rejected', 400, `路径越界：目标论文路径是符号链接，已拒绝：${actual}`)
+          }
+          if (targetStat.isDirectory()) {
+            if (isPaperDir(targetPaperDir)) {
+              throw new ManageError('target-exists', 409, `已存在同名论文目录：${actual}（上传会覆盖/合并它）`, { conflicts: [actual] })
+            }
+            throw new ManageError('target-exists', 409, `已存在同名子专题：${actual}（上传会把它变成论文目录，其下文献将整体消失）`, { conflicts: [actual] })
+          }
+          throw new ManageError('target-exists', 409, `已存在同名文件：${actual}（上传会覆盖它）`, { conflicts: [actual] })
+        }
+        const flat = flatArtifactNames(dir, stem)
+        if (flat.length > 0) {
+          throw new ManageError('target-exists', 409, `同层已有旧布局论文产物：${flat.join('、')}（新建论文文件夹会把它永久遮蔽，请先迁移）`, { conflicts: flat })
+        }
+        const caseVariants = caseVariantCollisions(dir, stem)
+        if (caseVariants.length > 0) {
+          throw new ManageError('target-exists', 409, `同层已有仅大小写不同的同名对象：${caseVariants.join('、')}（大小写不敏感的文件系统上会互相吞掉）`, { conflicts: caseVariants })
+        }
       } catch (err) {
         if (libFail(res, err)) return
         throw err
@@ -550,10 +715,11 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         return
       }
       try {
-        await mkdir(dir, { recursive: true })
-        await writeFile(join(dir, safeName), buf)
+        // 新布局（方案 §B1.3 #20）：先建**论文文件夹** `<topicDir>/<论文名>/`，PDF 落在里面
+        await mkdir(join(dir, stem), { recursive: true })
+        await writeFile(join(dir, stem, safeName), buf)
       } catch (err) { fsError(res, err); return }
-      json(res, 200, { ok: true, topic: topic.trim(), name: stem, bytes: buf.length })
+      json(res, 200, { ok: true, topic: topicPath, name: stem, bytes: buf.length })
       return
     }
 
@@ -581,6 +747,20 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       if (!err) return false
       json(res, 400, { error: err, code: 'bad-name' })
       return true
+    }
+
+    /**
+     * 专题**路径**的入参门（方案 §B2.2）：topic 升级为相对路径（`A` / `A/B`）后，**全部** topic
+     * 入参统一走这里——先逐段词法校验、再解析真目录，禁止保留两套并存的入参语义
+     * （否则会出现「同一个 topic 在 clear-plan 能过、在 clear 过不了」的不对称）。
+     */
+    const badTopicPath = (res: Res, raw: unknown, boundaryOnly: boolean): string | null => {
+      try {
+        return validateTopicPath(raw, boundaryOnly)
+      } catch (err) {
+        if (!manageFail(res, err)) throw err
+        return null
+      }
     }
 
     // 删除预览（dry-run）：确认弹窗的文件清单必须来自这里，不许前端自己拼
@@ -616,9 +796,11 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // 别名 = /api/library/paper/delete。词法门走 badEntry(topic) + badEntryBoundary(name)。
     if ((sub === '/api/library/delete-paper' || sub === '/api/library/paper/delete') && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }
-      if (badEntry(res, body.topic) || badEntryBoundary(res, body.name)) return
+      if (badEntryBoundary(res, body.name)) return
       if (rejectWritePath(body, res)) return
-      await withInflight(`${String(body.topic ?? '')}\u0000${String(body.name ?? '')}`, res, async () => {
+      const topicPath = badTopicPath(res, body.topic, true)
+      if (topicPath === null) return
+      await withInflight(`paper\u0000${topicPath}\u0000${String(body.name ?? '')}`, res, async () => {
         try {
           const plan = planPaperDelete(dataDir, body.topic, body.name)
           const ref = resolveLibraryPaper(plan.topic, plan.name)
@@ -642,9 +824,11 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     if ((sub === '/api/library/rename-paper' || sub === '/api/library/paper/rename') && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; newName?: string; to?: string; path?: string }
       const rawTo = body.newName ?? body.to
-      if (badEntry(res, body.topic) || badEntryBoundary(res, body.name) || badEntry(res, rawTo)) return
+      if (badEntryBoundary(res, body.name) || badEntry(res, rawTo)) return
       if (rejectWritePath(body, res)) return
-      await withInflight(`${String(body.topic ?? '')}\u0000${String(body.name ?? '')}`, res, async () => {
+      const topicPath = badTopicPath(res, body.topic, true)
+      if (topicPath === null) return
+      await withInflight(`paper\u0000${topicPath}\u0000${String(body.name ?? '')}`, res, async () => {
         try {
           // 先校验名称/越界/存在（planPaperDelete 内部做全套检查）——不能先 resolvePaper：
           // 非法名会在那里抛出非 ManageError 的普通错误，被外层记成 500。
@@ -675,15 +859,16 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const body = (await readBody(req)) as { name?: string; topic?: string; confirmName?: string; path?: string }
       const rawName = typeof body.topic === 'string' && body.topic ? body.topic : body.name
       if (typeof rawName !== 'string' || rawName.length === 0) { badEntry(res, rawName); return }
-      if (badEntryBoundary(res, rawName)) return
+      const topicPath = badTopicPath(res, rawName, true)
+      if (topicPath === null) return
       // 词法门两段式（4 条路由都必须在文件系统操作之前过 badEntry，见 upstream V12 的结构性断言）：
       // ① badEntry（上游 #4 的 validateEntryName）挡**类型 / 空值**——非字符串、空串在任何模式下都非法；
       // ② 命名规范类（长度/前导点/非 NUL 控制字符）只对「创建 / 改名-to」强制；删除/改名-from
       //    走 badEntryBoundary（分层理由见其定义：历史遗留的不规范名必须能清掉，否则是删不掉的孤儿）。
       if (rejectWritePath(body, res)) return
-      await withInflight(`topic\u0000${String(rawName ?? '')}`, res, async () => {
+      await withInflight(`topic\u0000${topicPath}`, res, async () => {
         try {
-          const name = rawName
+          const name = topicPath
           // confirmName 是**可选**栅栏：给了就必须一致（400 confirm-mismatch）；没给也照走全部前置——
           // 空专题免确认（上游 delete-topic {topic} 契约：没有数据可毁），非空专题一律
           // 409 topic-not-empty（我们的加固，比上游「一点递归删光」保守，见 docs/reader-ux-requirements.md）。
@@ -707,7 +892,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           }
           if (busy > 0) throw new ManageError('translation-busy', 409, '该专题有正在生成译文的文献，请等待完成后再删除', {})
           const r = deleteTopic(dataDir, plan.name)
-          workspaceCache.delete(join(dataDir, plan.name))  // 清掉指向已删目录的工作区缓存
+          dropWorkspaceCache(plan.name)  // 清掉指向已删目录（含子树）的工作区缓存
           json(res, 200, { ...r, archivedSessionsNote: true })
         } catch (err) {
           if (!libFail(res, err)) throw err
@@ -722,13 +907,18 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const rawName = typeof body.topic === 'string' && body.topic ? body.topic : body.name
       const rawTo = body.newName ?? body.to
       if (typeof rawName !== 'string' || rawName.length === 0) { badEntry(res, rawName); return }
-      // from 侧同 delete-topic：badEntry 挡类型/空值，命名规范只在改名**目标**（badEntry(rawTo)）上强制
+      // from 侧同 delete-topic：先挡类型/空值，命名规范只在改名**目标**（to）上强制
       // ——这样「历史遗留的怪名专题 → 改成规范名」这条路不被自己的校验堵死。
-      if (badEntryBoundary(res, rawName) || badEntry(res, rawTo)) return
+      const topicPath = badTopicPath(res, rawName, true)
+      if (topicPath === null) return
+      // F4：`to` 是**路径**（`A/B`）——「移动到另一父」必须能走通。与 topic 创建/清空同一条门：
+      // 逐段命名规范类校验 + 深度/段长/总长上限 + 编码变形拒绝（绝不退回单段的 validateEntryName）。
+      const toPath = badTopicPath(res, rawTo, false)
+      if (toPath === null) return
       if (rejectWritePath(body, res)) return
-      await withInflight(`topic\u0000${String(rawName ?? '')}`, res, async () => {
+      await withInflight(`topic\u0000${topicPath}`, res, async () => {
         try {
-          const name = String(rawName ?? '')
+          const name = topicPath
           const plan = planTopicDelete(dataDir, name)      // 复用同一个「存在且合法」校验
           if (!(await requireTopicSessionsClear(plan.name, res))) return
           let busy = 0
@@ -744,8 +934,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
             if (zhStatus(ref).busy) busy++
           }
           if (busy > 0) throw new ManageError('translation-busy', 409, '该专题有正在生成译文的文献，请等待完成后再重命名', {})
-          const r = renameTopic(dataDir, plan.name, rawTo)
-          workspaceCache.delete(join(dataDir, plan.name))
+          const r = renameTopic(dataDir, plan.name, toPath)
+          dropWorkspaceCache(plan.name)
           // 响应补 `topic`（上游 UI/文档读法）——我们的 RenameResult 用 from/to
           json(res, 200, { ...r, topic: r.to, detachedSessions: detached })
         } catch (err) {
@@ -759,20 +949,28 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // 形状与 /api/library/paper/delete-plan 对齐（files/totalBytes/notDeleted），逐篇额外给
     // sessions/translation，让 UI 在用户点确认**之前**就能提示「第 7 篇正在翻译」。
     if (sub === '/api/library/topic/clear-plan' && req.method === 'GET') {
-      const topic = url.searchParams.get('topic') ?? ''
+      const rawTopic = url.searchParams.get('topic') ?? ''
       if (url.searchParams.get('path')) {
         json(res, 400, { error: '不接受 path 参数，请用 topic', code: 'escape-rejected' })
         return
       }
+      // topic 类路由统一入参门（与 delete/rename/clear 同一条）：逐段词法 + 编码变形 + 深度/长度上限
+      const topic = badTopicPath(res, rawTopic, true)
+      if (topic === null) return
       try {
         const plan = planTopicClear(dataDir, topic)
+        // D（评审 D2）：确认框必须逐篇列出**整棵子树**的论文。旧实现只遍历根层 `plan.papers`
+        // ⇒ 子专题里的论文不在「将删除什么」清单里，而 `papersCount` 却包含子树（两个数字自相矛盾，
+        // 用户在确认框里根本看不到要删的子专题论文）。
+        const allPapers = flattenClearPapers(plan)
         const papers = []
-        for (const p of plan.papers) {
-          const ref = resolveLibraryPaper(plan.topic, p.name)
+        for (const p of allPapers) {
+          const ref = resolveLibraryPaper(p.topic, p.name)
           const sessions = await sessionInfo(ref)
           const zh = zhStatus(ref)
           papers.push({
             name: p.name,
+            topic: p.topic,
             files: p.files,
             totalBytes: p.totalBytes,
             sessions: toWire(sessions),
@@ -782,10 +980,13 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 200, {
           topic: plan.topic,
           papers,
-          papersCount: plan.papersCount,
+          // 与清单严格一致（清单已含子树；两者相等，任一处漂移都会让确认框说谎）
+          papersCount: allPapers.length,
           filesCount: plan.filesCount,
           totalBytes: plan.totalBytes,
           hidden: plan.hidden,
+          subtopics: plan.subtopics.map((s) => ({ topic: s.topic, papersCount: s.papersCount, filesCount: s.filesCount, totalBytes: s.totalBytes })),
+          subtopicsCount: plan.subtopics.length,
           trashRoot: plan.trashRoot,
           notDeleted: plan.notDeleted,
           clearEndpoint: '/api/library/topic/clear',
@@ -804,33 +1005,121 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const body = (await readBody(req)) as { topic?: string; name?: string; confirmName?: string; path?: string }
       const rawTopic = typeof body.topic === 'string' && body.topic ? body.topic : body.name
       if (typeof rawTopic !== 'string' || rawTopic.length === 0) { badEntry(res, rawTopic); return }
-      if (badEntryBoundary(res, rawTopic)) return
+      const topicPath = badTopicPath(res, rawTopic, true)
+      if (topicPath === null) return
       if (rejectWritePath(body, res)) return
-      if (body.confirmName !== rawTopic) {
+      if (typeof body.confirmName !== 'string' || body.confirmName.trim() !== topicPath) {
         json(res, 400, { error: '需要 confirmName 与专题名完全一致才允许清空', code: 'confirm-mismatch' })
         return
       }
-      await withInflight(`topic\u0000${rawTopic}`, res, async () => {
+      await withInflight(`topic\u0000${topicPath}`, res, async () => {
         try {
-          const plan = planTopicClear(dataDir, rawTopic)   // 存在性 404 / 越界 400 / 符号链接专题 400
+          const plan = planTopicClear(dataDir, topicPath)   // 存在性 404 / 越界 400 / 符号链接专题 400
           if (plan.papersCount === 0) {
             throw new ManageError('bad-request', 400, '专题已为空，请用删除专题', { clearEndpoint: '/api/library/delete-topic' })
           }
           let detached = 0
           const busyTrans: string[] = []
-          for (const p of plan.papers) {
-            const ref = resolveLibraryPaper(plan.topic, p.name)
+          // D（评审 D1）：clearTopic 删的是**整棵子树**，占用巡检也必须遍历整棵子树。
+          // 旧实现只遍历根层 `plan.papers` ⇒ 子专题里有活跃会话/生成中译文的论文照删不误。
+          for (const p of flattenClearPapers(plan)) {
+            // 逐篇用**它自己的**专题路径定位（子树清空时根 topic 不再是每篇的父级）
+            const ref = resolveLibraryPaper(p.topic, p.name)
+            const label = p.topic === plan.topic ? p.name : `${p.topic}/${p.name}`
             if (!(await requireSessionClear(ref, res))) return   // unknown→503 / running→409（同一套 code）
             detached += (await sessionInfo(ref)).total
-            if (zhStatus(ref).busy) busyTrans.push(p.name)
+            if (zhStatus(ref).busy) busyTrans.push(label)
           }
           if (busyTrans.length > 0) {
             throw new ManageError('translation-busy', 409, `以下文献正在生成译文，请等待完成后再清空：${busyTrans.join('、')}`, { papers: busyTrans })
           }
           const r = clearTopic(dataDir, plan.topic)
-          workspaceCache.delete(join(dataDir, plan.topic))     // 清掉指向已清空目录的工作区缓存
+          dropWorkspaceCache(plan.topic)     // 清掉指向已清空目录（含子树）的工作区缓存
           json(res, 200, { ...r, detachedSessions: detached, archivedSessionsNote: true })
         } catch (err) {
+          if (!libFail(res, err)) throw err
+        }
+      })
+      return
+    }
+
+    /* ── 布局迁移（旧平铺 → 按论文分文件夹）：方案 §B1.2 的只读预检 + 显式执行 + 回滚 ──
+       铁律：默认**只读**；执行必须带 confirm=migrate-library（UI/CLI 先让人核对干跑报告）；
+       回滚日志必须在我们的 migration-logs 目录内（不认任意路径，防被当成任意文件读写口）。 */
+    if (sub === '/api/library/migrate-plan' && req.method === 'GET') {
+      try {
+        const plan = planMigration(dataDir)
+        json(res, 200, { ok: true, plan, report: formatMigrationReport(plan) })
+      } catch (err) {
+        if (!libFail(res, err)) throw err
+      }
+      return
+    }
+
+    if (sub === '/api/library/migrate' && req.method === 'POST') {
+      const body = (await readBody(req)) as { confirm?: string }
+      if (body.confirm !== 'migrate-library') {
+        json(res, 400, { error: '需要 confirm=migrate-library 才允许执行迁移（请先 GET /api/library/migrate-plan 人工核对报告）', code: 'confirm-mismatch' })
+        return
+      }
+      await withInflight('migrate\u0000library', res, async () => {
+        try {
+          // E3（评审 E）：迁移会搬动全库文件，与 delete/rename 同口径——对**在飞转录/译文**加 busy 门。
+          // 旧实现直接开跑：正在转录的临时产物会被当成论文产物复制/删除，正在翻译的论文也可能被搬走。
+          const transcribing = [...activeTranscribes].map((k) => k.split('\u0000').join('/'))
+          const translating = translationBusyPapers()
+          const busy = [...transcribing, ...translating]
+          if (busy.length > 0) {
+            throw new ManageError('busy', 409, `有文献正在转录/生成译文，请等待完成后再执行迁移：${busy.slice(0, 3).join('、')}${busy.length > 3 ? ' 等' : ''}`, { papers: busy })
+          }
+          // E3：用异步执行体（每复制/删除一个文件让出事件循环），大库迁移期间 PDF 流 / SSE / 读接口仍可响应。
+          const r = await runMigrationAsync(dataDir)
+          json(res, 200, r)
+        } catch (err) {
+          if (err instanceof MigrationAborted) {
+            json(res, 409, { ...err.detail, error: err.message, code: err.code })
+            return
+          }
+          if (err instanceof MigrationError) {
+            json(res, 409, { error: err.message, code: err.code })
+            return
+          }
+          if (!libFail(res, err)) throw err
+        }
+      })
+      return
+    }
+
+    if (sub === '/api/library/migrate-rollback' && req.method === 'POST') {
+      const body = (await readBody(req)) as { confirm?: string; logPath?: string }
+      if (body.confirm !== 'rollback-library') {
+        json(res, 400, { error: '需要 confirm=rollback-library 才允许回滚', code: 'confirm-mismatch' })
+        return
+      }
+      const logDir = migrationLogDir()
+      const logPath = body.logPath?.trim() || lastMigrationLog()
+      if (!logPath) {
+        json(res, 400, { error: '没有可用的迁移日志（请在 body 里给 logPath）', code: 'bad-request' })
+        return
+      }
+      // G（评审 G 次级）：旧判断用裸 `startsWith`（没有路径分隔符）——`<logDir>-evil/x.jsonl` 会被
+      // `<logDir>` 前缀误判通过（`/a/bc` 冒充 `/a/b` 的子路径）。用 relative 判定：必须在目录**内部**。
+      const relLog = relative(resolve(logDir), resolve(logPath))
+      if (!relLog || relLog === '..' || relLog.startsWith('..' + sep) || isAbsolute(relLog)) {
+        json(res, 400, { error: 'logPath 必须是迁移日志目录内的文件', code: 'escape-rejected' })
+        return
+      }
+      await withInflight('migrate\u0000library', res, async () => {
+        try {
+          const r = rollbackMigration(dataDir, logPath)
+          json(res, 200, r)
+        } catch (err) {
+          // E1：坏行/不可读日志是 MigrationError（带 migrate-log-* 机器码）。必须**如实**回答，
+          // 不能落到 fsError 的「系统错误，请稍后重试」把行号/原因吞掉（那又成了「假成功」的变体）。
+          if (err instanceof MigrationError) {
+            json(res, 409, { error: err.message, code: err.code })
+            return
+          }
           if (!libFail(res, err)) throw err
         }
       })
@@ -1196,6 +1485,36 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       return
     }
 
+    /* ── 阅读器深色模式配置（方案 §A2.3）：设置面板卡片与阅读器 ⚙ 浮层**共用同一个后端配置** ──
+       无密钥 ⇒ GET 直接回生效值 + 实测曲线（前端据此算 CSS 变量）；POST 严格校验后落盘；
+       DELETE 回落默认（follow）。 */
+    if (sub === '/api/theme/config' && req.method === 'GET') {
+      const cfg = await readThemeConfig()
+      json(res, 200, { ...themePayload(cfg), source: 'file' })
+      return
+    }
+
+    if (sub === '/api/theme/config' && req.method === 'POST') {
+      const body = (await readBody(req)) as Record<string, unknown>
+      let next
+      try {
+        const prev = await readThemeConfig()
+        next = validateThemePatch({ ...prev, ...(body as Record<string, unknown>) })
+      } catch (err) {
+        json(res, 400, { error: err instanceof Error ? err.message : '配置非法', code: 'bad-request' })
+        return
+      }
+      await writeThemeConfig(next)
+      json(res, 200, { ok: true, ...themePayload(next) })
+      return
+    }
+
+    if (sub === '/api/theme/config' && req.method === 'DELETE') {
+      await clearThemeConfig()
+      json(res, 200, { ok: true, ...themePayload(await readThemeConfig()) })
+      return
+    }
+
     // ── 嵌入模型端点配置（设置面板第三张端点卡片）─────────────────────────
     // 与 translate/typesafe 完全同一套约定：GET 只回掩码 key；POST 预检通过才落盘；DELETE 回落。
     if (sub === '/api/embed/config' && req.method === 'GET') {
@@ -1380,7 +1699,16 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       }
       const mineru = await resolveMineruConfig(config.mineru)
       const source: SourceArg = MINERU_SOURCES.has(body.source ?? 'auto') ? (body.source as SourceArg) : 'auto'
-      const t = await transcribePaper(ref, { force: body.force === true, source, mineru })
+      // E3：登记在飞转录 —— /migrate 会据此 409（与 delete/rename 的 busy 门同口径），
+      // 否则迁移可能复制/清理正在写的 `.tmp-*` 或半成品缓存。
+      const transcribeKey = `${ref.topic}\u0000${ref.name}`
+      activeTranscribes.add(transcribeKey)
+      let t
+      try {
+        t = await transcribePaper(ref, { force: body.force === true, source, mineru })
+      } finally {
+        activeTranscribes.delete(transcribeKey)
+      }
       json(res, 200, { chars: t.chars, pageCount: t.pageCount, hasPageIndex: t.pages.length > 0, source: t.source, producer: t.producer, backend: t.backend })
       return
     }
@@ -1439,6 +1767,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         equationIndex?: number      // 页内公式序号（仅 equation 时有意义）
         n?: number // 会话序号（会话1/会话2/…）；缺省进最新
         fresh?: boolean // true=强制新建一个会话（新建对话）
+        // 提问范围（方案 §B3）：缺省 = 当前论文（与改造前**逐字一致**）
+        scope?: { kind?: string; topic?: string; name?: string }
       }
       if (!body.question?.trim()) {
         json(res, 400, { error: 'question 不能为空' })
@@ -1462,6 +1792,32 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       try {
         await createPaperSession(sessionId, ref.topic)
       } catch { /* 已存在则复用 */ }
+      // ── 范围（方案 §B3.1）：缺省/无效一律按「当前论文」；给了非法结构则显式 400 ──
+      let scope: AskScope | null = null
+      if (body.scope !== undefined && body.scope !== null) {
+        const raw = body.scope
+        if (typeof raw !== 'object') { json(res, 400, { error: 'scope 必须是对象', code: 'bad-request' }); return }
+        if (raw.kind === 'paper') {
+          const args: { topic?: string; name?: string } = {}
+          if (raw.topic !== undefined) args.topic = raw.topic
+          if (raw.name !== undefined) args.name = raw.name
+          if (body.topic === undefined && args.topic === undefined && args.name === undefined) {
+            json(res, 400, { error: 'scope.kind=paper 需要 topic/name（或省略 scope 用当前论文）', code: 'bad-request' })
+            return
+          }
+          scope = { kind: 'paper', ...args }
+        } else if (raw.kind === 'topic') {
+          try {
+            scope = { kind: 'topic', topic: validateTopicPath(raw.topic, false) }
+          } catch (err) {
+            if (!manageFail(res, err)) throw err
+            return
+          }
+        } else {
+          json(res, 400, { error: "scope.kind 只能是 'paper' 或 'topic'", code: 'bad-request' })
+          return
+        }
+      }
       const hasQuote = typeof body.selectedText === 'string' && body.selectedText.trim() !== ''
       // 公式引用（kind='equation'）：引用内容来自 MinerU 的 LaTeX，不是文本层乱码（契约 §1.3）；
       // 非公式路径的文案必须与改造前逐字一致（回归项 A11）。
@@ -1478,6 +1834,31 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           `"""${body.selectedText!.trim()}"""`,
         )
       }
+      // 范围块：**追加**（不传 scope 时这段完全不存在 ⇒ 既有文案逐字不变，回归项 C2）
+      let scopeInfo: Record<string, unknown> | null = null
+      if (scope) {
+        try {
+          const ctx = buildScopeContext(dataDir, ref, scope, body.question)
+          lines.push(ctx.block)
+          if (scopeBusy(ctx.scopePath)) {
+            lines.push(`（提示：该范围内的目录正在被修改，本次只给了 ${ctx.papers.length - ctx.omitted} 篇）`)
+          }
+          scopeInfo = {
+            kind: scope.kind,
+            path: ctx.scopePath,
+            papers: ctx.papers.length - ctx.omitted,
+            omitted: ctx.omitted,
+            truncated: ctx.truncated,
+            chars: ctx.totalChars,
+            coverage: ctx.papers.map((p) => ({ path: p.path, coverage: p.coverage })),
+          }
+        } catch (err) {
+          if (isManageError(err)) { libFail(res, err); return }
+          // 读路径 fail-soft：范围装配失败不阻断提问，降级成「只说范围、不给内容」并如实标注
+          lines.push(`【提问范围】${scope.kind === 'topic' ? scope.topic : '当前论文'}（范围内容装配失败，已在无范围内容的情况下提问）`)
+          scopeInfo = { kind: scope.kind, path: scope.kind === 'topic' ? scope.topic : `${ref.topic}/${ref.name}`, degraded: true }
+        }
+      }
       lines.push(`用户的问题：${body.question}`)
       const prompt = lines.join('\n')
       await sc.prompt({
@@ -1485,7 +1866,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         content: [{ type: 'text', text: prompt }],
         requestId: randomUUID(),
       }, AbortSignal.timeout(30_000))
-      json(res, 200, { ok: true, sessionId, n })
+      json(res, 200, { ok: true, sessionId, n, ...(scopeInfo ? { scope: scopeInfo } : {}) })
       return
     }
 
