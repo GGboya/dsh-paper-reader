@@ -2384,6 +2384,10 @@ async function preloadView(key) {
   if (seq !== preloadSeq) return
   const wrap = $('split-wrap'), pane = $('pdf-pane-zh'), box = $('pdf-pages-zh')
   const prePage = Math.min(Math.max(1, curPage), doc.numPages)
+  // 预渲染用隐藏容器，但 renderLazy/teardownLazy 操作的是**全局** lazyView：不保存/恢复的话，
+  // 预取跑完会把可见视图的懒渲染器拆掉且不重建 —— 长文档（≥ LAZY_MIN_PAGES）滚动模式滚过首屏后
+  // 永远停在空白等高占位，直到用户切换一次变体才恢复（真机验证发现）。
+  const prevLazy = lazyView
   wrap.classList.add('preloading')
   try {
     if (pageMode === 'paged') {
@@ -2401,7 +2405,15 @@ async function preloadView(key) {
   } catch {
     // 预加载失败：不阻塞阅读，首次切换时再可见渲染
   } finally {
-    teardownLazy()
+    // 只清理预渲染自己建立的隐藏视图；可见视图的懒渲染器原样恢复。
+    // lazyView 已被别的路径重建（预取期间用户切到了该变体）时不动它，避免把活的视图打回占位。
+    if (lazyView && lazyView.container === box) teardownLazy()
+    if (prevLazy && !lazyView) {
+      lazyView = prevLazy
+      prevLazy.token = renderToken   // 预渲染推进了 renderToken；旧 token 会让 ensureLazyPage 全部早退
+      setupLazyObserver(prevLazy)    // renderLazy 内部的 teardownLazy 已断开旧 observer，必须重建
+      void ensureLazyPage(curPage)   // 当前页若被打回占位，补画出来
+    }
     wrap.classList.remove('preloading')
     box.innerHTML = ''
   }

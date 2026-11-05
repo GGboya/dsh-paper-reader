@@ -153,7 +153,7 @@ function loadReaderWithDocs(getDocument) {
       setZoom: (z) => { zoomScale = z }, setFit: (v) => { fitMode = v },
       getChildren: () => $('pdf-pages').children,
       getEqByPage: () => EQ_BY_PAGE,
-      renderLazy, getLazyView: () => lazyView,
+      renderLazy, getLazyView: () => lazyView, ensureLazyPage,
     };`, ctx, { filename: 'reader-inline.js' })
   ctx.__t.setEnsure(async () => {})
   return { t: ctx.__t, doc, ctx }
@@ -369,4 +369,40 @@ test('V5 懒渲染视图也能进双视图缓存：预加载/切回不重新加�
   assert.equal(T.getChildren().length, 16)
   assert.ok(T.getChildren()[0].children.length > 0, '切回原文当前页必须已画')
   assert.equal(loads, 1)
+})
+
+/* V6 回归：空闲译文预取用的是隐藏容器，但 renderLazy/teardownLazy 操作的是全局 lazyView。
+   修前 preloadView 的 finally 无条件 teardownLazy()，把可见原文视图的懒渲染器拆掉且不重建，
+   于是长文档（≥ LAZY_MIN_PAGES）滚动模式滚过首屏后永远停在空白等高占位 —— 真机实测复现。 */
+test('V6 空闲译文预取不得拆掉可见视图的懒渲染器（长文档滚过首屏仍能补画）', async () => {
+  const log = []
+  const docs = { orig: stubDoc('orig', log, 16), zh: stubDoc('zh', log, 16) }
+  const r = prepReader(({ url }) => ({
+    promise: Promise.resolve(String(url).includes('variant=zh') ? docs.zh : docs.orig),
+    destroy: async () => {},
+  }), docs)
+  const { t: T, ctx } = r
+  const ios = (ctx.__ios = [])
+  ctx.IntersectionObserver = class {
+    constructor(fn) { ios.push(fn) }
+    observe() {} unobserve() {} disconnect() {}
+  }
+  T.setFit(false)
+  T.setZoom(1)
+  await T.renderLazy()
+  const before = T.getLazyView()
+  assert.ok(before, '先要有可见视图的懒渲染器')
+
+  await T.preloadView('zh')
+
+  const after = T.getLazyView()
+  assert.ok(after, '预取结束后可见视图的懒渲染器必须还在（否则滚过首屏即空白）')
+  assert.equal(after.container, before.container, '恢复的必须是可见容器，不是预取的隐藏容器')
+  assert.equal(after.token, T.getRenderToken(), 'token 必须跟上 renderToken，否则 ensureLazyPage 全部早退')
+
+  // 预取之后滚到远端页：仍必须能补画
+  await T.ensureLazyPage(16)
+  const kids = T.getChildren()
+  assert.equal(kids.length, 16)
+  assert.ok(kids[15].children.length > 0, '预取之后远端页仍必须能补画（这正是修前的空白页）')
 })
