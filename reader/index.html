@@ -79,11 +79,15 @@
   /* #split-wrap 是分屏（模式 B）的两列行容器：非分屏时只有原文列，行为与改造前一致。
      #pdf-pane 从 #main 的直接子节点变成它的子节点——#main 的 flex 语义不变。 */
   #main { display: flex; flex: 1; min-height: 0; position: relative; } /* relative：公式面板绝对定位的锚 */
-  #split-wrap { display: flex; flex-direction: row; gap: 8px; flex: 1; min-width: 0; }
+  #split-wrap { display: flex; flex-direction: row; gap: 8px; flex: 1; min-width: 0; position: relative; }
   #pdf-pane { flex: 1 1 0; min-width: 0; overflow: auto; padding: 16px; }
   /* 中文列（仅分屏出现）：与原文列同权重、各自滚动 */
   #pdf-pane-zh { flex: 1 1 0; min-width: 0; overflow: auto; padding: 16px; display: none; }
   #split-wrap.on > #pdf-pane-zh { display: block; }
+  /* 预渲染译文：临时让隐藏列拥有完整布局（visibility:hidden，不闪屏），供离屏渲染量宽/挂载 */
+  #split-wrap.preloading > #pdf-pane-zh {
+    display: block; position: absolute; inset: 0; visibility: hidden; pointer-events: none;
+  }
   .pane-label { display: none; position: sticky; top: -16px; z-index: 3; background: var(--bg); color: var(--text-2);
     font-size: 12px; font-weight: 600; padding: 2px 0 6px; }
   #split-wrap.on .pane-label { display: block; }
@@ -108,6 +112,11 @@
   /* 插件版本号（host 注入；未被替换时隐藏——比如旧 host 配新页面的错位场景） */
   #ver { flex: none; font-size: 10.5px; color: var(--text-2); opacity: .65; user-select: none; }
   .page { position: relative; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+  /* 懒渲染占位：只保留页面尺寸，真正滚到附近才铺 canvas/TextLayer */
+  .page.lazy::after {
+    content: '加载中…'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-2); font-size: 12px; opacity: .45; pointer-events: none;
+  }
   .page.flash { outline: 3px solid var(--hl); outline-offset: 2px; transition: outline .15s; }
   /* textLayer CSS 必须是 pdf.js 6.x 官方规则的子集：TextLayer 只往 span 写 --font-height/--scale-x/--rotate
      变量，font-size 和 transform 全靠这里的 calc 表达式撑开；缺了的话 span 会按 body 字号渲染，
@@ -832,16 +841,27 @@ let curPage = 1;
 /* ================= 打开文献 ================= */
 function pdfUrl(variant) {
   const q = `topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`;
-  return `/paper-reader/api/pdf?${q}${variant ? '&variant=' + variant : ''}&t=${Date.now()}`;
+  // 不带 t=Date.now()：/api/pdf 已有 ETag（文件 mtime+size），浏览器会 304 复用；
+  // 重新翻译后 ETag 自动变化，不会拿到旧译文。
+  return `/paper-reader/api/pdf?${q}${variant ? '&variant=' + variant : ''}`;
 }
 
 async function openPaper(topic, name, opts = {}) {
   if (!name) return;
+  openingPaper = true;
   current = { topic, name };
   // R-01/N-01：换文献的在飞译文必须**立刻**失效——必须放在本函数第一处 await 之前。
   // 原来它在三次 await（`/api/paper`、`refreshZhState`、`loadFormulas`）之后，落在那几个窗口里
   // 到达的旧响应仍会点亮气泡（t8 复审 N-01：P-A3 实测 seq 2→3 时气泡已显示上一篇译文）。
   invalidateTranslate();
+  await resetViewCache();
+  teardownSplit();
+  // 换论文：旧文档先释放（新论文可能直接进入译文视图，不会经过 loadPdf）
+  renderToken++;
+  const oldPaperDoc = pdfDoc;
+  pdfDoc = null;
+  if (oldPaperDoc) await destroyPdfDoc(oldPaperDoc);
+  $('pdf-pages').innerHTML = '';
   localStorage.setItem('dpr.last', JSON.stringify(current));
   curPage = opts.page || 1; // 换论文从第一页（或跳转目标页）开始；变体切换/重译不走这里，页码保持
   $('status').textContent = '加载 PDF…';
@@ -883,9 +903,32 @@ async function openPaper(topic, name, opts = {}) {
     // R-02：原地换文献时**无条件**退掉分屏（幂等）——否则新论文有 -zh.pdf、而持久化视图又不是
     // split 时，refreshZhState 的回落守卫不触发，中文列会留着**上一篇**的 PDF（pdfDocZh 也不释放）。
     teardownSplit();
-    await loadPdf(pdfUrl(zhVariant), { beforePaint: notesReady });
+    await notesReady;
+    const savedVariant = zhVariant;
+    if (savedVariant) {
+      // 直接打开上次的语言版本：只加载这一份，不再先渲染原文再切（打开时间不翻倍）。
+      // 原文文档在后台只加载、不渲染；第一次切回原文再画页（之后有缓存）。
+      let ok = false;
+      try { ok = await activateView(savedVariant); } catch { ok = false; }
+      if (!ok) {
+        await applyViewMode('orig');
+        await loadPdf(pdfUrl(null), { beforePaint: notesReady });
+        toast('打开译文失败，已退回原文', 5000);
+      } else {
+        $('zh-toggle').classList.toggle('active', zhVariant !== null);
+        updateViewButtons();
+        void loadViewDoc('orig').catch(() => { /* 后台预取原文，失败不影响当前视图 */ });
+      }
+    } else {
+      // 首帧渲染原文；空闲时预渲染译文，点「中」时直接换节点
+      await loadPdf(pdfUrl(null), { beforePaint: notesReady });
+      activeKey = 'orig';
+      schedulePreload();
+    }
   }
   if (opts.page) jumpTo(opts.page, opts.q); // 不 await：跳转内部自带「等页面渲出来」轮询
+  openingPaper = false;
+  schedulePreload();
 }
 
 /* ================= 下载/导出 ================= */
@@ -1315,6 +1358,7 @@ function findMarkPage(page, ord) {
 async function findReadyPage(page) {
   if (!pdfDoc) return;
   const p = Math.max(1, Math.min(page, pdfDoc.numPages));
+  if (lazyView) await ensureLazyPage(p); // 懒渲染：先把目标页真画出来，再等 textLayer
   if ((pageMode === 'paged' || viewMode === 'split') && curPage !== p) {
     curPage = p;
     await rerender();
@@ -2070,7 +2114,12 @@ function ensureZhWatch() {
   }
 }
 async function refreshZhState() {
+  const prev = zhState;
   zhState = await api(`/zh?topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`);
+  // 译文生成完成/被删除/新增：旧文档与已画节点全部失效（重新翻译后文件内容变了）。
+  if (!openingPaper && (prev.busy !== zhState.busy || prev.zh !== zhState.zh || prev.dual !== zhState.dual)) {
+    await invalidateAltViews();
+  }
   const btn = $('zh-toggle');
   btn.style.display = '';
   btn.disabled = zhState.busy;
@@ -2099,6 +2148,22 @@ async function refreshZhState() {
     toast('中文版不存在，已退回原文', 4000);
     await setViewMode('orig');
     return;
+  }
+  // 单文档视图：-zh/-dual 被删/重翻后对应文件暂时不存在 → 如实回落原文
+  if (!openingPaper && viewMode === 'zh' && !zhState.zh) {
+    toast('中文版不存在，已退回原文', 4000);
+    await setViewMode('orig');
+    return;
+  }
+  if (!openingPaper && viewMode === 'dual' && !zhState.dual) {
+    toast('中英对照版不存在，已退回原文', 4000);
+    await setViewMode('orig');
+    return;
+  }
+  // 重翻期间可能已回落到原文（invalidateAltViews）；生成完成后把当前视图接回来
+  if (!openingPaper && (viewMode === 'zh' || viewMode === 'dual') && activeKey !== viewMode &&
+      ((viewMode === 'zh' && zhState.zh) || (viewMode === 'dual' && zhState.dual))) {
+    try { await activateView(viewMode); } catch { /* 新译文损坏：保持原文 */ }
   }
   updateViewButtons();
 }
@@ -2191,7 +2256,17 @@ async function setViewMode(mode) {
   if (!applyViewMode(mode)) return;
   if (mode === 'split') { await openSplit(); return; }
   teardownSplit();
-  await loadPdf(pdfUrl(zhVariant));
+  const key = zhVariant || 'orig';
+  let ok = false;
+  try { ok = await activateView(key); } catch { ok = false; }
+  if (!ok) {
+    // 目标译文不存在/损坏：如实回退原文，不留下“按钮亮着但内容没换”的状态
+    await applyViewMode('orig');
+    await activateView('orig');
+    toast('打开译文失败，已退回原文', 5000);
+    return;
+  }
+  schedulePreload();
 }
 $('dual-toggle').onclick = () => setViewMode(viewMode === 'dual' ? 'orig' : 'dual');
 $('split-toggle').onclick = () => setViewMode(viewMode === 'split' ? 'orig' : 'split');
@@ -2228,8 +2303,8 @@ async function startGenerate(force) {
       if (zhState.dual || zhState.zh) {
         toast('中文版已生成');
         // 重翻完成时用户可能正停在译文视图/分屏：原地刷新，而不是来回切换
-        if (viewMode === 'split') await renderSplit();
-        else if (zhVariant) await loadPdf(pdfUrl(zhVariant));
+        if (viewMode === 'split') await openSplit(); // 分屏：重翻后重新拉 -zh.pdf（旧文档已失效）
+        else if (zhVariant) await activateView(zhVariant); // 单文档：缓存已被 refreshZhState 失效，重新加载新译文
         else $('zh-toggle').click();
       }
       else toast('生成失败：' + (zhState.error || '未知原因'), 8000);
@@ -2395,23 +2470,62 @@ function ensurePdfjs() {
 ensurePdfjs().catch(() => {}); // 预热：与 bootstrap 的 API 请求并行拉取，不把首屏串行化
 
 let pdfDoc = null;
+let pdfLoadSeq = 0;   // loadPdf 的序号：旧请求晚到时直接丢弃，避免覆盖新文档
 let zoomScale = 1.5;
 let dpr = window.devicePixelRatio || 1;
 let renderToken = 0;
+let activeRender = null;   // 当前活动渲染的 promise（预加载要等它结束再动手，避免互相打断）
+// 单文档视图缓存：key='orig'|'zh'|'dual'。nodes 是**已画好的页节点**（含 canvas/TextLayer），
+// 切换时只换 DOM/文档对象，不重新 getDocument、不重画；同一时刻只有一份在 #pdf-pages 里。
+const viewCache = new Map();
+const viewDocs = new Map();  // 预加载好的 PDFDocumentProxy（节点可能还没画）
+const viewLoads = new Map(); // 在飞的 getDocument promise（并发去重）
+let viewLoadSeq = 0;
+let activeKey = 'orig';
+let preloadSeq = 0;
+let preloadTimer = null;
+let openingPaper = false;
+let lazyView = null; // {doc, pane, container, scale, token, observer, pages: Map<pageNo,{div,page,vp,rendered,painting}>}
+const LAZY_MIN_PAGES = 12; // 页数少的文档全量渲染更快；长文档滚动模式才启用懒渲染
+
+/** 释放 pdf.js 文档（worker + 页面缓存）。销毁前调用方必须先 ++renderToken，
+ *  否则在飞的旧渲染会在 destroy 后 reject；paintPage 已对 token 失效的异常做静默处理。 */
+async function destroyPdfDoc(doc) {
+  if (!doc || typeof doc.destroy !== 'function') return;
+  try { await doc.destroy(); } catch { /* 已释放 / 正在释放 */ }
+}
 
 (function watchDpr() {
   const mq = matchMedia(`(resolution: ${dpr}dppx)`);
   mq.addEventListener('change', function onChange() {
     mq.removeEventListener('change', onChange);
     dpr = window.devicePixelRatio || 1;
-    if (pdfDoc) rerender();
+    if (pdfDoc) rerender().catch(() => { /* 文档切换期间的在飞渲染异常已由 token 守卫吞掉 */ });
     watchDpr();
   });
 })();
 
 async function loadPdf(url, opts = {}) {
   await ensurePdfjs(); // 就绪前禁止触 pdfjsLib（defer 竞态，见文件头注释）
-  pdfDoc = await pdfjsLib.getDocument({ url }).promise; // v6 起不接受字符串参数，必须传对象
+  const seq = ++pdfLoadSeq;
+  const task = pdfjsLib.getDocument({ url }); // v6 起不接受字符串参数，必须传对象
+  let doc;
+  try {
+    doc = await task.promise;
+  } catch (e) {
+    if (seq !== pdfLoadSeq) return false; // 被更新的 loadPdf 抢占：旧请求失败无需上屏
+    throw e;
+  }
+  if (seq !== pdfLoadSeq) {
+    // 旧请求晚到：不能覆盖新文档，立即释放它（含 worker）
+    try { await task.destroy(); } catch { /* ignore */ }
+    return false;
+  }
+  const old = pdfDoc;
+  pdfDoc = doc;
+  activeKey = 'orig'; // loadPdf 只用于原文/首帧；译文视图走 activateView 的缓存
+  renderToken++; // 旧文档的在飞渲染立即作废（随后 destroy）
+  if (old && old !== doc) await destroyPdfDoc(old);
   // 换了文档（换论文 / 原文↔译文）：查找索引按文档对象缓存，这里必须作废，
   // 否则会拿旧文档的页码去定位新文档（页数不同时直接跳错页）。
   if (find.doc !== pdfDoc) findReset();
@@ -2422,21 +2536,260 @@ async function loadPdf(url, opts = {}) {
   // 笔记请求与 PDF 文档加载并行；首次渲染前才等它（见 openPaper 的 beforePaint）
   if (opts.beforePaint) await opts.beforePaint;
   // 分屏（模式 B）自己安排两列的渲染与适宽：这里只把原文文档装上，不触发单列渲染
-  if (opts.deferRender) return;
-  if (fitMode) { fitToWidth(); return; } // fitToWidth 内部 setZoom → rerender
+  if (opts.deferRender) return true;
+  if (fitMode) { await fitToWidth(); return true; } // fitToWidth 内部 setZoom → rerender，这里等它画完
   await rerender();
+  return true;
+}
+
+/* ── 单文档视图缓存（orig/zh/dual 无缝切换）────────────────────────────
+   同一时刻只有一份页节点在 #pdf-pages；切换时把当前节点数组存进 viewCache，
+   把目标节点 append 回来。canvas 位图与 TextLayer 都随节点保留，不重画。
+   预加载在空闲时把译文画进隐藏的 #pdf-pages-zh，画完再摘下节点入缓存。 */
+function eqGeomSnapshot() { return new Map([...EQ_BY_PAGE].map(([k, v]) => [k, v])) }
+function restoreEqGeom(m) {
+  EQ_BY_PAGE.clear()
+  if (m) for (const [k, v] of m) EQ_BY_PAGE.set(k, v)
+}
+function docKeyOf(key) { return key === 'orig' ? 'orig' : 'zh' }
+
+/** 把当前活动页节点/状态存入缓存并清空容器；split 模式由 renderSplit 管理，不缓存。 */
+function saveActiveView() {
+  if (!pdfDoc || viewMode === 'split' || activeRender) return
+  teardownLazy()
+  const container = $('pdf-pages')
+  const nodes = Array.from(container.children)
+  if (!nodes.length) return
+  viewCache.set(activeKey, {
+    doc: pdfDoc,
+    nodes,
+    scale: zoomScale,
+    curPage,
+    scrollTop: $('pdf-pane').scrollTop,
+    fit: fitMode,
+    mode: pageMode,
+    eqGeom: eqGeomSnapshot(),
+  })
+  container.innerHTML = ''
+  clearEqGeometry()
+}
+
+/** 从缓存恢复视图；nodes 尚未画好时返回 false（调用方走可见渲染）。 */
+function attachView(key, pageHint) {
+  const v = viewCache.get(key)
+  if (!v || !v.nodes.length) return false
+  if (v.mode && v.mode !== pageMode) return false // 缓存是滚动/翻页另一种形态：重新渲染，别混用
+  const target = Math.min(Math.max(1, v.preloaded && pageHint ? pageHint : v.curPage), v.doc.numPages)
+  // 翻页视图预加载的是一页：目标页不同就不能复用（首次切到别的页走可见渲染）
+  if (pageMode === 'paged' && v.preloaded && v.curPage !== target) return false
+  pdfDoc = v.doc
+  activeKey = key
+  renderToken++ // 作废目标视图之外的在飞渲染
+  const container = $('pdf-pages')
+  container.innerHTML = ''
+  for (const n of v.nodes) container.appendChild(n)
+  container.classList.toggle('paged', pageMode === 'paged')
+  zoomScale = v.scale
+  fitMode = v.fit
+  fitBtn.classList.toggle('active', fitMode)
+  curPage = target
+  restoreEqGeom(v.eqGeom)
+  $('pdf-pane').scrollTop = v.scrollTop
+  if (pageMode !== 'paged') scrollActiveToPage(curPage)
+  findReset()
+  updatePager()
+  if (Array.from(container.children).some((d) => d.classList && d.classList.contains('lazy'))) {
+    setupLazyFromNodes(v.doc, container, v.scale)
+  }
+  observePages(container)
+  return true
+}
+
+function loadViewDoc(key) {
+  if (viewDocs.has(key)) return Promise.resolve(viewDocs.get(key))
+  if (viewLoads.has(key)) return viewLoads.get(key)
+  const seq = ++viewLoadSeq
+  const variant = key === 'orig' ? null : key
+  const task = pdfjsLib.getDocument({ url: pdfUrl(variant) })
+  const p = (async () => {
+    const doc = await task.promise
+    if (seq !== viewLoadSeq) { try { await task.destroy(); } catch { /* stale */ } return null }
+    viewDocs.set(key, doc)
+    return doc
+  })().finally(() => { viewLoads.delete(key) })
+  viewLoads.set(key, p)
+  return p
+}
+
+async function dropView(key) {
+  const v = viewCache.get(key)
+  viewCache.delete(key)
+  const d = viewDocs.get(key)
+  viewDocs.delete(key)
+  const docs = new Set([v?.doc, d].filter(Boolean))
+  for (const doc of docs) {
+    if (doc !== pdfDoc && doc !== pdfDocZh) await destroyPdfDoc(doc)
+  }
+}
+
+/** 换论文/重置：释放所有缓存的非活动文档；活动文档由 loadPdf 负责释放。 */
+async function resetViewCache() {
+  const docs = new Set()
+  for (const v of viewCache.values()) if (v.doc) docs.add(v.doc)
+  for (const d of viewDocs.values()) docs.add(d)
+  viewCache.clear()
+  viewDocs.clear()
+  viewLoads.clear()
+  viewLoadSeq++
+  preloadSeq++
+  if (preloadTimer) { clearTimeout(preloadTimer); preloadTimer = null }
+  for (const doc of docs) {
+    if (doc !== pdfDoc && doc !== pdfDocZh) await destroyPdfDoc(doc)
+  }
+  $('split-wrap').classList.remove('preloading')
+  $('pdf-pages-zh').innerHTML = ''
+}
+
+async function fitScaleFor(doc) {
+  const paneWidth = fitPaneWidth()
+  if (paneWidth <= 0) return zoomScale
+  try {
+    const p = await doc.getPage(1)
+    return Math.min(4.5, Math.max(0.6, paneWidth / p.getViewport({ scale: 1 }).width))
+  } catch {
+    return zoomScale
+  }
+}
+
+function scrollActiveToPage(n) {
+  const node = origPageNode(n)
+  if (node && typeof node.offsetTop === 'number') $('pdf-pane').scrollTop = node.offsetTop
+  if (lazyView) void ensureLazyPage(n)
+}
+
+/** 切到某个单文档视图：命中缓存就换节点；否则加载文档并可见渲染（首次切换的兜底）。 */
+async function activateView(key) {
+  if (key === activeKey && pdfDoc) return true
+  if (activeRender) { try { await activeRender } catch { /* ignore */ } } // 等当前渲染收尾，避免把半成品存进缓存
+  if (lazyView) await ensureLazyPage(curPage) // 离开前保证当前页已画，切回来不会先闪占位
+  const oldPage = curPage
+  saveActiveView()
+  if (attachView(key, oldPage)) {
+    if (lazyView) await ensureLazyPage(curPage) // 预加载缓存里目标页可能还是占位
+    updateDlBtn()
+    renderEqPanel()
+    return true
+  }
+  const doc = await loadViewDoc(key)
+  if (!doc) return false
+  pdfDoc = doc
+  activeKey = key
+  renderToken++
+  const scale = await fitScaleFor(doc)
+  zoomScale = scale
+  fitMode = true
+  fitBtn.classList.add('active')
+  const target = Math.min(Math.max(1, oldPage), doc.numPages)
+  curPage = target
+  if (pageMode === 'paged') {
+    await renderPaged({ doc, page: target, scale, docKey: docKeyOf(key) })
+  } else if (doc.numPages >= LAZY_MIN_PAGES) {
+    await renderLazy({ doc, scale, docKey: docKeyOf(key), startPage: target })
+  } else {
+    await renderAllPages({ doc, scale, docKey: docKeyOf(key) })
+    scrollActiveToPage(target)
+  }
+  findReset()
+  updatePager()
+  updateDlBtn()
+  renderEqPanel()
+  return true
+}
+
+/** 空闲预渲染：把译文页画进隐藏列，画完摘下节点入缓存；失败则首次切换走可见渲染。 */
+async function preloadView(key) {
+  if (!current || key === activeKey || viewCache.has(key)) return
+  if (activeRender) { try { await activeRender } catch { /* ignore */ } }
+  if (key === activeKey || viewCache.has(key)) return
+  const seq = ++preloadSeq
+  const doc = await loadViewDoc(key)
+  if (!doc || seq !== preloadSeq || key === activeKey) return
+  const scale = await fitScaleFor(doc)
+  if (seq !== preloadSeq) return
+  const wrap = $('split-wrap'), pane = $('pdf-pane-zh'), box = $('pdf-pages-zh')
+  const prePage = Math.min(Math.max(1, curPage), doc.numPages)
+  // 预渲染用隐藏容器，但 renderLazy/teardownLazy 操作的是**全局** lazyView：不保存/恢复的话，
+  // 预取跑完会把可见视图的懒渲染器拆掉且不重建 —— 长文档（≥ LAZY_MIN_PAGES）滚动模式滚过首屏后
+  // 永远停在空白等高占位，直到用户切换一次变体才恢复（真机验证发现）。
+  const prevLazy = lazyView
+  wrap.classList.add('preloading')
+  try {
+    if (pageMode === 'paged') {
+      await renderPaged({ doc, pane, container: box, scale, page: prePage, docKey: docKeyOf(key), noUi: true })
+    } else if (doc.numPages >= LAZY_MIN_PAGES) {
+      await renderLazy({ doc, pane, container: box, scale, docKey: docKeyOf(key), clearEq: false, noUi: true, observe: false, startPage: prePage })
+    } else {
+      await renderAllPages({ doc, pane, container: box, scale, docKey: docKeyOf(key), clearEq: false, noUi: true, observe: false })
+    }
+    if (seq !== preloadSeq || key === activeKey) return
+    const nodes = Array.from(box.children)
+    if (!nodes.length) return
+    box.innerHTML = ''
+    viewCache.set(key, { doc, nodes, scale, curPage: prePage, scrollTop: 0, fit: true, preloaded: true, mode: pageMode, eqGeom: new Map() })
+  } catch {
+    // 预加载失败：不阻塞阅读，首次切换时再可见渲染
+  } finally {
+    // 只清理预渲染自己建立的隐藏视图；可见视图的懒渲染器原样恢复。
+    // lazyView 已被别的路径重建（预取期间用户切到了该变体）时不动它，避免把活的视图打回占位。
+    if (lazyView && lazyView.container === box) teardownLazy()
+    if (prevLazy && !lazyView) {
+      lazyView = prevLazy
+      prevLazy.token = renderToken   // 预渲染推进了 renderToken；旧 token 会让 ensureLazyPage 全部早退
+      setupLazyObserver(prevLazy)    // renderLazy 内部的 teardownLazy 已断开旧 observer，必须重建
+      void ensureLazyPage(curPage)   // 当前页若被打回占位，补画出来
+    }
+    wrap.classList.remove('preloading')
+    box.innerHTML = ''
+  }
+}
+
+/** 空闲时预加载「中」按钮下一次会切到的那个版本（有 zh 优先 zh，否则 dual）。 */
+function schedulePreload() {
+  if (openingPaper) return
+  const key = zhState.zh ? 'zh' : zhState.dual ? 'dual' : null
+  if (!key || key === activeKey || viewCache.has(key) || (viewDocs.has(key) && viewCache.has(key))) return
+  if (preloadTimer) clearTimeout(preloadTimer)
+  const run = () => {
+    preloadTimer = null
+    if (!current || key === activeKey) return
+    void preloadView(key)
+  }
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(run, { timeout: 2500 })
+  } else {
+    preloadTimer = setTimeout(run, 350)
+  }
+}
+
+/** 译文重新生成/被删除后：释放旧译文文档与节点；若正在看译文，重新加载新版本。 */
+async function invalidateAltViews() {
+  if (openingPaper) return
+  const wasKey = activeKey
+  if (wasKey !== 'orig') {
+    try { await activateView('orig'); } catch { /* 回落失败也继续释放缓存 */ }
+  }
+  await dropView('zh')
+  await dropView('dual')
+  if ((wasKey === 'zh' && zhState.zh) || (wasKey === 'dual' && zhState.dual)) {
+    try { await activateView(wasKey); } catch { /* 新译文损坏：保持原文，用户可再点一次 */ }
+  }
+  schedulePreload()
 }
 
 /** 构建单页 DOM 骨架（.page + canvas + textLayer），位图与文本由 paintPage 异步填充。
  *  `doc` = 'orig' | 'zh'：**无条件**写在每个页节点上（分屏时两个文档的页号相同，热区几何
  *  与选区归属都靠它判别；只有分屏才写的话普通模式的选择器会取到 null）。 */
-function makePageNode(i, viewport, doc = 'orig') {
-  const div = document.createElement('div');
-  div.className = 'page';
-  div.dataset.page = i;
-  div.dataset.doc = doc;
-  div.style.width = viewport.width + 'px';
-
+function appendPageVisuals(div, viewport) {
   const canvas = document.createElement('canvas');
   canvas.width = Math.ceil(viewport.width * dpr);
   canvas.height = Math.ceil(viewport.height * dpr);
@@ -2450,6 +2803,28 @@ function makePageNode(i, viewport, doc = 'orig') {
   tl.style.height = viewport.height + 'px';
   tl.style.setProperty('--scale-factor', String(viewport.scale));
   div.appendChild(tl);
+}
+
+function makePageNode(i, viewport, doc = 'orig') {
+  const div = document.createElement('div');
+  div.className = 'page';
+  div.dataset.page = i;
+  div.dataset.doc = doc;
+  div.style.width = viewport.width + 'px';
+  appendPageVisuals(div, viewport);
+  return div;
+}
+
+/** 懒渲染占位节点：只有尺寸/文档归属，滚到附近才 appendPageVisuals + paintPage。 */
+function makeLazyPageNode(i, viewport, doc = 'orig') {
+  const div = document.createElement('div');
+  div.className = 'page lazy';
+  div.dataset.page = i;
+  div.dataset.doc = doc;
+  div.dataset.lazy = '1';
+  div.dataset.rendered = '0';
+  div.style.width = viewport.width + 'px';
+  div.style.height = viewport.height + 'px';
   return div;
 }
 
@@ -2458,16 +2833,32 @@ function makePageNode(i, viewport, doc = 'orig') {
 async function paintPage(page, div, viewport, token) {
   const canvas = div.firstChild;
   const tl = div.lastChild;
-  await page.render({
-    canvasContext: canvas.getContext('2d'),
-    viewport,
-    transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
-  }).promise;
+  try {
+    await page.render({
+      canvasContext: canvas.getContext('2d'),
+      viewport,
+      transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+    }).promise;
+  } catch (e) {
+    if (token !== renderToken) return; // 文档被释放/被新渲染抢占：静默丢弃
+    throw e;
+  }
   if (token !== renderToken) return;
-  const tc = await page.getTextContent();
+  let tc;
+  try {
+    tc = await page.getTextContent();
+  } catch (e) {
+    if (token !== renderToken) return;
+    throw e;
+  }
   if (token !== renderToken) return;
   // pdf.js 6.x: renderTextLayer() 移除，改 TextLayer 类
-  await new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport }).render();
+  try {
+    await new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport }).render();
+  } catch (e) {
+    if (token !== renderToken) return;
+    throw e;
+  }
   // 公式热区层（pointer-events:none，只画描边；命中在 JS 里按坐标算）。
   // 唯一铺层点放在这里（不是各自的渲染循环里）：滚动与翻页两条路径共用它——
   // renderPaged 完全绕过 renderAllPages 的循环，写在那边翻页模式热区会全哑。
@@ -2489,8 +2880,15 @@ function rerender() {
     try { findReapply(); } catch { /* 高亮是装饰，失败不影响阅读 */ }
     try { notesReapply(); } catch { /* 同上 */ }
   };
-  if (viewMode === 'split') return renderSplit().then(done);
-  return (pageMode === 'paged' ? renderPaged() : renderAllPages()).then(done);
+  const useLazy = pageMode === 'scroll' && pdfDoc && pdfDoc.numPages >= LAZY_MIN_PAGES;
+  const p = (viewMode === 'split'
+    ? renderSplit()
+    : pageMode === 'paged'
+      ? renderPaged()
+      : useLazy ? renderLazy() : renderAllPages()).then(done);
+  activeRender = p;
+  return p.catch(() => { /* 旧文档释放/被新渲染抢占：已由 token 守卫处理 */ })
+    .finally(() => { if (activeRender === p) activeRender = null; });
 }
 
 // 隐藏期间被跳过的重渲请求：尺寸恢复（resize）后补跑。
@@ -2500,26 +2898,43 @@ function rerender() {
 // 的请求直接跳过（不动 token、在途渲染照常画完），标记 pending 等恢复后补画。
 let pendingRerender = false;
 
-async function renderAllPages() {
-  const pane = $('pdf-pane');
-  if (pane.clientHeight === 0) { pendingRerender = true; return; } // 悬浮层隐藏期间不重渲（否则锚点恢复会把滚动清零）
+/** 取页做渲染：文档被新的 loadPdf 释放时 getPage 会拒绝——token 已失效就静默结束，
+ *  否则原样抛出（真错误仍要上屏）。 */
+async function getPageForRender(doc, i, token) {
+  try {
+    return await doc.getPage(i);
+  } catch (e) {
+    if (token !== renderToken) return null;
+    throw e;
+  }
+}
+
+async function renderAllPages(opts = {}) {
+  teardownLazy()
+  const doc = opts.doc || pdfDoc;
+  const pane = opts.pane || $('pdf-pane');
+  const container = opts.container || $('pdf-pages');
+  const scale = opts.scale ?? zoomScale;
+  const docKey = opts.docKey || (zhVariant ? 'zh' : 'orig');
+  if (!doc || pane.clientHeight === 0) {
+    if (pane.clientHeight === 0) pendingRerender = true; // 悬浮层隐藏期间不重渲（否则锚点恢复会把滚动清零）
+    return;
+  }
   const token = ++renderToken;
-  const container = $('pdf-pages');
-  const scale = zoomScale; // 单次渲染内快照：隐藏期间的 setZoom 改全局值也不至于画出混合缩放
   // 滚动比例锚点：不用 DOM rect（并发重渲时旧页可能已被清空，rect 全灭 → 锚点归零）
   const range = pane.scrollHeight - pane.clientHeight;
   const anchorRatio = range > 0 ? pane.scrollTop / range : 0;
   container.innerHTML = '';
   container.classList.remove('paged'); // 切回滚动：必须摘掉单页布局类（paged 由 renderPaged 加上）
-  clearEqGeometry();                   // 旧页几何 + 跨页残留的 hover/hit 描边随 DOM 一起作废
-  $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
+  if (opts.clearEq !== false) clearEqGeometry(); // 预渲染译文时不能清掉原文列的几何
+  if (!opts.noUi) $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
 
-  for (let i = 1; i <= pdfDoc.numPages; i++) {
+  for (let i = 1; i <= doc.numPages; i++) {
     if (token !== renderToken) return;
-    const page = await pdfDoc.getPage(i);
-    if (token !== renderToken) return;
+    const page = await getPageForRender(doc, i, token);
+    if (!page || token !== renderToken) return;
     const viewport = page.getViewport({ scale });
-    const div = makePageNode(i, viewport);
+    const div = makePageNode(i, viewport, docKey);
     container.appendChild(div);
     // 位图 + 文本层 + 公式热区层都在 paintPage 里（滚动/翻页两条路径共用同一个铺层点）
     await paintPage(page, div, viewport, token);
@@ -2527,25 +2942,178 @@ async function renderAllPages() {
   }
   const newRange = pane.scrollHeight - pane.clientHeight;
   pane.scrollTop = anchorRatio * Math.max(0, newRange);
-  observePages();
+  if (opts.observe !== false) observePages(container);
+}
+
+/* ── 滚动模式懒渲染：长文档只给视口附近页铺 canvas/TextLayer，其余保留等高占位 ── */
+function teardownLazy() {
+  if (lazyView?.observer) { try { lazyView.observer.disconnect() } catch { /* 已断开 */ } }
+  lazyView = null
+}
+
+async function ensureLazyPage(i) {
+  const lv = lazyView
+  if (!lv) return
+  const e = lv.pages.get(+i)
+  if (!e || e.rendered) return
+  if (e.painting) return e.painting
+  const token = lv.token
+  e.painting = (async () => {
+    try {
+      if (!e.page) {
+        e.page = await lv.doc.getPage(+i)
+        e.vp = e.page.getViewport({ scale: lv.scale })
+      }
+      if (token !== renderToken || lazyView !== lv) return
+      if (!e.div.children.length) appendPageVisuals(e.div, e.vp)
+      e.div.classList.remove('lazy')
+      e.div.dataset.rendered = '1'
+      e.rendered = true
+      await paintPage(e.page, e.div, e.vp, token)
+      try { findReapply() } catch { /* 查找高亮是装饰，失败不影响阅读 */ }
+    } catch {
+      if (token === renderToken && lazyView === lv) {
+        e.div.innerHTML = ''
+        e.div.classList.add('lazy')
+        e.div.dataset.rendered = '0'
+        e.rendered = false
+      }
+    } finally {
+      e.painting = null
+    }
+  })()
+  return e.painting
+}
+
+function unrenderLazyPage(i) {
+  const lv = lazyView
+  const e = lv?.pages.get(+i)
+  if (!e || !e.rendered || e.painting) return
+  e.div.innerHTML = ''
+  e.div.classList.add('lazy')
+  e.div.dataset.rendered = '0'
+  e.rendered = false
+  EQ_BY_PAGE.delete(+i) // 卸载页的几何立即作废，热区不得打到空页上
+}
+
+function setupLazyObserver(lv) {
+  if (typeof IntersectionObserver !== 'function') return
+  lv.observer = new IntersectionObserver((entries) => {
+    if (lazyView !== lv) return
+    for (const en of entries) {
+      const i = +en.target.dataset.page
+      if (en.isIntersecting) void ensureLazyPage(i)
+      else if (en.intersectionRatio === 0 && i !== curPage) unrenderLazyPage(i)
+    }
+  }, { root: lv.pane, rootMargin: '150% 0px' })
+  lv.container.querySelectorAll('.page').forEach((d) => lv.observer.observe(d))
+}
+
+/** 从缓存节点恢复懒视图（预加载缓存里可能一半是占位）。 */
+function setupLazyFromNodes(doc, container, scale) {
+  const pane = $('pdf-pane')
+  const pages = new Map()
+  for (const div of Array.from(container.children)) {
+    if (!div.classList || !div.classList.contains('page')) continue
+    const i = +div.dataset.page
+    if (!Number.isFinite(i)) continue
+    pages.set(i, {
+      div,
+      page: null,
+      vp: null,
+      rendered: div.dataset.rendered === '1',
+      painting: null,
+    })
+  }
+  if (!pages.size) return
+  const lv = { doc, pane, container, scale, token: renderToken, observer: null, pages }
+  lazyView = lv
+  setupLazyObserver(lv)
+  void ensureLazyPage(curPage)
+}
+
+/** 滚动模式长文档入口：先建等高占位，再渲染当前页；滚到附近由 IntersectionObserver 补齐。 */
+async function renderLazy(opts = {}) {
+  const doc = opts.doc || pdfDoc
+  const pane = opts.pane || $('pdf-pane')
+  const container = opts.container || $('pdf-pages')
+  const scale = opts.scale ?? zoomScale
+  const docKey = opts.docKey || (zhVariant ? 'zh' : 'orig')
+  if (!doc) return
+  if (pane.clientHeight === 0) {
+    if (!opts.pane) pendingRerender = true
+    return
+  }
+  const token = ++renderToken
+  const oldPages = Array.from(container.children).filter((d) => d.classList && d.classList.contains('page'))
+  // anchorOf 需要 {page, offsetTop, offsetHeight}；DOM 节点的页号在 dataset 里
+  const anchor = oldPages.length
+    ? anchorOf(oldPages.map((d) => ({ page: +d.dataset.page, offsetTop: d.offsetTop, offsetHeight: d.offsetHeight })), pane.scrollTop)
+    : null
+  teardownLazy()
+  container.innerHTML = ''
+  container.classList.remove('paged')
+  if (opts.clearEq !== false) clearEqGeometry()
+  if (!opts.noUi) $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%'
+  const pages = new Map()
+  for (let i = 1; i <= doc.numPages; i++) {
+    if (token !== renderToken) return
+    const page = await getPageForRender(doc, i, token)
+    if (!page || token !== renderToken) return
+    const viewport = page.getViewport({ scale })
+    const div = makeLazyPageNode(i, viewport, docKey)
+    container.appendChild(div)
+    pages.set(i, { div, page, vp: viewport, rendered: false, painting: null })
+  }
+  const lv = { doc, pane, container, scale, token, observer: null, pages }
+  lazyView = lv
+  if (anchor && anchor.page != null) {
+    const e = pages.get(anchor.page)
+    if (e) pane.scrollTop = (e.div.offsetTop || 0) + (anchor.ratio || 0) * (e.div.offsetHeight || 0)
+  } else if (!opts.startPage) {
+    pane.scrollTop = 0 // 新文献首帧：上一页的滚动位置不得带过来
+  }
+  if (opts.observe !== false) {
+    setupLazyObserver(lv)
+    observePages(container)
+  }
+  const start = Math.min(Math.max(1, anchor?.page || opts.startPage || curPage), doc.numPages)
+  await ensureLazyPage(start)
+}
+
+/** 当前页是不是懒视图里的占位：跳转/查找前先把它画出来。 */
+async function ensurePageReadyForJump(n) {
+  if (!lazyView) return
+  const i = Math.min(Math.max(1, (n | 0) || 1), lazyView.doc.numPages)
+  await ensureLazyPage(i)
 }
 
 /** 翻页模式：只渲染 curPage 一页（按需渲染，天然无长文档性能问题）。 */
-async function renderPaged() {
-  if ($('pdf-pane').clientHeight === 0) { pendingRerender = true; return; } // 同 renderAllPages：跳过并标记，恢复后补画
+async function renderPaged(opts = {}) {
+  if ($('pdf-pane').clientHeight === 0 && !opts.pane) { pendingRerender = true; return; } // 同 renderAllPages：跳过并标记，恢复后补画
+  teardownLazy()
+  const doc = opts.doc || pdfDoc;
+  const container = opts.container || $('pdf-pages');
+  const scale = opts.scale ?? zoomScale;
+  const docKey = opts.docKey || (zhVariant ? 'zh' : 'orig');
+  if (!doc) return;
+  const pageNo = Math.min(Math.max(1, opts.page ?? curPage), doc.numPages);
   const token = ++renderToken;
-  const container = $('pdf-pages');
-  const scale = zoomScale; // 同 renderAllPages：快照，防混合缩放
-  curPage = Math.min(Math.max(1, curPage), pdfDoc.numPages);
-  container.innerHTML = '';
-  clearEqGeometry(); // 同上：翻页模式下换页/缩放时，旧页几何与 hover 残留必须一起作废（否则命中整体偏移）
-  container.classList.add('paged');
-  $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
-  updatePager();
-  const page = await pdfDoc.getPage(curPage);
-  if (token !== renderToken) return;
+  if (!opts.noUi) {
+    curPage = pageNo;
+    container.innerHTML = '';
+    clearEqGeometry(); // 同上：翻页模式下换页/缩放时，旧页几何与 hover 残留必须一起作废（否则命中整体偏移）
+    container.classList.add('paged');
+    $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
+    updatePager();
+  } else {
+    container.innerHTML = '';
+    container.classList.add('paged');
+  }
+  const page = await getPageForRender(doc, pageNo, token);
+  if (!page || token !== renderToken) return;
   const viewport = page.getViewport({ scale });
-  const div = makePageNode(curPage, viewport);
+  const div = makePageNode(pageNo, viewport, docKey);
   container.appendChild(div);
   await paintPage(page, div, viewport, token);
 }
@@ -2553,7 +3121,7 @@ async function renderPaged() {
 /** 滚动模式当前页探测：视口竖直中线带（±45%）压到哪页，哪页就是当前页。
     每次全量重渲后重建（页节点全换）。翻页控件与模式切换共享 curPage。 */
 let pageObserver = null;
-function observePages() {
+function observePages(container = $('pdf-pages')) {
   pageObserver?.disconnect();
   pageObserver = new IntersectionObserver((entries) => {
     for (const en of entries) {
@@ -2563,10 +3131,10 @@ function observePages() {
       }
     }
   }, { root: $('pdf-pane'), rootMargin: '-45% 0px -45% 0px', threshold: 0 });
-  document.querySelectorAll('#pdf-pages .page').forEach((d) => pageObserver.observe(d));
+  container.querySelectorAll('.page').forEach((d) => pageObserver.observe(d));
 }
 
-function setZoom(newScale) { if (!pdfDoc) return; zoomScale = Math.min(4.5, Math.max(0.6, newScale)); rerender(); }
+function setZoom(newScale) { if (!pdfDoc) return Promise.resolve(); zoomScale = Math.min(4.5, Math.max(0.6, newScale)); return rerender().catch(() => {}) }
 // 默认适宽：rightbar 窄列里 1.5 倍缩放会把页面撑出视口（中英对照双栏页宽≈2×，更明显）
 let fitMode = true;
 const fitBtn = $('zoom-fit');
@@ -2582,10 +3150,14 @@ function fitPaneWidth() {
   return $('pdf-pane').clientWidth - 32
 }
 function fitToWidth() {
-  if (!pdfDoc) return // resize 可能先于首次 loadPdf 触发（布局换位/条带注入会改容器尺寸）
+  if (!pdfDoc) return Promise.resolve() // resize 可能先于首次 loadPdf 触发（布局换位/条带注入会改容器尺寸）
   const paneWidth = fitPaneWidth()
-  if (paneWidth <= 0) return // 隐藏期间尺寸为 0，算出的缩放无意义
-  pdfDoc.getPage(1).then((p) => setZoom(paneWidth / p.getViewport({ scale: 1 }).width))
+  if (paneWidth <= 0) return Promise.resolve() // 隐藏期间尺寸为 0，算出的缩放无意义
+  const doc = pdfDoc
+  return doc.getPage(1).then((p) => {
+    if (pdfDoc !== doc) return // 期间换了文档：旧文档的适宽结果必须丢弃
+    return setZoom(paneWidth / p.getViewport({ scale: 1 }).width)
+  }).catch(() => { /* 文档已被新的 loadPdf 释放 */ })
 }
 $('zoom-in').onclick = () => { exitFitMode(); setZoom(zoomScale + 0.25); };
 $('zoom-out').onclick = () => { exitFitMode(); setZoom(zoomScale - 0.25); };
@@ -2598,7 +3170,7 @@ window.addEventListener('resize', () => {
     return;
   }
   if (fitMode) fitToWidth(); // setZoom → rerender，顺带消化 pendingRerender
-  else if (pendingRerender && pdfDoc) { pendingRerender = false; rerender(); } // 隐藏期间欠下的重渲，恢复尺寸后补画
+  else if (pendingRerender && pdfDoc) { pendingRerender = false; rerender().catch(() => {}); } // 隐藏期间欠下的重渲，恢复尺寸后补画
 });
 
 /** 原文列的页节点：分屏时中文列有**同样的 page 号**，不加限定会取到中文列（C18/R7）。
@@ -2637,6 +3209,7 @@ async function goPage(n) {
   } else {
     curPage = p;
     jumpToPage(p);
+    if (lazyView) void ensureLazyPage(p);
   }
 }
 
@@ -2753,6 +3326,7 @@ async function jumpTo(page, q) {
   for (let i = 0; i < 100; i++) {
     if (pdfDoc && origPageNode(Math.min(p0, pdfDoc.numPages))) {
       const p = Math.min(p0, pdfDoc.numPages);
+      if (lazyView) await ensureLazyPage(p);
       if (!(q && highlightSnippet(p, q))) jumpToPage(p);
       return;
     }
@@ -3710,6 +4284,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideTrPop(
    ===================================================================================== */
 const SPLIT_MIN_WIDTH = 640;   // 冻结：面板太窄不做分屏（§4.2）
 let pdfDocZh = null;
+let splitLoadSeq = 0;   // 分屏中文文档的加载序号：旧请求晚到时释放，不覆盖新文档
 let splitSyncing = false;
 let splitRaf = 0;
 let splitWarned = false;
@@ -3882,8 +4457,8 @@ function onSplitScroll(src) {
 async function renderColumn(doc, docKey, container, pages, token, scale) {
   for (const i of pages) {
     if (token !== renderToken) return;
-    const page = await doc.getPage(i);
-    if (token !== renderToken) return;
+    const page = await getPageForRender(doc, i, token);
+    if (!page || token !== renderToken) return;
     const viewport = page.getViewport({ scale });
     const div = makePageNode(i, viewport, docKey);
     container.appendChild(div);
@@ -3924,8 +4499,11 @@ function zhOwnAnchorUsable(box, doc, paged) {
 
 /** 分屏全量渲染入口：两列同时渲（滚动=各列全量、翻页=两列同渲 curPage）。 */
 async function renderSplit() {
+  teardownLazy()
   if (viewMode !== 'split') return rerender();
-  if (!pdfDoc) return;
+  const origDoc = pdfDoc;
+  const zhDoc = pdfDocZh;
+  if (!origDoc) return;
   const pane = $('pdf-pane');
   if (pane.clientHeight === 0) { pendingRerender = true; return; } // 与既有渲染入口同一条守卫
   const token = ++renderToken;
@@ -3939,22 +4517,22 @@ async function renderSplit() {
   const origAnchor = captureScrollAnchor(pane, origBox);
   const zhAnchor = captureScrollAnchor(zhPane, zhBox);
   const paged = pageMode === 'paged';
-  const zhOwn = zhOwnAnchorUsable(zhBox, pdfDocZh, paged);
+  const zhOwn = zhOwnAnchorUsable(zhBox, zhDoc, paged);
   origBox.innerHTML = '';
   zhBox.innerHTML = '';
   clearEqGeometry();   // 旧页几何 + 跨列残留的 hover/hit 描边一起作废
   $('zoom-label').textContent = Math.round(scale / 1.5 * 100) + '%';
   origBox.classList.toggle('paged', paged);
   zhBox.classList.toggle('paged', paged);
-  curPage = Math.min(Math.max(1, curPage), pdfDoc.numPages);
+  curPage = Math.min(Math.max(1, curPage), origDoc.numPages);
   updatePager();
-  const origList = paged ? [curPage] : Array.from({ length: pdfDoc.numPages }, (_, i) => i + 1);
-  await renderColumn(pdfDoc, 'orig', origBox, origList, token, scale);
+  const origList = paged ? [curPage] : Array.from({ length: origDoc.numPages }, (_, i) => i + 1);
+  await renderColumn(origDoc, 'orig', origBox, origList, token, scale);
   if (token !== renderToken) return;
-  if (pdfDocZh) {
-    const zhPage = Math.min(Math.max(1, curPage), pdfDocZh.numPages);
-    const zhList = paged ? [zhPage] : Array.from({ length: pdfDocZh.numPages }, (_, i) => i + 1);
-    await renderColumn(pdfDocZh, 'zh', zhBox, zhList, token, scale);
+  if (zhDoc) {
+    const zhPage = Math.min(Math.max(1, curPage), zhDoc.numPages);
+    const zhList = paged ? [zhPage] : Array.from({ length: zhDoc.numPages }, (_, i) => i + 1);
+    await renderColumn(zhDoc, 'zh', zhBox, zhList, token, scale);
     if (token !== renderToken) return;
   }
   // 锚点恢复：重渲后两列各自回到重渲前的位置。
@@ -3991,16 +4569,24 @@ async function openSplit() {
   // 动态 import 尚未完成 —— 直接触 pdfjsLib 会 ReferenceError，表现为
   // 「打开中文版失败：pdfjsLib is not defined，已退回原文」+ 持久化写空（t3 报告 F3，6 次跑 5 次失败）。
   await ensurePdfjs();
+  await resetViewCache(); // 分屏走独立的两列渲染；单文档缓存全部释放，避免同一文档两份
+  activeKey = 'orig';
   $('split-wrap').classList.add('on');
   $('pdf-pane-zh').style.display = '';
   splitWarned = false;
   $('empty').style.display = 'none';
   $('pager').style.display = '';
   $('mode-toggle').style.display = '';
-  if (pdfDocZh) { try { await pdfDocZh.destroy?.(); } catch { /* 旧文档已释放 */ } pdfDocZh = null; }
+  const seq = ++splitLoadSeq;
+  if (pdfDocZh) { await destroyPdfDoc(pdfDocZh); pdfDocZh = null; }
+  let task = null;
   try {
-    pdfDocZh = await pdfjsLib.getDocument({ url: pdfUrl('zh') }).promise;
+    task = pdfjsLib.getDocument({ url: pdfUrl('zh') });
+    const doc = await task.promise;
+    if (seq !== splitLoadSeq) { try { await task.destroy(); } catch { /* 已被新请求/teardown 取代 */ } return; }
+    pdfDocZh = doc;
   } catch (e) {
+    if (seq !== splitLoadSeq) return; // 旧请求失败：不覆盖新状态，也不弹提示
     // -zh.pdf 拿不到（被删/损坏）：回落原文 + 如实提示，不静默失败
     await setViewMode('orig');
     toast('打开中文版失败：' + (e && e.message ? e.message : e) + '，已退回原文', 6000);
@@ -4009,9 +4595,11 @@ async function openSplit() {
   await loadPdf(pdfUrl(null), { deferRender: true }); // 原文列（pdfDoc 恒指原文），本函数自己安排渲染
   // 分屏适宽：按较窄的那一列算一次（等价于 fitToWidth，但不让它触发一次多余的单列渲染）
   const w = fitPaneWidth();
-  if (w > 0) {
-    const p1 = await pdfDoc.getPage(1);
-    zoomScale = Math.min(4.5, Math.max(0.6, w / p1.getViewport({ scale: 1 }).width));
+  if (w > 0 && pdfDoc) {
+    try {
+      const p1 = await pdfDoc.getPage(1);
+      zoomScale = Math.min(4.5, Math.max(0.6, w / p1.getViewport({ scale: 1 }).width));
+    } catch { /* 文档在适宽前被替换：按现有 zoomScale 渲染 */ }
   }
   await renderSplit();
   attachSplitScroll();
@@ -4019,6 +4607,7 @@ async function openSplit() {
 
 /** 退出分屏：拆掉中文列、释放中文文档、同步监听。 */
 function teardownSplit() {
+  splitLoadSeq++; // 作废可能在飞的中文文档加载（它晚到时会自行 destroy）
   $('split-wrap').classList.remove('on');
   $('pdf-pane-zh').style.display = 'none';
   $('pdf-pages-zh').innerHTML = '';
@@ -4027,8 +4616,9 @@ function teardownSplit() {
   splitSyncing = false;
   splitLeadPane = null;   // 分屏退出：上一轮「最后滚过的那一列」作废（下次进分屏回到原文列为准）
   crafFn(splitRaf);
-  if (pdfDocZh) { try { pdfDocZh.destroy?.(); } catch { /* 已释放 */ } }
+  const old = pdfDocZh;
   pdfDocZh = null;
+  if (old) void destroyPdfDoc(old); // 异步释放 worker，不阻塞同步的 teardown
 }
 
 /** 两列的滚动监听（各自一个，**不**共用一个滚动容器——R7 明令）。 */

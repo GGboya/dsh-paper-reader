@@ -1338,11 +1338,24 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const ref = locate(url)
       const pdfPath = pdfVariantPath(ref, url.searchParams.get('variant'))
       const st = await stat(pdfPath) // 变体不存在时 404/500 由外层兜底
+      // ETag = 文件 mtime + size：重新翻译/替换 PDF 后自动变化；客户端带 If-None-Match 直接 304。
+      // 之前是 cache-control: no-cache 且无校验器，切语言/缩放都会把整份 PDF 重传一遍。
+      const etag = `"${Math.trunc(st.mtimeMs).toString(16)}-${st.size.toString(16)}"`
+      const cacheHeaders: Record<string, string> = {
+        etag,
+        'last-modified': st.mtime.toUTCString(),
+        'cache-control': 'private, max-age=0, must-revalidate',
+      }
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, cacheHeaders)
+        res.end()
+        return
+      }
       // download=1 → 附件下载（导出译文/原文）；文件名即磁盘名 <名>.pdf / -zh.pdf / -dual.pdf
       const headers: Record<string, string | number> = {
         'content-type': 'application/pdf',
         'content-length': st.size,
-        'cache-control': 'no-cache', // 切换文献/重新生成后必须拿到新的
+        ...cacheHeaders,
       }
       if (url.searchParams.get('download') === '1') {
         const name = basename(pdfPath)
