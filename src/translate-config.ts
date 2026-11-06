@@ -5,6 +5,7 @@
 // 优先级：文件 > profile 的 cordis.patch.yml config.translate（后者退为部署方默认值）。
 // 密钥只落盘、只回显掩码：任何读接口都不返回明文（apiKeyHint 是掩码后的展示串）。
 
+import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { TranslateEndpoint } from './translate.ts'
@@ -22,6 +23,16 @@ export type EndpointSource = 'file' | 'profile' | 'none'
 export interface ResolvedEndpoint {
   endpoint: TranslateEndpoint
   source: EndpointSource
+}
+
+export interface StoredTranslateEndpoint extends TranslateEndpoint {
+  id: string
+  label?: string
+}
+
+export interface TranslateEndpointStore {
+  activeId: string | null
+  endpoints: StoredTranslateEndpoint[]
 }
 
 export function translateConfigPath(home: string = dshHome()): string {
@@ -45,28 +56,99 @@ function pick(...sources: Array<TranslateEndpoint | null | undefined>): Translat
   return out
 }
 
-/** 读配置；文件缺失/损坏/形状不对一律返回 null（与 study.ts 的读策略一致）。 */
-export async function readTranslateConfig(home: string = dshHome()): Promise<TranslateEndpoint | null> {
-  try {
-    const data = JSON.parse(await readFile(translateConfigPath(home), 'utf8')) as unknown
-    if (typeof data !== 'object' || data === null) return null
-    const rec = data as Record<string, unknown>
-    const out: TranslateEndpoint = {}
-    if (typeof rec['baseUrl'] === 'string') out.baseUrl = rec['baseUrl']
-    if (typeof rec['apiKey'] === 'string') out.apiKey = rec['apiKey']
-    if (typeof rec['model'] === 'string') out.model = rec['model']
-    return out
-  } catch {
-    return null
-  }
+function endpointFields(rec: object): TranslateEndpoint {
+  const raw = rec as Record<string, unknown>
+  const out: TranslateEndpoint = {}
+  if (typeof raw['baseUrl'] === 'string') out.baseUrl = raw['baseUrl']
+  if (typeof raw['apiKey'] === 'string') out.apiKey = raw['apiKey']
+  if (typeof raw['model'] === 'string') out.model = raw['model']
+  return out
 }
 
-/** 写配置。0600：文件含明文密钥，不靠 umask。 */
-export async function writeTranslateConfig(cfg: TranslateEndpoint, home: string = dshHome()): Promise<void> {
+/** 新格式是多端点；旧版单对象自动视为 id=legacy 的第一项，读取无需用户重配。 */
+function parseStore(data: unknown): TranslateEndpointStore {
+  if (typeof data !== 'object' || data === null) return { activeId: null, endpoints: [] }
+  const rec = data as Record<string, unknown>
+  const endpoints: StoredTranslateEndpoint[] = []
+  if (Array.isArray(rec['endpoints'])) {
+    for (const item of rec['endpoints']) {
+      if (typeof item !== 'object' || item === null) continue
+      const e = item as Record<string, unknown>
+      if (typeof e['id'] !== 'string' || !e['id']) continue
+      endpoints.push({
+        id: e['id'],
+        ...(typeof e['label'] === 'string' && e['label'] ? { label: e['label'] } : {}),
+        ...endpointFields(e),
+      })
+    }
+  } else {
+    const legacy = endpointFields(rec)
+    if (legacy.baseUrl || legacy.apiKey || legacy.model) endpoints.push({ id: 'legacy', ...legacy })
+  }
+  const requested = typeof rec['activeId'] === 'string' ? rec['activeId'] : null
+  const activeId = requested === 'profile' || endpoints.some((e) => e.id === requested) ? requested : (endpoints[0]?.id ?? null)
+  return { activeId, endpoints }
+}
+
+export async function readTranslateEndpointStore(home: string = dshHome()): Promise<TranslateEndpointStore> {
+  try { return parseStore(JSON.parse(await readFile(translateConfigPath(home), 'utf8'))) }
+  catch { return { activeId: null, endpoints: [] } }
+}
+
+async function writeStore(store: TranslateEndpointStore, home: string): Promise<void> {
   const file = translateConfigPath(home)
   await mkdir(dirname(file), { recursive: true })
-  await writeFile(file, JSON.stringify(cfg, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
-  await chmod(file, 0o600) // mode 只在新建时生效；已存在的文件要显式收紧
+  await writeFile(file, JSON.stringify(store, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
+  await chmod(file, 0o600)
+}
+
+/** 兼容旧调用方：读出当前选中端点。 */
+export async function readTranslateConfig(home: string = dshHome()): Promise<TranslateEndpoint | null> {
+  const store = await readTranslateEndpointStore(home)
+  const active = store.activeId === 'profile' ? null : store.endpoints.find((e) => e.id === store.activeId) ?? store.endpoints[0]
+  return active ? endpointFields(active) : null
+}
+
+/** 兼容旧调用方：单端点写入会替换整个文件；UI 多端点保存走 saveTranslateEndpoint。 */
+export async function writeTranslateConfig(cfg: TranslateEndpoint, home: string = dshHome()): Promise<void> {
+  await writeStore({ activeId: 'legacy', endpoints: [{ id: 'legacy', ...cfg }] }, home)
+}
+
+/** 新建/更新并选中一个端点；id='new' 强制新增，缺省 id 更新当前项（旧 UI 语义）。 */
+export async function saveTranslateEndpoint(
+  cfg: Required<TranslateEndpoint>,
+  options: { id?: string; label?: string; home?: string } = {},
+): Promise<StoredTranslateEndpoint> {
+  const home = options.home ?? dshHome()
+  const store = await readTranslateEndpointStore(home)
+  const existing = options.id === 'new'
+    ? undefined
+    : store.endpoints.find((e) => e.id === (options.id ?? store.activeId))
+  const label = options.label?.trim() || existing?.label
+  const entry: StoredTranslateEndpoint = {
+    id: existing?.id ?? randomUUID(),
+    ...(label ? { label } : {}),
+    ...cfg,
+  }
+  const endpoints = existing
+    ? store.endpoints.map((e) => e.id === existing.id ? entry : e)
+    : [...store.endpoints, entry]
+  await writeStore({ activeId: entry.id, endpoints }, home)
+  return entry
+}
+
+/** 记住生成时选择的端点，划词翻译与下次打开选择器也沿用同一项。 */
+export async function selectTranslateEndpoint(id: string, home: string = dshHome()): Promise<void> {
+  const store = await readTranslateEndpointStore(home)
+  if (id !== 'profile' && !store.endpoints.some((e) => e.id === id)) throw new Error('翻译端点不存在')
+  await writeStore({ ...store, activeId: id }, home)
+}
+
+/** 删除单个端点；删当前项后选中下一项。无剩余文件端点时 resolve 会回落 profile。 */
+export async function deleteTranslateEndpoint(id: string, home: string = dshHome()): Promise<void> {
+  const store = await readTranslateEndpointStore(home)
+  const endpoints = store.endpoints.filter((e) => e.id !== id)
+  await writeStore({ activeId: store.activeId === id ? (endpoints[0]?.id ?? null) : store.activeId, endpoints }, home)
 }
 
 /** 删除配置（回落到 profile 的 translate）。文件不存在也算成功。 */
@@ -78,11 +160,19 @@ export async function clearTranslateConfig(home: string = dshHome()): Promise<vo
 export async function resolveTranslateEndpoint(
   profile?: TranslateEndpoint,
   home: string = dshHome(),
+  endpointId?: string,
 ): Promise<ResolvedEndpoint> {
-  const file = await readTranslateConfig(home)
+  const store = await readTranslateEndpointStore(home)
+  if (endpointId === 'profile' || (!endpointId && store.activeId === 'profile')) return isComplete(profile)
+    ? { endpoint: profile, source: 'profile' }
+    : { endpoint: {}, source: 'none' }
+  const selected = endpointId
+    ? store.endpoints.find((e) => e.id === endpointId)
+    : store.endpoints.find((e) => e.id === store.activeId) ?? store.endpoints[0]
+  const file = selected ? endpointFields(selected) : null
   if (isComplete(file)) return { endpoint: file, source: 'file' }
-  if (isComplete(profile)) return { endpoint: profile, source: 'profile' }
-  return { endpoint: pick(profile, file), source: 'none' }
+  if (!endpointId && isComplete(profile)) return { endpoint: profile, source: 'profile' }
+  return { endpoint: endpointId ? (file ?? {}) : pick(profile, file), source: 'none' }
 }
 
 /** 掩码展示：只露头 3 尾 4，够用户认出是哪把 key，又不足以还原。 */

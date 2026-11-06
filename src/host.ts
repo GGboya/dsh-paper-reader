@@ -59,14 +59,17 @@ import {
 } from './translate-selection.ts'
 import { MineruError, sanitizeDetail } from './mineru.ts'
 import { readTranscript, transcribePaper, ScannedPdfError, ShortTextError, type SourceArg } from './transcribe.ts'
-import { pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
+import { cancelTranslation, pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
 import {
   clearTranslateConfig,
+  deleteTranslateEndpoint,
   maskApiKey,
   readTranslateConfig,
+  readTranslateEndpointStore,
   resolveTranslateEndpoint,
+  saveTranslateEndpoint,
+  selectTranslateEndpoint,
   testTranslateEndpoint,
-  writeTranslateConfig,
 } from './translate-config.ts'
 import {
   clearTypesafeConfig,
@@ -1382,7 +1385,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
 
     // 启动后台翻译（幂等；force=true 为重翻：先删已有译文再启动）。端点：UI 里填的 > profile 的 translate
     if (sub === '/api/zh/generate' && req.method === 'POST') {
-      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; force?: boolean }
+      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; force?: boolean; endpointId?: string }
       let ref: PaperRef
       try {
         // 同样写盘（<文献>-zh.pdf 落在 PDF 旁边）→ 与 transcribe 同一套 path 边界约束
@@ -1391,7 +1394,12 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         if (manageFail(res, err)) return
         throw err
       }
-      const { endpoint } = await resolveTranslateEndpoint(config.translate)
+      const { endpoint, source } = await resolveTranslateEndpoint(config.translate, undefined, body.endpointId)
+      if (body.endpointId && source === 'none') {
+        json(res, 400, { error: '所选翻译端点不存在或配置不完整，请重新选择', code: 'endpoint-not-found' })
+        return
+      }
+      if (body.endpointId && source !== 'none') await selectTranslateEndpoint(body.endpointId)
       const r = body.force
         ? await restartTranslation(ref, dataDir, endpoint)
         : await startTranslation(ref, dataDir, endpoint)
@@ -1399,16 +1407,50 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       return
     }
 
+    // 取消在途翻译：立即允许重新生成；旧进程回调由任务序号隔离，不得覆盖后续任务。
+    if (sub === '/api/zh/cancel' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string }
+      let ref: PaperRef
+      try {
+        ref = locateForWrite(body)
+      } catch (err) {
+        if (manageFail(res, err)) return
+        throw err
+      }
+      const cancelled = cancelTranslation(ref)
+      json(res, cancelled ? 200 : 409, { cancelled, ...(cancelled ? {} : { error: '当前没有可取消的翻译任务' }) })
+      return
+    }
+
     // ── 翻译端点配置（阅读器浮层的读写口）─────────────────────────────
     // GET 只回显掩码 key：明文永不离开服务端
     if (sub === '/api/translate/config' && req.method === 'GET') {
       const { endpoint, source } = await resolveTranslateEndpoint(config.translate)
+      const store = await readTranslateEndpointStore()
+      const endpoints = store.endpoints.map((e) => ({
+        id: e.id,
+        label: e.label ?? '',
+        baseUrl: e.baseUrl ?? '',
+        model: e.model ?? '',
+        hasApiKey: Boolean(e.apiKey),
+        apiKeyHint: e.apiKey ? maskApiKey(e.apiKey) : '',
+        complete: Boolean(e.baseUrl && e.apiKey && e.model),
+        source: 'file',
+      }))
+      if (config.translate?.baseUrl && config.translate.apiKey && config.translate.model) {
+        endpoints.push({
+          id: 'profile', label: 'profile 默认配置', baseUrl: config.translate.baseUrl, model: config.translate.model,
+          hasApiKey: true, apiKeyHint: maskApiKey(config.translate.apiKey), complete: true, source: 'profile',
+        })
+      }
       json(res, 200, {
         baseUrl: endpoint.baseUrl ?? '',
         model: endpoint.model ?? '',
         hasApiKey: Boolean(endpoint.apiKey),
         apiKeyHint: endpoint.apiKey ? maskApiKey(endpoint.apiKey) : '',
         source,
+        activeId: source === 'none' ? null : source === 'profile' ? 'profile' : store.activeId,
+        endpoints,
       })
       return
     }
@@ -1416,12 +1458,16 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // POST：校验 → 预检 → 通了才落盘。key 填错在这里就拦下，
     // 不让它拖到 babeldoc 跑几分钟后才异步失败。
     if (sub === '/api/translate/config' && req.method === 'POST') {
-      const body = (await readBody(req)) as { baseUrl?: string; apiKey?: string; model?: string }
+      const body = (await readBody(req)) as { id?: string; label?: string; baseUrl?: string; apiKey?: string; model?: string }
       const baseUrl = body.baseUrl?.trim() ?? ''
       const model = body.model?.trim() ?? ''
-      // key 留空 = 沿用已存的那把（明文不回传，前端无法预填）
+      // key 留空 = 沿用正在编辑的那个端点，而不是误用当前活跃端点的 key。
+      const store = await readTranslateEndpointStore()
+      const editing = body.id && body.id !== 'new'
+        ? store.endpoints.find((e) => e.id === body.id)
+        : store.endpoints.find((e) => e.id === store.activeId)
       const prev = await readTranslateConfig()
-      const apiKey = body.apiKey?.trim() || prev?.apiKey || ''
+      const apiKey = body.apiKey?.trim() || editing?.apiKey || (!body.id ? prev?.apiKey : '') || ''
       if (!/^https?:\/\//i.test(baseUrl)) {
         json(res, 400, { error: '端点 URL 需要以 http:// 或 https:// 开头' })
         return
@@ -1439,14 +1485,19 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         json(res, 400, { error: `连接测试失败：${test.detail ?? '未知原因'}` })
         return
       }
-      await writeTranslateConfig({ baseUrl, apiKey, model })
-      json(res, 200, { ok: true })
+      const saved = await saveTranslateEndpoint(
+        { baseUrl, apiKey, model },
+        { ...(body.id ? { id: body.id } : {}), ...(body.label ? { label: body.label } : {}) },
+      )
+      json(res, 200, { ok: true, id: saved.id })
       return
     }
 
-    // DELETE：清掉文件，回落到 profile 的 translate
+    // DELETE：带 id 只删一个；不带 id 清空文件配置（旧客户端语义），回落到 profile。
     if (sub === '/api/translate/config' && req.method === 'DELETE') {
-      await clearTranslateConfig()
+      const id = url.searchParams.get('id')
+      if (id) await deleteTranslateEndpoint(id)
+      else await clearTranslateConfig()
       json(res, 200, { ok: true })
       return
     }

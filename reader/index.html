@@ -310,7 +310,7 @@
 
   /* ---------- 翻译端点设置浮层 ---------- */
   /* 阅读器在窄 iframe 里，宽度要能收缩 */
-  #cfg-pop, #theme-pop { position: fixed; z-index: 60; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: min(320px, calc(100vw - 32px)); }
+  #cfg-pop, #theme-pop, #generate-pop { position: fixed; z-index: 60; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: min(320px, calc(100vw - 32px)); }
   #cfg-pop h3, #theme-pop h3 { margin: 0; font-size: 13px; }
   #cfg-hint { font-size: 12px; color: var(--text-2); margin: 4px 0 2px; }
   #cfg-pop label, #theme-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 2px; }
@@ -322,9 +322,10 @@
   #cfg-pop input, #cfg-pop select, #theme-pop input, #theme-pop select { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; background: var(--panel); color: var(--text); }
   #cfg-model-hint, #cfg-source { font-size: 11.5px; color: var(--text-2); margin-top: 4px; line-height: 1.5; }
   #cfg-source:empty { display: none; }
-  #cfg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-  #cfg-save { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; }
-  #cfg-save:disabled { opacity: .5; cursor: default; }
+  #cfg-actions, #generate-actions, #cfg-list-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+  #cfg-list-actions { justify-content: flex-start; margin-top: 4px; }
+  #cfg-save, #generate-start { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; }
+  #cfg-save:disabled, #generate-start:disabled { opacity: .5; cursor: default; }
   #cfg-cancel { background: none; border: none; color: var(--text-2); cursor: pointer; }
 
   #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: rgba(30,30,30,.92); color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; display: none; z-index: 99; max-width: 70%; }
@@ -357,6 +358,7 @@
   <!-- 翻译进度条：只在 babeldoc 跑着时出现（宽度=overall，文字=阶段+百分比），
        窄列下先让位给按钮（flex:0 1 auto + min-width:0），别把控件挤出去 -->
   <span id="zh-prog" hidden><span class="track"><span class="fill"></span></span><span class="txt"></span></span>
+  <button id="zh-cancel" class="tbtn" style="display:none" title="取消当前翻译，之后可换端点重试">取消</button>
   <!-- 路径不再占顶栏：藏于此（tucked），悬停状态文字可见完整路径、点击状态文字复制（见下方绑定） -->
   <button id="pdf-path" class="tucked" style="display:none" title="点击复制文件路径"></button>
   <span class="bar-sep"></span>
@@ -507,6 +509,12 @@
   <h3>翻译端点</h3>
   <div id="cfg-hint">选预设供应商，或选「自定义」填任意 OpenAI 兼容端点（通义 / 本地 vLLM 等）。OpenCode Go 需先在 OpenCode Console 订阅并复制 API Key。保存前会先测试连接。</div>
   <div id="cfg-source"></div>
+  <label for="cfg-saved">已保存端点</label>
+  <select id="cfg-saved"></select>
+  <div id="cfg-list-actions">
+    <button id="cfg-new" class="tbtn">新增端点</button>
+    <button id="cfg-delete" class="tbtn">删除当前</button>
+  </div>
   <label for="cfg-provider">供应商</label>
   <select id="cfg-provider"></select>
   <label for="cfg-url">端点 URL</label>
@@ -519,7 +527,20 @@
   <div id="cfg-model-hint">glm-5.x / k3 / deepseek-flash 是推理型模型，服务端已自动关闭思考；选自定义端点时建议用非推理模型，否则会慢好几倍。</div>
   <div id="cfg-actions">
     <button id="cfg-cancel">取消</button>
+    <button id="cfg-save-new">另存为新端点</button>
     <button id="cfg-save">保存</button>
+  </div>
+</div>
+
+<div id="generate-pop">
+  <h3>选择翻译模型</h3>
+  <div id="generate-hint">本次整篇翻译使用哪个已保存端点？Key 只会显示掩码。</div>
+  <label for="generate-endpoint">模型 / API Key</label>
+  <select id="generate-endpoint"></select>
+  <div id="generate-actions">
+    <button id="generate-manage" class="tbtn">管理端点</button>
+    <button id="generate-cancel" class="tbtn">取消</button>
+    <button id="generate-start">开始翻译</button>
   </div>
 </div>
 
@@ -2106,7 +2127,10 @@ window.dprNotesDebug = () => ({
 /* ================= 中英切换 ================= */
 /** 翻译进度条（只在 busy 时出现）：宽度跟着后端 progress.overall，文字给阶段+百分比。 */
 function updateZhProgress() {  const box = $('zh-prog');
-  const p = zhState && zhState.busy ? zhState.progress : null;
+  const busy = Boolean(zhState && zhState.busy);
+  const p = busy ? zhState.progress : null;
+  $('zh-cancel').style.display = busy ? '' : 'none';
+  if (!busy) { zhCancelArmed = false; $('zh-cancel').textContent = '取消'; }
   if (!p) { box.hidden = true; return; }
   const pct = typeof p.overall === 'number' ? Math.max(0, Math.min(100, p.overall)) : null;
   box.hidden = false;
@@ -2116,6 +2140,29 @@ function updateZhProgress() {  const box = $('zh-prog');
     : `${p.label || '翻译'} ${Math.round(pct)}%`;
   box.title = p.text || '';
 }
+let zhCancelArmed = false;
+$('zh-cancel').onclick = async () => {
+  if (!zhState.busy) return;
+  if (!zhCancelArmed) {
+    zhCancelArmed = true;
+    $('zh-cancel').textContent = '确认取消?';
+    setTimeout(() => { if (zhCancelArmed) { zhCancelArmed = false; $('zh-cancel').textContent = '取消'; } }, 3000);
+    return;
+  }
+  zhCancelArmed = false;
+  $('zh-cancel').disabled = true;
+  try {
+    await api('/zh/cancel', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(current),
+    });
+    toast('已取消翻译，可以换端点重试');
+  } catch (e) { toast('取消失败：' + e.message, 8000); }
+  finally {
+    $('zh-cancel').disabled = false;
+    $('zh-cancel').textContent = '取消';
+    await refreshZhState();
+  }
+};
 // 别人启动的翻译（另开会话/刷新页面后进来）也要能看到进度：busy 就自动挂一个低成本轮询
 let zhWatch = null;
 let zhGenerating = false;
@@ -2145,9 +2192,17 @@ async function refreshZhState() {
   if (zhState.busy && zhState.phase) {
     statusEl.textContent = zhState.phase;
     statusEl.dataset.phaseShown = '1';
-  } else if (!zhState.busy && statusEl.dataset.phaseShown) {
+  } else if (zhState.error && zhState.error !== '已取消翻译') {
+    // 失败原因持续留在顶栏（完整文本放 title），刷新/后台任务也能看到，不靠一次性 toast。
+    statusEl.textContent = '翻译失败：' + zhState.error;
+    statusEl.title = zhState.error;
+    statusEl.dataset.errorShown = '1';
+    if (prev.error !== zhState.error) toast('生成失败：' + zhState.error, 12000);
+  } else if (!zhState.busy && (statusEl.dataset.phaseShown || statusEl.dataset.errorShown)) {
     delete statusEl.dataset.phaseShown;
+    delete statusEl.dataset.errorShown;
     if (statusMeta) statusEl.textContent = statusMeta;
+    statusEl.title = $('pdf-path').textContent ? `${$('pdf-path').textContent}（点击复制）` : '';
   }
   updateZhProgress();
   ensureZhWatch();
@@ -2225,7 +2280,7 @@ $('zh-toggle').onclick = async () => {
     await setViewMode(zhVariant === null ? (zhState.zh ? 'zh' : 'dual') : 'orig');
     return;
   }
-  await startGenerate(false);
+  await openGeneratePop(false);
 };
 
 /* ================= 视图模式（模式 A 对照 / 模式 B 分屏）=================
@@ -2284,12 +2339,55 @@ async function setViewMode(mode) {
 $('dual-toggle').onclick = () => setViewMode(viewMode === 'dual' ? 'orig' : 'dual');
 $('split-toggle').onclick = () => setViewMode(viewMode === 'split' ? 'orig' : 'split');
 
+let generateForce = false;
+let generateEndpoints = [];
+function endpointDisplay(e) {
+  const provider = providerOf(e.baseUrl).name;
+  return `${e.label || provider} · ${e.model || '未填模型'} · ${e.apiKeyHint || '无 Key'}`;
+}
+function closeGeneratePop() { $('generate-pop').style.display = 'none'; }
+async function openGeneratePop(force) {
+  generateForce = force;
+  let cfg;
+  try { cfg = await api('/translate/config'); }
+  catch (e) { toast('读取翻译端点失败：' + e.message, 8000); return; }
+  generateEndpoints = (cfg.endpoints || []).filter((e) => e.complete);
+  if (!generateEndpoints.length) {
+    cfgRetryForce = force;
+    await openCfgPop(true);
+    return;
+  }
+  const sel = $('generate-endpoint');
+  sel.innerHTML = '';
+  for (const e of generateEndpoints) {
+    const opt = document.createElement('option');
+    opt.value = e.id; opt.textContent = endpointDisplay(e);
+    sel.appendChild(opt);
+  }
+  sel.value = generateEndpoints.some((e) => e.id === cfg.activeId) ? cfg.activeId : generateEndpoints[0].id;
+  const pop = $('generate-pop');
+  pop.style.display = 'block';
+  pop.style.left = Math.max(8, (window.innerWidth - pop.offsetWidth) / 2) + 'px';
+  pop.style.top = Math.max(8, (window.innerHeight - pop.offsetHeight) / 3) + 'px';
+}
+$('generate-start').onclick = () => {
+  const id = $('generate-endpoint').value;
+  closeGeneratePop();
+  void startGenerate(generateForce, id);
+};
+$('generate-cancel').onclick = closeGeneratePop;
+$('generate-manage').onclick = () => {
+  closeGeneratePop();
+  cfgRetryForce = generateForce;
+  void openCfgPop(true);
+};
+
 // 生成/重翻共用：force=true 时服务端先删旧译文再启动；成功后轮询到完成
-async function startGenerate(force) {
+async function startGenerate(force, endpointId) {
   try {
     const r = await api('/zh/generate', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(force ? { ...current, force: true } : current),
+      body: JSON.stringify({ ...current, ...(force ? { force: true } : {}), ...(endpointId ? { endpointId } : {}) }),
     });
     const m = zhState.model ? `（${zhState.model}）` : '';
     toast(r.firstRun
@@ -2298,6 +2396,7 @@ async function startGenerate(force) {
   } catch (e) {
     // 没配端点 → 直接弹配置表单；填好保存后自动回来重试（记住是不是重翻）
     if (e.code === 'no-endpoint') { cfgRetryForce = force; openCfgPop(true); return; }
+    if (e.code === 'endpoint-not-found') { toast(e.message, 6000); await openGeneratePop(force); return; }
     toast(e.message, 8000); return;
   }
   $('zh-toggle').disabled = true; $('zh-toggle').innerHTML = iconHtml('spin');
@@ -2320,7 +2419,7 @@ async function startGenerate(force) {
         else if (zhVariant) await activateView(zhVariant); // 单文档：缓存已被 refreshZhState 失效，重新加载新译文
         else $('zh-toggle').click();
       }
-      else toast('生成失败：' + (zhState.error || '未知原因'), 8000);
+      else if (!zhState.error) toast('生成失败：未知原因', 8000); // 具体错误已由 refreshZhState 持续展示并提示
     }
   }, 1000);
 }
@@ -2339,7 +2438,7 @@ $('zh-regen').onclick = async () => {
   const btn = $('zh-regen');
   if (regenArmTimer) {           // 第二击：确认执行
     disarmRegen();
-    await startGenerate(true);
+    await openGeneratePop(true);
     return;
   }
   btn.textContent = '重翻?';      // 第一击：进入待确认态
@@ -2384,6 +2483,61 @@ const providerOf = (baseUrl) => PROVIDERS.find((p) => p.id !== 'custom' && normU
 let cfgRetryGenerate = false;
 let cfgRetryForce = false;   // 待重试的是不是「重翻」（regen 图标进来时旧译文还在，zh-toggle 点击语义不对，必须带 force）
 let cfgRetryTranslate = false; // 待重试的是不是「划词翻译」（点「译」发现没配端点 → 填完自动重试这次翻译）
+let cfgEndpoints = [];
+let cfgEditingId = 'new';
+let cfgDeleteArmed = false;
+
+function fillCfgEndpoint(e) {
+  cfgEditingId = e?.id || 'new';
+  cfgDeleteArmed = false;
+  $('cfg-delete').textContent = '删除当前';
+  $('cfg-delete').disabled = !e || e.source === 'profile';
+  $('cfg-url').value = e?.baseUrl || '';
+  $('cfg-model').value = e?.model || '';
+  const sel = $('cfg-provider');
+  sel.value = providerOf(e?.baseUrl).id;
+  const keepUrl = $('cfg-url').value, keepModel = $('cfg-model').value;
+  sel.onchange();
+  $('cfg-url').value = keepUrl || $('cfg-url').value;
+  $('cfg-model').value = keepModel || $('cfg-model').value;
+  $('cfg-key').value = '';
+  $('cfg-key').placeholder = e?.hasApiKey ? `已保存（${e.apiKeyHint}），留空则不修改` : 'sk-...';
+  $('cfg-source').textContent = e
+    ? `${e.source === 'profile' ? 'profile 默认配置（保存会另存为本界面配置）' : '本界面保存的配置'}（key ${e.apiKeyHint || '未填'}）`
+    : '新端点：保存前会先做连接测试';
+}
+function fillCfgList(activeId) {
+  const sel = $('cfg-saved');
+  sel.innerHTML = '';
+  for (const e of cfgEndpoints) {
+    const opt = document.createElement('option');
+    opt.value = e.id; opt.textContent = endpointDisplay(e) + (e.complete ? '' : '（不完整）');
+    sel.appendChild(opt);
+  }
+  const add = document.createElement('option');
+  add.value = 'new'; add.textContent = '＋ 新建端点…';
+  sel.appendChild(add);
+  const selected = cfgEndpoints.find((e) => e.id === activeId) || null;
+  sel.value = selected?.id || 'new';
+  fillCfgEndpoint(selected);
+}
+$('cfg-saved').onchange = () => fillCfgEndpoint(cfgEndpoints.find((e) => e.id === $('cfg-saved').value) || null);
+$('cfg-new').onclick = () => { $('cfg-saved').value = 'new'; fillCfgEndpoint(null); };
+$('cfg-delete').onclick = async () => {
+  const e = cfgEndpoints.find((x) => x.id === cfgEditingId);
+  if (!e || e.source === 'profile') return;
+  if (!cfgDeleteArmed) {
+    cfgDeleteArmed = true;
+    $('cfg-delete').textContent = '确认删除?';
+    setTimeout(() => { cfgDeleteArmed = false; $('cfg-delete').textContent = '删除当前'; }, 3000);
+    return;
+  }
+  try {
+    await api('/translate/config?id=' + encodeURIComponent(e.id), { method: 'DELETE' });
+    toast('端点已删除');
+    await openCfgPop(false);
+  } catch (err) { toast('删除失败：' + err.message, 8000); }
+};
 
 async function openCfgPop(retryGenerate) {
   $('theme-pop').style.display = 'none'; // 与深色面板互斥：同时只开一个
@@ -2392,23 +2546,8 @@ async function openCfgPop(retryGenerate) {
   try {
     cfg = await api('/translate/config');
   } catch (e) { toast('读取配置失败：' + e.message, 8000); return; }
-  $('cfg-url').value = cfg.baseUrl || '';
-  $('cfg-model').value = cfg.model || '';
-  // 按已存 URL 回显供应商，并触发一次 onchange 补齐模型候选（但不覆盖已存模型/URL）
-  const sel = $('cfg-provider');
-  sel.value = providerOf(cfg.baseUrl).id;
-  const keepUrl = $('cfg-url').value, keepModel = $('cfg-model').value;
-  sel.onchange();
-  $('cfg-url').value = keepUrl || $('cfg-url').value;
-  $('cfg-model').value = keepModel || $('cfg-model').value;
-  // 明文 key 不回传：留空 = 沿用已存的那把
-  $('cfg-key').value = '';
-  $('cfg-key').placeholder = cfg.hasApiKey ? `已保存（${cfg.apiKeyHint}），留空则不修改` : 'sk-...';
-  // 生效配置的来源：界面保存的文件 优先于 profile 的 YAML 默认值——两条来源都有时不说明会分不清生效的是谁
-  $('cfg-source').textContent =
-    cfg.source === 'file' ? `当前生效：本界面保存的配置（key ${cfg.apiKeyHint}）`
-    : cfg.source === 'profile' ? '当前生效：profile 默认配置（在本界面保存后会被覆盖）'
-    : '';
+  cfgEndpoints = cfg.endpoints || [];
+  fillCfgList(cfg.activeId);
   const pop = $('cfg-pop');
   pop.style.display = 'block';
   // 先显示再量尺寸（不像 #ask-pop 那样写死尺寸常量，免得跟 CSS 漂移）
@@ -2431,16 +2570,19 @@ document.addEventListener('click', (e) => {
 });
 $('cfg-cancel').onclick = closeCfgPop;
 
-$('cfg-save').onclick = async () => {
+async function saveCfg(saveAsNew) {
   // retry/force/translate 先捞出来：closeCfgPop 会把这三个待确认态清零
-  const btn = $('cfg-save'), label = btn.textContent, retry = cfgRetryGenerate, force = cfgRetryForce, retryTr = cfgRetryTranslate;
+  const btn = saveAsNew ? $('cfg-save-new') : $('cfg-save'), label = btn.textContent;
+  const retry = cfgRetryGenerate, force = cfgRetryForce, retryTr = cfgRetryTranslate;
   btn.disabled = true; btn.textContent = '测试中…';
+  let saved;
   try {
     // 服务端先打一发极小的 chat/completions 验证 url/key/model，通过才落盘
-    await api('/translate/config', {
+    saved = await api('/translate/config', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        id: saveAsNew ? 'new' : cfgEditingId,
         baseUrl: $('cfg-url').value.trim(),
         apiKey: $('cfg-key').value.trim(),
         model: $('cfg-model').value.trim(),
@@ -2454,10 +2596,12 @@ $('cfg-save').onclick = async () => {
   }
   closeCfgPop();
   await refreshZhState();
-  if (retry) startGenerate(force);  // 沿用触发来源的语义：zh-toggle=生成，regen=重翻
+  if (retry) startGenerate(force, saved.id);  // 用刚保存的端点继续，不让旧 active 抢回去
   else if (retryTr) translateSelection(); // 划词翻译发现没配端点 → 填完自动重试这一次翻译（§3.7①）
   else toast('翻译端点已保存');
-};
+}
+$('cfg-save').onclick = () => saveCfg(false);
+$('cfg-save-new').onclick = () => saveCfg(true);
 
 /* ================= PDF 渲染(pdf.js:缩放 + devicePixelRatio 高清,移植自 pdfqa) ================= */
 /* pdf.js 6.x 本地 vendor：动态 import（缓存的 Promise），loadPdf 先 await 再用——
@@ -3611,6 +3755,13 @@ function renderEqPanel() {
   }
 }
 
+function transcribeResultText(t) {
+  const chars = typeof t.chars === 'number' ? `（${t.chars} 字符）` : '';
+  const engine = t.producer === 'mineru-local' || t.producer === 'mineru-cloud' ? 'MinerU' : 'pdf.js';
+  if (t.source === 'cache') return `已有 ${engine} 转录缓存，直接复用${chars}`;
+  return `${engine} 转录完成${chars}`;
+}
+
 $('transcribe-open').onclick = async () => {
   if (!current) return;
   const ref = { ...current };
@@ -3632,7 +3783,7 @@ $('transcribe-open').onclick = async () => {
     statusMeta = `${ref.name} · ${t.pageCount ?? '?'} 页`;
     $('status').textContent = statusMeta;
     syncTranscribeButton();
-    toast(t.source === 'pdfjs' ? 'PDF 转录完成' : 'MinerU 转录完成');
+    toast(transcribeResultText(t));
     await loadFormulas();
     if (pdfDoc) await rerender();
   } catch (e) {

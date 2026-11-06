@@ -93,6 +93,9 @@ case("sentence_split", lambda: m.split_text("One sentence here. Two sentences th
 case("placeholder_refuse", lambda: m.split_text("<b1>open only never closed " * 20, 40))
 case("balanced_ok", lambda: m.placeholders_balanced("<b1>x</b1> {v1}"))
 case("torn_refuse", lambda: m.placeholders_balanced("<b1>x</b2>"))
+case("quota_cn", lambda: m.is_quota_exhausted(Exception("429 - {'error': {'code': '1310', 'message': '您已达到每周/每月使用上限，您的限额将在 2026-11-07 15:27:43 重置。'}}")))
+case("quota_code", lambda: m.is_quota_exhausted(Exception('Error code: 429 - {"error":{"code":"1310"}}')))
+case("quota_normal_429", lambda: m.is_quota_exhausted(Exception("Error code: 429 - rate limit, retry later")))
 `
 
 test('D1: 驱动拆段纯函数（python 缺席则 skip）', { skip: runPython('1') === null && '本机无 python：驱动为发行件，CI 三平台自带 python 兜住' }, () => {
@@ -126,4 +129,13 @@ test('D1: 驱动拆段纯函数（python 缺席则 skip）', { skip: runPython('
   // 已知启发式边界（记录而非缺陷）：平衡检查只比开/闭<b>计数，<b1>x</b2> 计数相等视为平衡——
   // 配对错乱检测非目标；拆段守卫真正要防的「块边界劈开标签」由计数差捕获
   assert.equal(cases.torn_refuse, true, '计数相等的错配视为平衡（既定启发式，改动须同步文档）')
+  assert.equal(cases.quota_cn, true, '每周/每月配额耗尽必须识别为不可重试')
+  assert.equal(cases.quota_code, true, '端点只给 1310 机器码时同样不可重试')
+  assert.equal(cases.quota_normal_429, false, '普通 429 仍是瞬时限流，保留原有重试')
+})
+
+test('D2: 配额谓词必须接入 tenacity，不能只定义不使用', () => {
+  const driver = readFileSync(join(ROOT, '..', 'runtime', 'babeldoc-driver.py'), 'utf8')
+  assert.match(driver, /retry_if_exception\(\s*lambda exc: isinstance\(exc, openai\.RateLimitError\) and not is_quota_exhausted\(exc\)\s*\)/)
+  assert.doesNotMatch(driver, /retry_if_exception_type\(openai\.RateLimitError\)/, '不得退回无差别重试所有 429')
 })

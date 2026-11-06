@@ -102,6 +102,28 @@ export function dualPdfPath(ref: TranslatePaperRef): string {
 // key=pdfPath；null=进行中（无阶段说明）；{phase,progress}=进行中；{error}=已失败
 const busy = new Map<string, BusyState | null>();
 
+interface TranslationTask {
+    cancelled: boolean;
+    kill: (() => void) | null;
+}
+
+/** 每篇文献的当前任务句柄；换任务后旧回调凭对象同一性失效。 */
+const tasks = new Map<string, TranslationTask>();
+
+function setTaskBusy(ref: TranslatePaperRef, task: TranslationTask, state: BusyState | null): void {
+    if (tasks.get(ref.pdfPath) === task) busy.set(ref.pdfPath, state);
+}
+
+/** 用户主动取消：立即放开重试入口，子进程退出后的旧回调不得再改状态或搬产物。 */
+export function cancelTranslation(ref: TranslatePaperRef): boolean {
+    const task = tasks.get(ref.pdfPath);
+    if (!task || task.cancelled || !zhStatus(ref).busy) return false;
+    task.cancelled = true;
+    try { task.kill?.(); } catch { /* 进程已退出 */ }
+    setTaskBusy(ref, task, { error: '已取消翻译' });
+    return true;
+}
+
 /** 整篇翻译的硬超时（babeldoc 自己不死，靠这里收尸）。 */
 const TRANSLATE_TIMEOUT_MS = 45 * 60 * 1000;
 
@@ -218,7 +240,9 @@ function precheck(endpoint: TranslateEndpoint): StartResult | null {
 
 /** 后台流水线：确保 babeldoc 可用（缺失则自动安装）→ 拉起翻译。 */
 async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint): Promise<void> {
-    const setPhase = (phase: string) => busy.set(ref.pdfPath, { phase });
+    const task: TranslationTask = { cancelled: false, kill: null };
+    tasks.set(ref.pdfPath, task);
+    const setPhase = (phase: string) => setTaskBusy(ref, task, { phase });
     try {
         setPhase('正在检查翻译引擎…');
         // DPR_SKIP_ENGINE_ENSURE=1：跳过「自检 + 缺失则自动安装」，只用现成的 babeldoc
@@ -226,14 +250,18 @@ async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: Tr
         const bin = process.env.DPR_SKIP_ENGINE_ENSURE === '1'
             ? await findBabeldoc(dataDir)
             : await ensureBabeldoc(dataDir, dshHome(), () => findBabeldoc(dataDir), setPhase);
+        if (task.cancelled || tasks.get(ref.pdfPath) !== task) return;
         if (!bin)
             throw new Error('找不到 babeldoc 可执行文件');
-        await launch(ref, dataDir, endpoint, bin);
+        await launch(ref, dataDir, endpoint, bin, task);
     }
     catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        console.error('[dsh-paper-reader] babeldoc 自动安装失败:', msg);
-        busy.set(ref.pdfPath, { error: `翻译引擎安装失败：${msg}` });
+        if (!task.cancelled) console.error('[dsh-paper-reader] babeldoc 自动安装失败:', msg);
+        setTaskBusy(ref, task, { error: task.cancelled ? '已取消翻译' : `翻译引擎安装失败：${msg}` });
+    }
+    finally {
+        if (tasks.get(ref.pdfPath) === task) tasks.delete(ref.pdfPath);
     }
 }
 
@@ -336,12 +364,12 @@ function resolveDriverPython(bin: string | null): string | null {
 }
 
 /** 真正拉起 babeldoc 子进程（bin 已就绪、产物不存在/已删）。 */
-async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, bin: string): Promise<void> {
+async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, bin: string, task: TranslationTask): Promise<void> {
     // 走到这里之前 precheck 已保证三项齐全；收窄一次，后续按 string 用
     const ep = endpoint as Required<TranslateEndpoint>;
     const tmpDir = join(dataDir, '.pdf2zh-tmp');
     await mkdir(tmpDir, { recursive: true });
-    busy.set(ref.pdfPath, null); // 清掉安装阶段说明，回到「翻译进行中」
+    setTaskBusy(ref, task, null); // 清掉安装阶段说明，回到「翻译进行中」
     const stem = basename(ref.pdfPath, extname(ref.pdfPath));
     const dstStem = ref.pdfPath.slice(0, -extname(ref.pdfPath).length);
     // OpenCode Go：整篇翻译是一个「会话」，同一篇论文（含之后的划词翻译）共用一个稳定 ID，
@@ -387,6 +415,10 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
     const cmd = useDriver && python ? python : bin;
     const args = useDriver ? [DRIVER_PATH, ...babelArgs] : babelArgs;
     await new Promise<void>((resolveDone) => {
+        if (task.cancelled || tasks.get(ref.pdfPath) !== task) {
+            resolveDone();
+            return;
+        }
         const stages: StageWeight[] = [];
         let tail = '';
         let settled = false;
@@ -408,6 +440,9 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                 windowsHide: true,
                 stdio: ['ignore', logFd, logFd],
             });
+        task.kill = () => {
+            try { child?.kill(); } catch { /* 已退出 */ }
+        };
         if (logFd >= 0)
             try {
                 closeSync(logFd);
@@ -418,6 +453,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
             child?.kill();
         }, TRANSLATE_TIMEOUT_MS);
         const handleLine = (line: string): void => {
+            if (task.cancelled || tasks.get(ref.pdfPath) !== task) return;
             const raw = line.trim();
             if (!raw)
                 return;
@@ -450,7 +486,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
             if (event.type === 'finish' || event.type === 'progress_end')
                 return;
             const progress = buildProgress(event, stages);
-            busy.set(ref.pdfPath, { phase: `${progress.text}…`, progress });
+            setTaskBusy(ref, task, { phase: `${progress.text}…`, progress });
         };
         // 增量 tail 日志文件（按字节偏移读，用 StringDecoder 防多字节字符被切断）
         const decoder = new StringDecoder('utf8');
@@ -511,10 +547,15 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                 }
                 catch { /* 无所谓 */ }
             void (async () => {
+                if (task.cancelled || tasks.get(ref.pdfPath) !== task) {
+                    setTaskBusy(ref, task, { error: '已取消翻译' });
+                    resolveDone();
+                    return;
+                }
                 if (error || code !== 0) {
                     const detail = (tail.trim() || error?.message || '').slice(-MAX_TAIL_CHARS);
                     console.error('[dsh-paper-reader] babeldoc failed:', detail);
-                    busy.set(ref.pdfPath, { error: `babeldoc 执行失败: ${detail || `退出码 ${code}`}` });
+                    setTaskBusy(ref, task, { error: `babeldoc 执行失败: ${detail || `退出码 ${code}`}` });
                     resolveDone();
                     return;
                 }
@@ -530,15 +571,15 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                     }
                     if (!existsSync(zhPdfPath(ref)) && !existsSync(dualPdfPath(ref))) {
                         const why = tail.trim().split('\n').pop() ?? '';
-                        busy.set(ref.pdfPath, { error: `babeldoc 未产出译文 PDF${why ? `：${why}` : ''}` });
+                        setTaskBusy(ref, task, { error: `babeldoc 未产出译文 PDF${why ? `：${why}` : ''}` });
                         resolveDone();
                         return;
                     }
-                    busy.delete(ref.pdfPath);
+                    if (tasks.get(ref.pdfPath) === task) busy.delete(ref.pdfPath);
                     console.log(`[dsh-paper-reader] babeldoc done: ${ref.name}`);
                 }
                 catch (e) {
-                    busy.set(ref.pdfPath, { error: `移动译文产物失败: ${e instanceof Error ? e.message : String(e)}` });
+                    setTaskBusy(ref, task, { error: `移动译文产物失败: ${e instanceof Error ? e.message : String(e)}` });
                 }
                 resolveDone();
             })();

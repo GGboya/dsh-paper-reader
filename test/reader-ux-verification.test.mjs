@@ -2015,6 +2015,11 @@ test('VA15b[顶栏回归] 未转录论文保留独立手动转录入口', () => 
   assert.match(handler, /force: false, source: 'auto'/, '普通转录不得强刷缓存，且必须按当前 MinerU 配置选后端')
   assert.match(handler, /currentHasTranscript = true/, '成功后必须更新状态并收起按钮')
   assert.match(handler, /await loadFormulas\(\)/, 'MinerU 转录后必须刷新公式索引')
+  const resultSrc = SCRIPT_SRC.slice(SCRIPT_SRC.indexOf('function transcribeResultText'), SCRIPT_SRC.indexOf("$('transcribe-open').onclick"))
+  const resultText = new Function(`${resultSrc}; return transcribeResultText`)()
+  assert.equal(resultText({ source: 'local', producer: 'pdfjs', chars: 39552 }), 'pdf.js 转录完成（39552 字符）')
+  assert.equal(resultText({ source: 'mineru-local', producer: 'mineru-local', chars: 1234 }), 'MinerU 转录完成（1234 字符）')
+  assert.equal(resultText({ source: 'cache', producer: 'mineru-cloud', chars: 1234 }), '已有 MinerU 转录缓存，直接复用（1234 字符）')
 })
 
 test('VA16[契约·实现方自查③] 新增 live 用例不抢 GPU：t2 的测试文件不含任何 MinerU 解析调用', (t) => {

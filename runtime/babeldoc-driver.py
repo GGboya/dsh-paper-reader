@@ -145,6 +145,15 @@ _TOO_LONG_RE = re.compile(
     re.I,
 )
 _THINKING_RE = re.compile(r"始终思考|不支持关闭思考|thinking|推理", re.I)
+_QUOTA_EXHAUSTED_RE = re.compile(
+    r"每周/每月使用上限|(?:weekly|monthly).*(?:quota|limit)|['\"]code['\"]:\s*['\"]1310['\"]",
+    re.I,
+)
+
+
+def is_quota_exhausted(error: BaseException) -> bool:
+    """周期配额耗尽不是瞬时限流：重试一百次也不会成功，必须尽快把原因带回 UI。"""
+    return bool(_QUOTA_EXHAUSTED_RE.search(str(error)))
 
 
 def rough_tokens(text: str) -> int:
@@ -209,7 +218,7 @@ def install_translation() -> None:
     import openai
     from tenacity import before_sleep_log
     from tenacity import retry
-    from tenacity import retry_if_exception_type
+    from tenacity import retry_if_exception
     from tenacity import stop_after_attempt
     from tenacity import wait_exponential
 
@@ -280,7 +289,9 @@ def install_translation() -> None:
             raise
 
     @retry(
-        retry=retry_if_exception_type(openai.RateLimitError),
+        retry=retry_if_exception(
+            lambda exc: isinstance(exc, openai.RateLimitError) and not is_quota_exhausted(exc)
+        ),
         stop=stop_after_attempt(100),
         wait=wait_exponential(multiplier=1, min=1, max=15),
         before_sleep=before_sleep_log(log, logging.WARNING),
