@@ -552,8 +552,8 @@ test('R3 结构保证（静态）：热区层 pointer-events:none、唯一铺层
   // 顶栏 DOM 与脚本引用必须配对（任一 $('x') 为 null → 脚本开头即死）
   const ids = new Set([...READER_HTML.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]))
   const used = new Set()
-  for (const m of SCRIPT_SRC.matchAll(/\$\(\s*.([A-Za-z0-9_-]+).\s*\)/g)) used.add(m[1])
-  for (const m of SCRIPT_SRC.matchAll(/getElementById\(\s*.([A-Za-z0-9_-]+).\s*\)/g)) used.add(m[1])
+  for (const m of SCRIPT_SRC.matchAll(/\$\(\s*['"]([A-Za-z0-9_-]+)['"]\s*\)/g)) used.add(m[1])
+  for (const m of SCRIPT_SRC.matchAll(/getElementById\(\s*['"]([A-Za-z0-9_-]+)['"]\s*\)/g)) used.add(m[1])
   const missing = [...used].filter((x) => !ids.has(x))
   assert.deepEqual(missing, [], `脚本引用了不存在的 DOM id（会整个阅读器白屏）：${missing}`)
 })

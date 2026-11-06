@@ -500,8 +500,8 @@ test('R6 结构契约：pointer-events:none、唯一铺层点在 paintPage、全
   // DOM id ↔ 脚本引用必须配对（任一为 null → 脚本开头即死、整页白屏）
   const ids = new Set([...READER_HTML.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]))
   const used = new Set()
-  for (const m of SCRIPT_SRC.matchAll(/\$\(\s*.([A-Za-z0-9_-]+).\s*\)/g)) used.add(m[1])
-  for (const m of SCRIPT_SRC.matchAll(/getElementById\(\s*.([A-Za-z0-9_-]+).\s*\)/g)) used.add(m[1])
+  for (const m of SCRIPT_SRC.matchAll(/\$\(\s*['"]([A-Za-z0-9_-]+)['"]\s*\)/g)) used.add(m[1])
+  for (const m of SCRIPT_SRC.matchAll(/getElementById\(\s*['"]([A-Za-z0-9_-]+)['"]\s*\)/g)) used.add(m[1])
   assert.deepEqual([...used].filter((x) => !ids.has(x)), [], '脚本引用了不存在的 DOM id')
   // 翻页模式的 DOM 与键盘/翻页控件在位（上游特性）
   for (const id of ['pager', 'page-prev', 'page-input', 'page-total', 'page-next', 'mode-toggle', 'ver', 'dl-btn', 'pdf-path', 'eq-toggle', 'eq-panel']) {

@@ -319,7 +319,7 @@ test('A7 首帧判定与偏好持久化：localStorage 镜像在脚本一开头�
 test('A8 阅读器 CSS 契约：滤镜只挂 canvas，绝不挂 .page/.textLayer/.eqLayer（选区与热区不被反色）', () => {
   // 断言的是**真实 CSS 规则**（不是注释）：取所有含 filter 的规则块
   const CSS = READER_HTML.replace(/\/\*[\s\S]*?\*\//g, '')   // 注释里有 .eqLayer/.textLayer 字样，必须剥掉再匹配规则
-  const filterRules = [...CSS.matchAll(/([^{}]+)\{([^{}]*filter\s*:[^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }))
+  const filterRules = [...CSS.matchAll(/([^{}]+)\{([^{}]*(?<![\w-])filter\s*:[^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }))
   assert.ok(filterRules.length >= 1, '必须有滤镜规则（否则深色没实现）')
   for (const r of filterRules) {
     assert.ok(/canvas/.test(r.sel), `滤镜必须挂在 canvas 上：${r.sel}`)

@@ -34,6 +34,22 @@
   .tbtn:hover { background: var(--bg); }
   .tbtn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .tbtn:disabled { opacity: .45; cursor: default; }
+  /* 顶栏收纳：分组分隔线 / 弹性空隙 / 被菜单替代的按钮隐藏（!important 盖过状态机的 style.display）/
+     弹出菜单本体（绝对定位于 #bar） */
+  #bar { position: relative; }
+  .bar-sep { flex: none; width: 1px; height: 16px; background: var(--border); }
+  .bar-spacer { flex: 1 1 auto; }
+  .tucked { display: none !important; }
+  .bar-menu { position: absolute; z-index: 60; min-width: 208px; padding: 4px;
+    display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.22); }
+  .bar-menu[hidden] { display: none !important; }
+  .bar-menu button { all: unset; cursor: pointer; padding: 6px 10px; border-radius: 6px;
+    font-size: 12.5px; color: var(--text); }
+  .bar-menu button:hover { background: var(--bg); }
+  .bar-menu button.active { color: var(--accent); font-weight: 600; }
+  .bar-menu button:disabled { opacity: .45; cursor: default; }
+  .bar-menu hr { border: none; border-top: 1px solid var(--border); margin: 4px 6px; }
   /* 统一 SVG 图标：stroke=currentColor，active/disabled 的变色自动继承到图标 */
   .tbtn svg.ic { width: 16px; height: 16px; flex: none; }
   .tbtn svg.spin { transform-origin: center; animation: dpr-spin 1s linear infinite; }
@@ -78,7 +94,13 @@
   #pdf-pages.paged, #pdf-pages-zh.paged { min-height: 100%; justify-content: safe center; gap: 0; }
 
   /* ---------- 翻页控件 ---------- */
-  #pager { display: flex; align-items: center; gap: 4px; flex: none; }
+  /* 翻页条：阅读区底部悬浮居中（#main 的 absolute 锚，不随内容滚动）；
+     半透明 + 毛玻璃，hover 加实避免长时间挡字；JS 的 display:''/none 契约不变 */
+  #pager { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 30;
+    display: flex; align-items: center; gap: 4px; flex: none; padding: 3px 6px;
+    background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(6px);
+    border: 1px solid var(--border); border-radius: 999px; box-shadow: 0 3px 14px rgba(0,0,0,.16); }
+  #pager:hover { background: var(--panel); }
   /* 数字居中：text-align:right 会让单页码贴右框边、左侧空一块；
      上 padding 多 1px —— 数字无下伸部，光字心本就偏高，对称内边距看起来反而偏上 */
   #page-input { width: 3.5em; padding: 4px 6px 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px; line-height: 20px; text-align: center; }
@@ -279,11 +301,16 @@
 
   /* ---------- 翻译端点设置浮层 ---------- */
   /* 阅读器在窄 iframe 里，宽度要能收缩 */
-  #cfg-pop { position: fixed; z-index: 60; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: min(320px, calc(100vw - 32px)); }
-  #cfg-pop h3 { margin: 0; font-size: 13px; }
+  #cfg-pop, #theme-pop { position: fixed; z-index: 60; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: min(320px, calc(100vw - 32px)); }
+  #cfg-pop h3, #theme-pop h3 { margin: 0; font-size: 13px; }
   #cfg-hint { font-size: 12px; color: var(--text-2); margin: 4px 0 2px; }
-  #cfg-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 2px; }
-  #cfg-pop input, #cfg-pop select { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; background: var(--panel); color: var(--text); }
+  #cfg-pop label, #theme-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 2px; }
+  /* checkbox 例外：width:100% 会把它拉满整行、文字被挤到右边很远（实测视觉松散的根因） */
+  #cfg-pop input[type="checkbox"], #theme-pop input[type="checkbox"] { width: auto; }
+  #theme-pop h3 { display: flex; align-items: center; justify-content: space-between; }
+  #theme-close { all: unset; cursor: pointer; font-size: 12px; color: var(--text-2); padding: 2px 6px; border-radius: 4px; }
+  #theme-close:hover { background: var(--bg); color: var(--text); }
+  #cfg-pop input, #cfg-pop select, #theme-pop input, #theme-pop select { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; background: var(--panel); color: var(--text); }
   #cfg-model-hint, #cfg-source { font-size: 11.5px; color: var(--text-2); margin-top: 4px; line-height: 1.5; }
   #cfg-source:empty { display: none; }
   #cfg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
@@ -321,37 +348,45 @@
   <!-- 翻译进度条：只在 babeldoc 跑着时出现（宽度=overall，文字=阶段+百分比），
        窄列下先让位给按钮（flex:0 1 auto + min-width:0），别把控件挤出去 -->
   <span id="zh-prog" hidden><span class="track"><span class="fill"></span></span><span class="txt"></span></span>
-  <button id="pdf-path" style="display:none" title="点击复制文件路径"></button>
-  <button id="zh-toggle" class="tbtn" title="切换中文译文（没有译文时可生成）" style="display:none" data-icon="translate"></button>
-  <button id="dual-toggle" class="tbtn" title="用 babeldoc 的中英对照 PDF（模式 A）" style="display:none" data-icon="columns">对照</button>
-  <button id="split-toggle" class="tbtn" title="原文与中文版并排同步滚动（模式 B）" style="display:none" data-icon="split">分屏</button>
-  <!-- 「同步滚动」开关（模式 B 的全局偏好）：分屏控件旁，只在分屏下可见（模式 A/原文/译文都没有两个滚动条）。
-       状态换图标（sync / syncOff，与 mode-toggle 的 paged/scroll 同法）+ title 里 zh/en 说明状态；
-       与设置面板里的同一项共用 dpr.syncScroll 键、互相同步。 -->
+  <!-- 路径不再占顶栏：藏于此（tucked），悬停状态文字可见完整路径、点击状态文字复制（见下方绑定） -->
+  <button id="pdf-path" class="tucked" style="display:none" title="点击复制文件路径"></button>
+  <span class="bar-sep"></span>
+  <!-- 语言视图收纳（17 控件 → 分组）：原文/中文/对照/分屏 四态 + 重译 → 「视图」下拉。
+       原按钮 DOM 保留（.tucked 隐藏）——菜单项转发它们的 click，状态机零改动。
+       「同步滚动」仍按原逻辑仅在分屏下出现（见其原注释）。 -->
+  <button id="view-menu-btn" class="tbtn" title="语言视图：原文 / 中文 / 对照 / 分屏 / 重新翻译">视图：原文 ▾</button>
+  <button id="zh-toggle" class="tbtn tucked" title="切换中文译文（没有译文时可生成）" style="display:none" data-icon="translate"></button>
+  <button id="dual-toggle" class="tbtn tucked" title="用 babeldoc 的中英对照 PDF（模式 A）" style="display:none" data-icon="columns">对照</button>
+  <button id="split-toggle" class="tbtn tucked" title="原文与中文版并排同步滚动（模式 B）" style="display:none" data-icon="split">分屏</button>
   <button id="sync-toggle" class="tbtn" title="同步滚动 / Sync scroll：开（两列一起滚，点击关闭）" style="display:none" data-icon="sync"></button>
-  <button id="zh-regen" class="tbtn" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none" data-icon="regen"></button>
-  <button id="dl-btn" class="tbtn" title="下载 PDF" style="display:none" data-icon="download"></button>
-  <!-- 在文中查找（Ctrl+F）：入口紧挨下载，实际输入条是浮层，不占顶栏宽度 -->
-  <button id="find-open" class="tbtn" title="在文中查找（Ctrl+F）" style="display:none" data-icon="search"></button>
-  <!-- 笔记：入口紧挨搜索；点开是「笔记窗口」（列全部笔记 / 新建 / 编辑） -->
-  <button id="note-open" class="tbtn" title="笔记" style="display:none" data-icon="note"></button>
-  <span class="spacer"></span>
-  <button id="mode-toggle" class="tbtn" title="切换 滚动/翻页模式" style="display:none" data-icon="paged"></button>
-  <span id="pager" style="display:none">
-    <button id="page-prev" class="tbtn" title="上一页" data-icon="prev"></button>
-    <input id="page-input" type="text" inputmode="numeric" title="页码，回车跳转">
-    <span id="page-total">/ ?</span>
-    <button id="page-next" class="tbtn" title="下一页" data-icon="next"></button>
-  </span>
-  <button id="cfg-open" class="tbtn" title="翻译端点设置" data-icon="settings"></button>
+  <button id="zh-regen" class="tbtn tucked" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none" data-icon="regen"></button>
+  <span class="bar-sep"></span>
   <button id="zoom-out" class="tbtn" title="缩小" data-icon="minus"></button>
   <span id="zoom-label">100%</span>
   <button id="zoom-in" class="tbtn" title="放大" data-icon="plus"></button>
   <button id="zoom-fit" class="tbtn">适宽</button>
-  <button id="theme-toggle" class="tbtn" title="PDF 深色模式：跟随 dsh 主题（点击切换 关/跟随/强制深色）">A</button>
+  <button id="mode-toggle" class="tbtn" title="切换 滚动/翻页模式" style="display:none" data-icon="paged"></button>
+  <span class="bar-sep"></span>
+  <!-- 在文中查找（Ctrl+F）：入口紧挨笔记，实际输入条是浮层，不占顶栏宽度 -->
+  <button id="find-open" class="tbtn" title="在文中查找（Ctrl+F）" style="display:none" data-icon="search"></button>
+  <!-- 笔记：点开是「笔记窗口」（列全部笔记 / 新建 / 编辑） -->
+  <button id="note-open" class="tbtn" title="笔记" style="display:none" data-icon="note"></button>
+  <button id="dl-btn" class="tbtn" title="下载 PDF" style="display:none" data-icon="download"></button>
+  <span class="bar-spacer"></span>
   <button id="scope-chip" class="tbtn" title="提问范围：本篇（点击切换 本篇/所在专题含子专题）">范围：本篇</button>
+  <button id="theme-toggle" class="tbtn" title="PDF 深色模式：跟随 dsh 主题（点击切换 关/跟随/强制深色）">A</button>
   <button id="eq-toggle" class="tbtn" title="公式引用（MinerU LaTeX）" data-icon="sigma">公式</button>
+  <button id="cfg-open" class="tbtn" title="翻译端点设置" data-icon="settings"></button>
   <span id="ver" title="插件版本">__DPR_VERSION__</span>
+</div>
+<!-- 顶栏收纳的弹出菜单（绝对定位于 #bar）：深色/公式/设置经用户反馈回归顶栏，只留「视图」一个下拉 -->
+<div id="view-menu" class="bar-menu" hidden>
+  <button data-act="orig">原文</button>
+  <button data-act="zh">中文（纯译文）</button>
+  <button data-act="dual">对照（双语同页）</button>
+  <button data-act="split">分屏（左右两列）</button>
+  <hr>
+  <button data-act="regen">重新翻译…</button>
 </div>
 
 <div id="main">
@@ -366,6 +401,14 @@
       <div id="pdf-pages-zh"></div>
     </div>
   </div>
+  <!-- 翻页条挪到阅读区底部（悬浮居中，不占顶栏）：JS 的 $('pager').style.display 契约不变，
+       '' 恢复到的 CSS 默认值从 inline 改为悬浮 flex -->
+  <span id="pager" style="display:none">
+    <button id="page-prev" class="tbtn" title="上一页" data-icon="prev"></button>
+    <input id="page-input" type="text" inputmode="numeric" title="页码，回车跳转">
+    <span id="page-total">/ ?</span>
+    <button id="page-next" class="tbtn" title="下一页" data-icon="next"></button>
+  </span>
   <div id="eq-panel">
     <h3>公式</h3>
     <div id="eq-meta"></div>
@@ -468,10 +511,12 @@
     <button id="cfg-cancel">取消</button>
     <button id="cfg-save">保存</button>
   </div>
-  <hr>
-  <!-- 深色模式（方案 §A2.3 入口 2）：与 dsh 设置面板**共用同一个后端配置**（/api/theme/config），
-       两处不各存一份；改动即时生效，无需点保存。 -->
-  <h3>PDF 深色模式</h3>
+</div>
+
+<!-- PDF 深色模式（方案 §A2.3 入口 2）：与 dsh 设置面板**共用同一个后端配置**（/api/theme/config），
+     两处不各存一份；改动即时生效，无需点保存。独立于设置面板——「A」按钮专属配置。 -->
+<div id="theme-pop">
+  <h3>PDF 深色模式 <button id="theme-close" title="关闭" aria-label="关闭">✕</button></h3>
   <label for="cfg-theme-mode">模式</label>
   <select id="cfg-theme-mode">
     <option value="follow">跟随 dsh 主题（默认）</option>
@@ -489,7 +534,7 @@
   <label for="cfg-theme-chrome" style="display:flex;align-items:center;gap:6px">
     <input id="cfg-theme-chrome" type="checkbox"> 阅读器界面也切深色
   </label>
-  <div id="cfg-theme-hint">深色是整页反色 + 色相回正：图片/照片会明显褪色偏色（实测纯红 → 浅粉 [229,134,134]，不是真负片）；下载/导出的 PDF 始终是原文，不受影响。</div>
+  <div id="cfg-theme-hint">整页反色方案：图片/照片会褪色偏色；导出的 PDF 始终是原文。（悬停查看实测细节）</div>
 </div>
 
 <!-- 笔记悬停提示：鼠标停在被标注文字上显示笔记内容 -->
@@ -554,7 +599,8 @@ const ICONS = {
 };
 const iconHtml = (name) => `<svg class="ic${name === 'spin' ? ' spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 // 静态按钮按 data-icon 注入一次；动态按钮（翻译/重翻/模式切换）在状态变化时用同一函数换图标
-document.querySelectorAll('#bar [data-icon], #find-window [data-icon], #note-window [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
+// #pager：翻页条挪到阅读区底部（#main 内）后也要扫到，否则上一页/下一页图标空白
+document.querySelectorAll('#bar [data-icon], #pager [data-icon], #find-window [data-icon], #note-window [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
 const api = (p, opts) => fetch('/paper-reader/api' + p, opts).then(async (r) => {
   if (!r.ok) {
     // 服务端错误体有两种：{error}（参数/权限）与 {reason}（zh/generate 的未启动原因，带完整说明）
@@ -658,6 +704,11 @@ function syncThemeControls() {
   const m = $('cfg-theme-mode'); if (m) m.value = dprTheme.mode;
   const st = $('cfg-theme-strength'); if (st) st.value = String(dprTheme.strength);
   const ch = $('cfg-theme-chrome'); if (ch) ch.checked = dprTheme.chrome;
+  // 模式关闭/强制浅色时，深色相关选项没有生效面：禁用置灰，不留「改了却看似生效」的误导
+  if (st) st.disabled = dprTheme.mode === 'off' || dprTheme.mode === 'light';
+  if (ch) ch.disabled = dprTheme.mode === 'off' || dprTheme.mode === 'light';
+  const hint = $('cfg-theme-hint');
+  if (hint) hint.title = '深色是整页反色 + 色相回正：图片/照片会明显褪色偏色（实测纯红 [255,0,0] → 浅粉 [229,134,134]，不是真负片）；下载/导出的 PDF 始终是原文，不受影响。';
   const chip = $('scope-chip'); if (chip) chip.textContent = '范围：' + (askScopeMode() === 'topic' ? '所在专题' : '本篇');
 }
 
@@ -713,12 +764,24 @@ window.addEventListener('message', (e) => {
   setThemeLocal({ mode: d.pdfTheme, strength: d.pdfDarkStrength, chrome: d.pdfDarkChrome, curve: d.curve });
 });
 
-$('theme-toggle').onclick = async () => {
-  // 一键切：关 → 跟随 → 强制深色 → 关（用户在阅读器里最常做的就是「太刺眼 / 恢复了」两件事）
-  const next = dprTheme.mode === 'off' ? 'follow' : dprTheme.mode === 'follow' ? 'dark' : 'off';
-  await saveTheme({ pdfTheme: next });
-  toast(`PDF 深色模式：${next === 'off' ? '关闭' : next === 'follow' ? '跟随 dsh 主题' : '强制深色'}`);
-};
+// 「A」按钮：深色配置独立小面板（模式/强度/界面深色三项，改了即时生效，点面板外关闭）
+function toggleThemePop() {
+  const pop = $('theme-pop');
+  if (pop.style.display === 'block') { pop.style.display = 'none'; return; }
+  closeCfgPop(); // 与设置面板互斥：同时只开一个
+  pop.style.display = 'block';
+  const btn = $('theme-toggle');
+  const br = btn.getBoundingClientRect();
+  // 靠 A 按钮右对齐、按钮下方；越界时贴边
+  pop.style.left = Math.max(8, Math.min(br.right - pop.offsetWidth, window.innerWidth - pop.offsetWidth - 8)) + 'px';
+  pop.style.top = Math.min(br.bottom + 8, window.innerHeight - pop.offsetHeight - 8) + 'px';
+}
+$('theme-toggle').onclick = (e) => { e.stopPropagation(); toggleThemePop(); };
+$('theme-close').onclick = () => { $('theme-pop').style.display = 'none'; };
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#theme-pop') || e.target.closest('#theme-toggle')) return;
+  $('theme-pop').style.display = 'none';
+});
 
 $('cfg-theme-mode').onchange = () => saveTheme({ pdfTheme: $('cfg-theme-mode').value });
 $('cfg-theme-strength').onchange = () => saveTheme({ pdfDarkStrength: +$('cfg-theme-strength').value, pdfDarkAdvanced: null });
@@ -743,8 +806,11 @@ $('ask-scope').onchange = () => setAskScopeMode($('ask-scope').value);
 $('pdf-path').onclick = async () => {
   const p = $('pdf-path').textContent;
   if (!p) return;
-  toast((await copyText(p)) ? '路径已复制' : '复制失败，路径见按钮悬停提示');
+  toast((await copyText(p)) ? '路径已复制' : '复制失败，路径见状态文字悬停提示');
 };
+// 路径收进状态文字：点击「name · N 页」即复制（pdf-path 已 tucked，title 带完整路径）
+$('status').style.cursor = 'pointer';
+$('status').onclick = () => $('pdf-path').click();
 
 let current = null;        // { topic, name }
 let zhState = { zh: false, dual: false, busy: false };
@@ -785,11 +851,12 @@ async function openPaper(topic, name, opts = {}) {
     ? `${name} · ${meta.pageCount ?? '?'} 页`
     : `${name} · 未转录（提问时会自动转录）`;
   $('status').textContent = statusMeta;
-  // 文件路径展示（点击复制）：独立于 #status，翻译阶段的 phase 覆写不影响它
+  // 文件路径：不再占顶栏一行——挂在 #status 的 title（悬停可见）+ 点击 #status 复制；
+  // #pdf-path 按钮 tucked 隐藏，textContent 仍作为路径的唯一载体（复制逻辑读它）
   const pathBtn = $('pdf-path');
   pathBtn.textContent = meta.pdfPath || '';
-  pathBtn.title = (meta.pdfPath || '') + '（点击复制）';
   pathBtn.style.display = meta.pdfPath ? '' : 'none';
+  $('status').title = meta.pdfPath ? `${meta.pdfPath}（点击复制）` : '';
   setAskScopeMode(askScopeMode());
   await refreshZhState();
   // 恢复该论文上次的视图模式（持久化复用同一个键，取值域扩到 'split'；见 §4.3）
@@ -2070,6 +2137,7 @@ function updateViewButtons() {
   // 「同步滚动」开关：与三个视图控件同一个状态机（一处决定所有按钮的可见性/文案/态）；
   // 仅分屏下可见 —— 模式 A/原文/译文只有一个滚动条，开关无意义
   updateSyncToggle();
+  try { syncViewMenu(); } catch { /* 初始化次序未到（菜单函数在脚本更后方，事件驱动后即正常） */ }
 }
 
 $('zh-toggle').onclick = async () => {
@@ -2230,6 +2298,7 @@ let cfgRetryForce = false;   // 待重试的是不是「重翻」（regen 图标
 let cfgRetryTranslate = false; // 待重试的是不是「划词翻译」（点「译」发现没配端点 → 填完自动重试这次翻译）
 
 async function openCfgPop(retryGenerate) {
+  $('theme-pop').style.display = 'none'; // 与深色面板互斥：同时只开一个
   cfgRetryGenerate = Boolean(retryGenerate);
   let cfg;
   try {
@@ -2261,7 +2330,17 @@ async function openCfgPop(retryGenerate) {
 }
 function closeCfgPop() { $('cfg-pop').style.display = 'none'; cfgRetryGenerate = false; cfgRetryForce = false; cfgRetryTranslate = false; }
 
-$('cfg-open').onclick = () => openCfgPop(false);
+// toggle 语义：面板开着时再点 ⚙ 直接收回（不重新拉配置重开）
+$('cfg-open').onclick = (e) => {
+  e.stopPropagation();
+  if ($('cfg-pop').style.display === 'block') { closeCfgPop(); return; }
+  void openCfgPop(false);
+};
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#cfg-pop') || e.target.closest('#cfg-open')) return;
+  // 点面板外关闭设置（与 theme-pop 同一交互口径；面板内有自己的取消/保存，这里只兜底空白处）
+  if ($('cfg-pop').style.display === 'block' && !e.target.closest('#cfg-actions')) closeCfgPop();
+});
 $('cfg-cancel').onclick = closeCfgPop;
 
 $('cfg-save').onclick = async () => {
@@ -2976,6 +3055,78 @@ $('eq-toggle').onclick = () => {
   $('eq-panel').style.display = open ? 'block' : 'none';
   $('eq-toggle').classList.toggle('active', open);
 };
+
+/* ================= 顶栏收纳：视图 / 更多 弹出菜单 =================
+   语言视图四态（译/对照/分屏）+ 重译收进「视图」下拉，深色/公式/设置收进「⋯」。
+   原按钮 DOM 保留（.tucked 隐藏）：菜单项转发它们的 click，状态机
+   （updateViewButtons / refreshZhState）零改动；菜单渲染只**读**原按钮态，
+   不在菜单里维护第二份状态。 */
+function closeBarMenus() {
+  $('view-menu').hidden = true;
+}
+function viewMenuLabel() {
+  if (viewMode === 'split') return '分屏';
+  if (viewMode === 'dual') return '对照';
+  if (viewMode === 'zh') return '中文';
+  return '原文';
+}
+function syncViewMenu() {
+  const btn = $('view-menu-btn'); if (!btn) return;
+  const label = viewMenuLabel();
+  btn.textContent = '视图：' + label + ' ▾';
+  btn.classList.toggle('active', label !== '原文');
+  const items = {
+    zh: [zhVariant !== null, $('zh-toggle').disabled, $('zh-toggle').title],
+    dual: [viewMode === 'dual', $('dual-toggle').disabled, $('dual-toggle').title],
+    split: [viewMode === 'split', $('split-toggle').disabled, $('split-toggle').title],
+  };
+  for (const [act, [active, disabled, title]] of Object.entries(items)) {
+    const el = $('view-menu').querySelector('[data-act="' + act + '"]');
+    if (!el) continue;
+    el.classList.toggle('active', !!active);
+    el.disabled = !!disabled;
+    if (title) el.title = title;
+  }
+  const origEl = $('view-menu').querySelector('[data-act="orig"]');
+  if (origEl) origEl.classList.toggle('active', label === '原文');
+  // 重译：与 refreshZhState 的 canRegen 同判据（有译文且空闲）
+  const regenEl = $('view-menu').querySelector('[data-act="regen"]');
+  if (regenEl) {
+    regenEl.disabled = !((zhState.zh || zhState.dual) && !zhState.busy);
+    regenEl.title = $('zh-regen').title;
+  }
+}
+
+function openBarMenu(menuId, btnId) {
+  closeBarMenus();
+  syncViewMenu();
+  const menu = $(menuId), btn = $(btnId);
+  menu.hidden = false;
+  const br = $('bar').getBoundingClientRect(), r = btn.getBoundingClientRect();
+  // 锚在**按钮正下方**而非 #bar 底部：窄窗口下顶栏 flex-wrap 换行会把 bar 撑到数百像素高，
+  // 「bar 底部 + 6px」把菜单顶到视口外（实测 399px 宽 iframe → 菜单 y=960 > 视口 954，开了但看不见）
+  menu.style.top = (r.bottom - br.top + 6) + 'px';
+  menu.style.left = Math.max(4, Math.min(r.left - br.left, br.width - menu.offsetWidth - 4)) + 'px';
+}
+$('view-menu-btn').onclick = (e) => {
+  e.stopPropagation();
+  if ($('view-menu').hidden) openBarMenu('view-menu', 'view-menu-btn'); else closeBarMenus();
+};
+$('view-menu').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  closeBarMenus();
+  const act = b.dataset.act;
+  if (act === 'orig') void setViewMode('orig');
+  else if (act === 'zh') $('zh-toggle').click();
+  else if (act === 'dual') $('dual-toggle').click();
+  else if (act === 'split') $('split-toggle').click();
+  else if (act === 'regen') $('zh-regen').click();
+};
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.bar-menu') || e.target.closest('#view-menu-btn')) return;
+  closeBarMenus();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeBarMenus(); });
 
 let lastMove = { x: -1, y: -1 };
 document.addEventListener('mousemove', (e) => {
