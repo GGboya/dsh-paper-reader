@@ -14,7 +14,7 @@
 pnpm install && pnpm run build     # 清理 dist 后 tsc（避免已删源码残留进 npm 包），改完 build + 重启 profile 生效
 npm test                           # node --test 全量（pretest 自动 build），CI 在 ubuntu/macos/windows 三平台跑
 pnpm smoke:engine clean|managed-uv|pip-fallback|repair|translate   # babeldoc 引擎冒烟（Windows 依赖完整性）
-pnpm release patch|minor|major "一句话摘要"   # 发版：测试→同步 README→commit/tag→publish→GitHub Release
+pnpm release patch|minor|major "一句话摘要"   # 发版：测试→同步 README→commit/tag/push→手动 npm publish→--finish 建 Release
 ```
 
 本地调试：`dsh plugin --profile web add ./dsh-paper-reader`（从父目录或绝对路径）→ `dsh --profile web`；浏览器 Cmd+Shift+R 强刷避免旧阅读器缓存。
@@ -22,13 +22,15 @@ pnpm release patch|minor|major "一句话摘要"   # 发版：测试→同步 RE
 ## 发布与发布记录
 
 - **发布记录统一放 GitHub Releases**：https://github.com/GGboya/dsh-paper-reader/releases 。README 只保留「当前版本」一行，**不追加版本历史**。
-- 一条命令发版：
+- 发版先跑主流程；push 后脚本会停下，由维护者手动输入 npm 2FA：
 
   ```bash
   pnpm release minor "划词翻译 + 中英分屏"    # 可加 --dry-run 预览、--skip-tests 跳过测试
+  npm publish --otp=<6位验证码>              # 脚本不代跑，手动完成 npm 发布
+  pnpm release X.Y.Z "划词翻译 + 中英分屏" --finish  # 确认 npm 已发布后补建 GitHub Release
   ```
 
-  `scripts/release.mjs` 会：跑 `npm test` → 把两份 README 的旧版本号同步成新版本（按 C3 守卫同规则自检）→ `npm version` → commit + annotated tag → `git push --follow-tags` → `npm publish` → `gh release create --generate-notes`。脚本要求工作区干净、当前在 `main`、`gh auth status` 正常且 npm 已登录。
+  `scripts/release.mjs` 主流程会：跑 `npm test` → 把两份 README 的旧版本号同步成新版本（按 C3 守卫同规则自检）→ `npm version` → commit + annotated tag → `git push --follow-tags`，然后打印手动 `npm publish` 与 `--finish` 续跑命令。`--finish` 要求显式填写当前版本和同一摘要，确认本地/远端 tag 与 npm 版本都存在后执行 `gh release create --generate-notes`。脚本要求工作区干净、当前在 `main`、`gh auth status` 正常且 npm 已登录。
 - Release 标题统一 `vX.Y.Z — 一句话摘要`；notes 写用户可感知的修复 / 新增 / 升级注意，不要直接堆 commit。
 - 历史记录已补齐到 v1.2.1 起；更早版本只有 tag/commit，不补 Release。
 
