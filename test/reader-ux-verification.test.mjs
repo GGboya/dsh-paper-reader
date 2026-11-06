@@ -2004,6 +2004,19 @@ test('VA15[契约·实现方自查②] openPaper 先 await loadFormulas 再 load
   assert.equal(R.t.eqHotEnabled(), false)
 })
 
+test('VA15b[顶栏回归] 未转录论文保留独立手动转录入口', () => {
+  const button = READER_HTML.match(/<button id="transcribe-open"[^>]*>转录<\/button>/)
+  assert.ok(button, '顶栏必须有独立的「转录」按钮，不能只靠提问时自动转录')
+  assert.ok(!/tucked/.test(button[0]), '手动转录入口不得被顶栏收纳隐藏')
+  const open = READER_HTML.slice(READER_HTML.indexOf('async function openPaper'), READER_HTML.indexOf('async function refreshZhState'))
+  assert.match(open, /currentHasTranscript = Boolean\(meta\.hasTranscript\)/, '按钮显隐必须跟随当前论文的真实转录状态')
+  assert.match(open, /openingPaper = false;\s+syncTranscribeButton\(\)/, '元信息与首屏就绪后必须恢复手动入口')
+  const handler = SCRIPT_SRC.slice(SCRIPT_SRC.indexOf("$('transcribe-open').onclick"), SCRIPT_SRC.indexOf('async function transcribeWithMineru'))
+  assert.match(handler, /force: false, source: 'auto'/, '普通转录不得强刷缓存，且必须按当前 MinerU 配置选后端')
+  assert.match(handler, /currentHasTranscript = true/, '成功后必须更新状态并收起按钮')
+  assert.match(handler, /await loadFormulas\(\)/, 'MinerU 转录后必须刷新公式索引')
+})
+
 test('VA16[契约·实现方自查③] 新增 live 用例不抢 GPU：t2 的测试文件不含任何 MinerU 解析调用', (t) => {
   const t2src = readFileSync(join(REPO, 'test', 'reader-ux.test.mjs'), 'utf8')
   const live = t2src.slice(t2src.indexOf("F5 live"), t2src.indexOf('test.after'))

@@ -364,6 +364,7 @@
        原按钮 DOM 保留（.tucked 隐藏）——菜单项转发它们的 click，状态机零改动。
        「同步滚动」仍按原逻辑仅在分屏下出现（见其原注释）。 -->
   <button id="view-menu-btn" class="tbtn" title="语言视图：原文 / 中文 / 对照 / 分屏 / 重新翻译">视图：原文 ▾</button>
+  <button id="transcribe-open" class="tbtn" style="display:none" title="按当前配置转录这篇 PDF（MinerU 关闭时用 pdf.js）">转录</button>
   <button id="zh-toggle" class="tbtn tucked" title="切换中文译文（没有译文时可生成）" style="display:none" data-icon="translate"></button>
   <button id="dual-toggle" class="tbtn tucked" title="用 babeldoc 的中英对照 PDF（模式 A）" style="display:none" data-icon="columns">对照</button>
   <button id="split-toggle" class="tbtn tucked" title="原文与中文版并排同步滚动（模式 B）" style="display:none" data-icon="split">分屏</button>
@@ -822,6 +823,7 @@ $('status').style.cursor = 'pointer';
 $('status').onclick = () => $('pdf-path').click();
 
 let current = null;        // { topic, name }
+let currentHasTranscript = null; // null=元信息未回；false=未转录（顶栏显示手动「转录」入口）
 let zhState = { zh: false, dual: false, busy: false };
 let statusMeta = ''; // openPaper 的「name · N 页」基线，翻译阶段标签褪去后恢复它
 let zhVariant = null;      // null=原文 'dual'=中英对照 'zh'=纯中文（**分屏 split 也是 null**，见 C17）
@@ -846,9 +848,18 @@ function pdfUrl(variant) {
   return `/paper-reader/api/pdf?${q}${variant ? '&variant=' + variant : ''}`;
 }
 
+function syncTranscribeButton() {
+  const btn = $('transcribe-open');
+  if (currentHasTranscript === null) btn.disabled = false; // 换论文时清掉上篇在飞请求的禁用态
+  btn.style.display = current && currentHasTranscript === false && !openingPaper ? '' : 'none';
+  if (!openingPaper && !btn.disabled) btn.textContent = '转录';
+}
+
 async function openPaper(topic, name, opts = {}) {
   if (!name) return;
   openingPaper = true;
+  currentHasTranscript = null;
+  syncTranscribeButton();
   current = { topic, name };
   // R-01/N-01：换文献的在飞译文必须**立刻**失效——必须放在本函数第一处 await 之前。
   // 原来它在三次 await（`/api/paper`、`refreshZhState`、`loadFormulas`）之后，落在那几个窗口里
@@ -867,6 +878,7 @@ async function openPaper(topic, name, opts = {}) {
   $('status').textContent = '加载 PDF…';
   const q = `topic=${encodeURIComponent(topic)}&name=${encodeURIComponent(name)}`;
   const meta = await api('/paper?' + q);
+  currentHasTranscript = Boolean(meta.hasTranscript);
   statusMeta = meta.hasTranscript
     ? `${name} · ${meta.pageCount ?? '?'} 页`
     : `${name} · 未转录（提问时会自动转录）`;
@@ -928,6 +940,7 @@ async function openPaper(topic, name, opts = {}) {
   }
   if (opts.page) jumpTo(opts.page, opts.q); // 不 await：跳转内部自带「等页面渲出来」轮询
   openingPaper = false;
+  syncTranscribeButton();
   schedulePreload();
 }
 
@@ -3597,6 +3610,44 @@ function renderEqPanel() {
     }
   }
 }
+
+$('transcribe-open').onclick = async () => {
+  if (!current) return;
+  const ref = { ...current };
+  const btn = $('transcribe-open');
+  const samePaper = () => current && current.topic === ref.topic && current.name === ref.name;
+  btn.disabled = true;
+  btn.textContent = '转录中…';
+  $('status').textContent = '转录中（可能需要几十秒）…';
+  try {
+    const t = await api('/transcribe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // 与公式面板的重转录共用后端选择：local/cloud 走 MinerU，off 走 pdf.js；
+      // 顶栏入口只在无缓存时出现，因此不强制覆盖已有转录。
+      body: JSON.stringify({ ...ref, force: false, source: 'auto' }),
+    });
+    if (!samePaper()) return;
+    currentHasTranscript = true;
+    statusMeta = `${ref.name} · ${t.pageCount ?? '?'} 页`;
+    $('status').textContent = statusMeta;
+    syncTranscribeButton();
+    toast(t.source === 'pdfjs' ? 'PDF 转录完成' : 'MinerU 转录完成');
+    await loadFormulas();
+    if (pdfDoc) await rerender();
+  } catch (e) {
+    if (samePaper()) {
+      $('status').textContent = statusMeta;
+      toast('转录失败：' + e.message, 6000);
+    }
+  } finally {
+    if (samePaper()) {
+      btn.disabled = false;
+      btn.textContent = '转录';
+      syncTranscribeButton();
+    }
+  }
+};
 
 async function transcribeWithMineru(btn) {
   if (!current) return;

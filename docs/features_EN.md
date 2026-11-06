@@ -42,7 +42,7 @@ By default text is extracted locally with pdf.js — **plain text-native PDFs ne
 | Cloud (easiest) | 1. Register at [mineru.net](https://mineru.net) 2. Create a token under "API Management" 3. In settings pick mode "Cloud", paste the token, "Test connection" → save. ~1 minute, free quota | Most people |
 | Self-hosted (no signup) | `pip install -U "mineru[core]"` → `mineru-api --host 127.0.0.1 --port 8000` → pick mode "Local" in settings | Heavy/privacy-minded users; free, unlimited, papers never leave your machine |
 
-Once configured: newly uploaded scanned PDFs go through MinerU automatically; for papers already in the library, open the "∑" panel and click "Re-parse with MinerU" (**old caches are not re-parsed automatically** — re-parse a paper explicitly if you want its formulas searchable).
+Once configured: newly uploaded scanned PDFs go through MinerU automatically; an untranscribed paper has a dedicated **转录** (Transcribe) button in the toolbar using the active backend; for papers with an older cache, open the "∑" panel and click "Re-parse with MinerU" (**old caches are not re-parsed automatically** — re-parse a paper explicitly if you want its formulas searchable).
 
 > Notes: the cloud `pipeline` channel is verified end-to-end with a real token (19-page paper, 18/18 formulas identical to local output); `vlm`-series models are unverified. The token is stored 0600 and only ever shown masked. See [reader-ux-requirements.md](reader-ux-requirements.md) for troubleshooting.
 
