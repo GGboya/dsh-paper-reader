@@ -11,6 +11,12 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 
 > 💬 **QQ group: 1127244508** — questions, feature requests, and bug reports are all welcome.
 
+## Why Paper Reader
+
+1. **A growing paper library gets messy fast.** Organize papers into topics and subtopics, with each paper's PDF, translations, notes, and study progress kept together. Rename, move, or delete papers from one place — deletions can be recovered from the trash.
+2. **Translation should not interrupt reading.** No copying paragraphs into another app: generate Chinese directly on the original PDF layout, with Chinese-only, bilingual, split-view, and selection translation modes — formulas included.
+3. **AI answers need verifiable evidence.** Answers cite page numbers that jump straight to the highlighted source. Ask about one paper or an entire topic, so fluent answers never leave you searching for the evidence yourself.
+
 ![Demo: select-to-ask, answers cite page numbers, click a page to jump back to the highlighted passage](docs/demo.gif)
 
 ![Default: official sidebar untouched, just one extra toggle](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/screenshot-default.png)
@@ -21,7 +27,6 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 
 - 📚 **Three-pane workbench**: topic library + PDF reader + native chat on the right; installing does not modify the official UI — just one extra toggle in the sidebar
 - 💬 **Page-cited companion**: every answer cites page numbers; click one to jump back and flash the passage; select-to-ask on any text; conversation history supported
-- 🌳 **Nested subtopics**: create subtopics to any depth, rename them, move them under another parent; deleting a non-empty topic still goes through the clear-plan + typed-confirmation flow- 🎯 **Scoped asking**: pick a scope (this paper / this topic incl. subtopics) and only that scope's directory contents and retrieved passages are given to the model; out-of-scope content never appears, truncation is stated explicitly
 - 🌙 **PDF dark mode**: when dsh goes dark the PDF follows (follow by default); one shared config for the settings panel and the reader "A" button, four strength presets. It inverts the whole page and rotates hue back, so **photos/figures visibly desaturate and shift colour** (measured: pure red `[255,0,0]` → pink `[229,134,134]`, not a true negative; a known cost, switch it off in one click); downloads/exports are always the original bytes
 - 🗂️ **Per-paper folders**: each paper's PDF/translations/transcript/study file live in `<topic>/<paper>/`; an existing flat library migrates with an **idempotent, interruptible, revertible** move (copy-first-then-delete, dry-run report before any change)
 - 🌳 **Nested subtopics**: create subtopics to any depth, rename them, move them under another parent; deleting a non-empty topic still goes through the clear-plan + typed-confirmation flow
