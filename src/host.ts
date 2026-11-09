@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createReadStream, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { PluginConfig } from './tools.ts'
 import {
   caseVariantCollisions,
@@ -295,7 +295,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     return hit?.sessionId ?? `${sessionPrefixFor(ref)}-${n}`
   }
 
-  /** 专题目录 → dsh 工作区（幂等，进程内缓存）。会话挂到工作区后原生 composer 才可用。 */
+  /** 论文目录 → dsh 工作区（幂等，进程内缓存）。会话挂到工作区后原生 composer 才可用。 */
   const workspaceCache = new Map<string, string>()
   /** 删/改/清空一个专题（可能是路径）后，把**整棵子树**的工作区缓存键清掉（方案 §B2.4）。 */
   const dropWorkspaceCache = (topicPath: string) => {
@@ -305,8 +305,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       if (k === base || k.startsWith(prefix)) workspaceCache.delete(k)
     }
   }
-  const ensureTopicWorkspace = async (topic: string): Promise<string | undefined> => {
-    const dir = join(dataDir, topic)
+  const ensureWorkspaceDir = async (dir: string): Promise<string | undefined> => {
     const cached = workspaceCache.get(dir)
     if (cached) return cached
     try {
@@ -319,15 +318,18 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     }
   }
 
-  /** 创建/复用会话：论文伴读 preset 只注册到 dsh；论文入口不默认套用，避免替用户改变 agent。 */
-  const createPaperSession = async (sessionId: string, topic: string) => {
-    const workspaceId = await ensureTopicWorkspace(topic)
+  /** 创建/复用会话：论文伴读 preset 只注册到 dsh；论文入口不默认套用，避免替用户改变 agent。
+   * 原生 composer 不经过 /api/ask，当前论文身份只能由工作区表达（issue #21）：
+   * 新布局挂到 <专题>/<论文>/，同专题多篇不再让模型猜；旧平铺库只能继续挂专题目录。 */
+  const createPaperSession = async (sessionId: string, ref: PaperRef) => {
+    const dir = dirname(ref.pdfPath)
+    const workspaceId = await ensureWorkspaceDir(dir)
     if (workspaceId) {
       try {
         return await sessionController.create({ sessionId, workspaceId })
       } catch { /* 工作区挂载失败则回退 cwd */ }
     }
-    return sessionController.create({ sessionId, cwd: join(dataDir, topic) })
+    return sessionController.create({ sessionId, cwd: dir })
   }
 
   /* ── 破坏性操作（删除/重命名）的共用出口 ──────────────────────────────────
@@ -1291,7 +1293,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const all = await scanPaperSessions(ref)
       const n = all.length ? all[all.length - 1]!.n + 1 : 1
       const sessionId = `${sessionPrefixFor(ref)}-${n}`
-      await createPaperSession(sessionId, ref.topic)
+      await createPaperSession(sessionId, ref)
       json(res, 200, { ok: true, n, sessionId })
       return
     }
@@ -1794,7 +1796,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const n = nParam > 0 ? nParam : sessions.length ? sessions[sessions.length - 1]!.n : 1
       const sessionId = await sessionIdFor(ref, n)
       try {
-        await createPaperSession(sessionId, ref.topic)
+        await createPaperSession(sessionId, ref)
       } catch { /* 已存在则复用；失败由 follow 报错 */ }
       res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
@@ -1854,7 +1856,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       else n = existing.length ? existing[existing.length - 1]!.n : 1
       const sessionId = await sessionIdFor(ref, n)
       try {
-        await createPaperSession(sessionId, ref.topic)
+        await createPaperSession(sessionId, ref)
       } catch { /* 已存在则复用 */ }
       // ── 范围（方案 §B3.1）：缺省/无效一律按「当前论文」；给了非法结构则显式 400 ──
       let scope: AskScope | null = null

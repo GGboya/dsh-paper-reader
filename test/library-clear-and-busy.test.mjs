@@ -566,6 +566,14 @@ test('B10 UI 静态契约：非空专题走 clear-plan → clear、清单来自�
   assert.match(client, /delTopicClearBlocked/)
 })
 
+test('B10b issue#20：新建专题主按钮在深色主题下保持蓝底白字', () => {
+  const client = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
+  const style = client.match(/btnPrimary: \{([^}]+)\}/)
+  assert.ok(style, '必须能找到弹窗共用的 btnPrimary')
+  assert.match(style[1], /background: '#1f6feb'/, '主按钮背景不得依赖会映成白色的主题别名')
+  assert.match(style[1], /color: '#fff'/, '主按钮文字必须在深色/浅色主题都保持高对比')
+})
+
 test('B12 【F-A 靶子】clear 回滚失败不静默：rollbackFailed/moved/papersWithFilesInTrash 逐个点名，文件真在回收站可恢复', () => {
   // 场景 = 评审 rollback-probe 的 R2：第 3 篇前向失败（EBUSY）+ 第 2 篇的 .pdf 回滚失败（EPERM）。
   // 这条用例是「承诺被钉住」的靶子：把 clearTopic 的 rollbackFailed 或 moved 改成 [] → 本用例必红

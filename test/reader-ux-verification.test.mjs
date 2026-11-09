@@ -1715,6 +1715,41 @@ test('VB11[S16/B17] 删除/重命名后客户端缓存失效：建会话时 work
   } finally { spec = spec0 }
 })
 
+test('VB11b issue#21：原生会话工作区绑定到当前论文目录，不再共享整个专题', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dpr-paper-workspace-'))
+  const created = []
+  const ctxWs = {
+    webServer: { register: (s) => { spec = s; return () => {} } },
+    connection: { requestRejection: () => undefined },
+    sessionController: { list: async () => ({ items: [] }), create: async () => ({}) },
+    workspaceController: { create: async ({ path }) => { created.push(path); return { workspace: { workspaceId: 'ws:' + path } } } },
+    workspaceRegistry: {},
+    effect: (fn) => fn(),
+  }
+  const spec0 = spec
+  const srv = createServer((req, res) => spec.handler(req, res))
+  try {
+    mkdirSync(join(dataDir, 'topic', 'P'), { recursive: true })
+    mkdirSync(join(dataDir, 'topic', 'Q'), { recursive: true })
+    mkdirSync(join(dataDir, 'flat'), { recursive: true })
+    writeFileSync(join(dataDir, 'topic', 'P', 'P.pdf'), PDF())
+    writeFileSync(join(dataDir, 'topic', 'Q', 'Q.pdf'), PDF())
+    writeFileSync(join(dataDir, 'flat', 'Legacy.pdf'), PDF())
+    registerRoutes(makeCtx(ctxWs), { dataDir })
+    const base = (await listen(srv)) + '/paper-reader'
+    const post = (body) => fetch(base + '/api/sessions/new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    assert.equal((await post({ topic: 'topic', name: 'P' })).status, 200)
+    assert.equal((await post({ topic: 'topic', name: 'Q' })).status, 200)
+    assert.equal((await post({ topic: 'flat', name: 'Legacy' })).status, 200)
+    assert.deepEqual(created, [join(dataDir, 'topic', 'P'), join(dataDir, 'topic', 'Q'), join(dataDir, 'flat')],
+      '新布局每篇一个工作区；旧平铺布局保持专题目录，不让模型在同专题多篇里猜当前论文')
+  } finally {
+    spec = spec0
+    await new Promise((r) => srv.close(r))
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('VB12[B15/B16/S9/S10/S11] 二次确认与鉴权：清单只来自 delete-plan、无原生 confirm/prompt、新路由全部被鉴权拦下', async () => {
   ensureFixtures()
   // 鉴权：401 与 403 两种
