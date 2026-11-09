@@ -36,9 +36,9 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 - 📏 **No more truncated paragraphs + live progress**: translation runs through `babeldoc-driver.py` — per-input output budgets (instead of babeldoc's hard-wired 2048), auto split-and-retry on `finish_reason=length`; a top-bar progress bar shows live stage progress like "Translate Paragraphs 76% (521/798)", and the driver retries with lower reasoning effort when the endpoint refuses to disable thinking
 - 🈯 **Selection translation (formulas preserved)** (v1.8.3): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
 - 🖥️ **Bilingual side-by-side / split view** (v1.8.3): a doubled-width对照 page or a two-pane split with synchronised scrolling — switch any time, remembered per paper
-- 📝 **Notes** (v1.8.3): selecting text still opens the original "select-to-ask" bubble; new small **Note** and **Global search** buttons sit in that bubble. Annotated text gets a blue wavy underline — hover to read the note, click to edit or delete. The notes window matches the find window (draggable, edge-resizable, position remembered), lists notes by page, and jumps back to the source. Notes live in `<paper>.notes.json` beside the paper, so they follow it across browsers
+- 📝 **Notes** (v1.8.3): selecting text still opens the original "select-to-ask" bubble; new small **Note** and **Global search** buttons sit in that bubble. Annotated text gets a blue wavy underline — hover to read the note, click to edit or delete. The notes window matches the find window (draggable, edge-resizable, position remembered), lists notes by page, jumps back to the source, and lets you delete any entry directly with a second-click confirmation. Notes live in `<paper>.notes.json` beside the paper, so they follow it across browsers
 - ⚡ **Smooth on long papers**: scroll mode paints only the pages near the viewport and frees the canvas once a page leaves it (the rest keep equal-height placeholders, so the scrollbar and page numbers stay accurate); switching original ↔ Chinese just re-attaches cached page nodes — no re-parsing, no repainting; changing language or reopening a paper no longer re-sends the PDF (ETag 304). Prerequisites and known limits: [docs/features_EN.md](docs/features_EN.md)
-- 🗂️ **Library management**: rename/delete topics and papers; deletion goes to a recoverable trash
+- 🗂️ **Library management**: rename topics and papers inline, move papers between topics, and recover deletions from the trash
 - 🛰️ **OpenCode Go endpoint** (v1.8.3): an "OpenCode Go" provider preset for the translate endpoint (subscribe, copy the API key, done — model names follow the console); requests to opencode.ai automatically carry a stable `x-opencode-session` header (whole-paper and selection translation share one ID per paper, stable across restarts; the ID is derived from a local 0600 secret and contains no paper names) — other endpoints get no extra headers
 - ➕ **Optional add-ons** (off by default): MinerU parsing — scanned PDFs become readable, formulas become **Click to cite a formula** and searchable; an embeddings endpoint — plain-language semantic search
 
@@ -80,7 +80,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # same command 
 2. **Add papers**: ＋ create a topic → ⬆ upload PDFs
 3. **Read + ask**: just ask (answers cite pages), or select text for a pop-up question; click "page N" to jump back
 4. **Chinese version**: the "中" button generates a translation (first use asks for an OpenAI-compatible endpoint once — DeepSeek/GLM/Kimi keys all work)
-5. **Manage**: hover a row for ✎ rename / 🗑 delete; 🕐 in the chat header shows history, ＋ starts a new chat
+5. **Manage**: hover a row and open **⋯** to rename inline (Enter saves, Esc cancels), move a paper to another topic, or delete; 🕐 in the chat header shows history, ＋ starts a new chat
 
 ## Library management (safety notes)
 

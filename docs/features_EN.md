@@ -90,7 +90,7 @@ That bubble has **no** "insert into chat" and **no** "copy" button, and the plug
 
 ## Notes
 
-**How to use**: selecting text still opens the original "select-to-ask" bubble exactly as before, now with two extra small buttons — **Note** saves the passage with its page, and **Global search** finds that passage in the document. Annotated text gets a blue wavy underline; hover to read the note, click to edit or delete it. The **Notes** button in the toolbar opens the notes window, which shares the find window's behaviour (draggable, edge-resizable, position remembered); the list is ordered by page and clicking an entry jumps back and flashes the source. Notes taken in the Chinese column of the split view jump back correctly too.
+**How to use**: selecting text still opens the original "select-to-ask" bubble exactly as before, now with two extra small buttons — **Note** saves the passage with its page, and **Global search** finds that passage in the document. Annotated text gets a blue wavy underline; hover to read the note, click to edit or delete it. The **Notes** button in the toolbar opens the notes window, which shares the find window's behaviour (draggable, edge-resizable, position remembered); the list is ordered by page and clicking an entry jumps back and flashes the source. Every entry also has a **Delete** button in its upper-right corner; click **Confirm delete** to remove it without returning to the source first. Notes taken in the Chinese column of the split view jump back correctly too.
 
 **Where they live**: one `<paper>.notes.json` per paper, next to `.txt` / `.study.json`. Notes follow the paper file — they survive a browser change, and move with the library if you take it to another machine; they also move with the paper on rename/delete (deletion goes to the trash and is recoverable). The file is plain JSON, so you can back it up or migrate it by hand.
 
@@ -194,9 +194,10 @@ Aimed at papers of dozens or hundreds of pages, and at reading that keeps flippi
 
 ## Library management details
 
+- Renaming happens inline on the topic/paper name (Enter saves; Esc or clicking elsewhere cancels). **⋯ → Move to…** on a paper selects a destination topic and moves its PDF, transcripts, translations, study profile, and notes together; a legacy flat paper is gathered into a per-paper folder during the move
 - Deletion = **moved to trash** `data/.trash/<timestamp>/` (with a manifest); move files back into the paper folder to recover. No auto-cleanup or one-click restore UI in this version
 - Files moved to trash = the paper's same-named artifacts: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, `.notes.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is **not** deleted (it lives in dsh's session store)
-- **Preconditions**: deletion/rename is refused while the paper has a running session, a translation in progress, or another delete/rename in flight
-- **Safety boundary**: deletes/renames only ever touch the library directory; path traversal (`..`, absolute paths, symlink escapes) is rejected; a mid-way failure rolls back already-moved files
-- After a rename: transcripts/translations/study profiles/notes move along; past chat sessions are **kept** but no longer listed under the new name (session ids encode the old name); case-only renames work on macOS/Windows
+- **Preconditions**: deletion/rename/move is refused while the paper has a running session, a translation in progress, or another delete/rename/move in flight
+- **Safety boundary**: deletes/renames/moves only ever touch the library directory; path traversal (`..`, absolute paths, symlink escapes) is rejected; a mid-way failure rolls back already-moved files
+- After a rename/move: transcripts/translations/study profiles/notes move along; past chat sessions are **kept** but no longer listed under the new location (session ids encode the old location); case-only renames work on macOS/Windows
 - Oddly named files placed into `data/` by hand (e.g. `.hidden.pdf`) can still be deleted/renamed — nothing becomes a visible-but-undeletable orphan

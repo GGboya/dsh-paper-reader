@@ -17,6 +17,7 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { extractModuleScript, normalizeEol } from './reader-script.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const dist = (m) => join(ROOT, '..', 'dist', m)
@@ -334,4 +335,21 @@ test('N13 端到端：POST 保存 → 进程内直接 readNotes（模拟重启�
   assert.deepEqual(viaHttp.body.notes, fromDisk.notes)
   assert.equal(basename(notesPathFor(join(DATA, 'demo', 'paper.pdf'))), 'paper.notes.json')
   assert.match(readFileSync(notesPathFor(join(DATA, 'demo', 'paper.pdf')), 'utf8'), /重启后还在/)
+})
+
+test('N14 笔记列表有直接删除入口：独立按钮、二次确认、不会误触跳原文', () => {
+  const html = normalizeEol(readFileSync(join(ROOT, '..', 'reader', 'index.html'), 'utf8'))
+  const script = extractModuleScript(html, { where: 'reader/index.html' })
+  assert.match(script, /item\.className = 'note-item'/, '条目容器不能仍是 button（删除按钮不能嵌套在 button 里）')
+  assert.match(script, /btn\.className = 'note-item-main'/, '正文区域是独立的跳原文按钮')
+  assert.match(script, /del\.className = 'note-item-delete'/)
+  assert.match(script, /del\.dataset\.noteDelete = n\.id/)
+  assert.match(script, /function noteArmListDelete\(note, btn\)/)
+  assert.match(script, /notes\.listDeleteId !== note\.id/, '第一次点击只进入确认态')
+  assert.match(script, /btn\.textContent = '确认删除'/)
+  const wiring = script.slice(script.indexOf("$('note-list').addEventListener('click'"), script.indexOf("$('note-body').addEventListener('keydown'"))
+  assert.ok(wiring.indexOf("closest('[data-note-delete]')") < wiring.indexOf("closest('.note-item-main')"), '先处理删除，避免冒泡成跳原文')
+  assert.match(wiring, /e\.stopPropagation\(\)/)
+  assert.match(wiring, /noteArmListDelete\(noteById\(del\.dataset\.noteDelete\), del\)/)
+  assert.match(script, /await notesPost\('delete', note\)/, '最终仍走同一服务端删除链路')
 })

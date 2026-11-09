@@ -43,7 +43,7 @@ src/
   host.ts       webServer 路由（/paper-reader/*），connection.requestRejection 鉴权；
                 sessionController.create/prompt + follow SSE 桥（论文入口不默认套用 preset）
   library.ts    纯函数：文献库目录约定与解析（.txt/.pages.json/.transcript.json/.mineru.* 产物路径）
-  library-manage.ts 纯函数：删除/重命名（回收站、精确 stem、路径穿越防护、批量清空）；嵌套专题边界（boundaryOnly 不查长度上限）、碰撞预检（论文目录祖先/平铺产物/大小写变体）
+  library-manage.ts 纯函数：删除/重命名/跨专题移动（回收站、精确 stem、路径穿越防护、批量清空）；嵌套专题边界（boundaryOnly 不查长度上限）、碰撞预检（论文目录祖先/平铺产物/大小写变体）
   migrate.ts    纯函数：旧平铺布局 → 按论文分文件夹迁移（干跑报告/先复制后删/幂等可复跑/按日志回滚；CLI 默认 dry-run、退出码契约、坏日志逐行显式报错）
   theme-config.ts 纯函数：PDF 深色模式配置（follow/off/light/dark + 四档强度 + brightness/contrast 滑杆，0600）
   scope.ts      纯函数：按范围提问（专题子树展开、正文+命中预算 40k 逐篇 coverage、同名 omitted-duplicate、cutToCodePoint re-export）

@@ -33,6 +33,7 @@ import {
   deletePaper,
   deleteTopic,
   isManageError,
+  movePaper,
   planPaperDelete,
   planTopicDelete,
   realDataDir,
@@ -847,6 +848,32 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           const r = renamePaper(dataDir, ref.topic, ref.name, rawTo)
           // 会话 id 内嵌 topic/name → 改名后旧会话不再出现在该文献的列表里（不删除，如实回显）
           json(res, 200, { ...r, name: r.to, detachedSessions: sessions.total })
+        } catch (err) {
+          if (!libFail(res, err)) throw err
+        }
+      })
+      return
+    }
+
+    // 移动文献到另一个已存在专题：与改名同一套运行中会话 / 翻译互斥和脱钩回报。
+    if ((sub === '/api/library/move-paper' || sub === '/api/library/paper/move') && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; toTopic?: string; path?: string }
+      if (badEntryBoundary(res, body.name)) return
+      if (rejectWritePath(body, res)) return
+      const topicPath = badTopicPath(res, body.topic, true)
+      const toTopic = badTopicPath(res, body.toTopic, true)
+      if (topicPath === null || toTopic === null) return
+      await withInflight(`paper\u0000${topicPath}\u0000${String(body.name ?? '')}`, res, async () => {
+        try {
+          const plan = planPaperDelete(dataDir, topicPath, body.name)
+          const ref = resolveLibraryPaper(plan.topic, plan.name)
+          const sessions = await sessionInfo(ref)
+          if (!(await requireSessionClear(ref, res))) return
+          if (zhStatus(ref).busy) {
+            throw new ManageError('translation-busy', 409, '该文献正在生成译文，请等待完成后再移动', {})
+          }
+          const r = movePaper(dataDir, plan.topic, plan.name, toTopic)
+          json(res, 200, { ...r, topic: r.toTopic, name: r.name, detachedSessions: sessions.total })
         } catch (err) {
           if (!libFail(res, err)) throw err
         }

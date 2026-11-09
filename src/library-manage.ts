@@ -23,6 +23,7 @@ import {
   encodedEscapeError,
   assertInside as assertInsideShared,
   existingEntryName,
+  flatArtifactNames,
   isPaperDir,
   isPaperPDF,
   listPapers,
@@ -1304,6 +1305,85 @@ function renameLegacyPaper(dataDir: string, topicDir: string, paperName: string,
     }
   }
   return { ok: true, moved: moved.map((m) => basename(m.to)), from: paperName, to: newName }
+}
+
+export interface MovePaperResult {
+  ok: true
+  moved: string[]
+  from: string
+  to: string
+  fromTopic: string
+  toTopic: string
+  name: string
+}
+
+/**
+ * 移动论文到另一个已存在专题。新布局整目录移动；旧平铺布局顺手收纳为论文文件夹。
+ * 目标名不变，因此目标专题下的同名论文目录、平铺 PDF 与大小写变体都必须在动手前拒绝。
+ */
+export function movePaper(dataDir: string, topic: unknown, name: unknown, toTopicRaw: unknown, renameImpl: RenameImpl = renameSync): MovePaperResult {
+  const plan = planPaperDelete(dataDir, topic, name)
+  const toTopic = validateTopicPath(toTopicRaw, true)
+  if (toTopic === plan.topic) throw new ManageError('bad-request', 400, '论文已经在目标专题中')
+  const root = realDataDir(dataDir)
+  const targetTopicDir = resolveExistingTopicDir(dataDir, toTopic)
+  const paperParent = paperDirAncestor(root, toTopic.split('/'))
+  if (paperParent) throw new ManageError('target-exists', 409, `目标专题是论文目录，不能移入：${paperParent}`, { conflicts: [paperParent] })
+  const sourceDir = resolveExistingPaperDir(dataDir, plan.topic, plan.name)
+  const targetDir = join(targetTopicDir, plan.name)
+  let targetExists = false
+  try { lstatSync(targetDir); targetExists = true } catch { /* 不存在才可移入 */ }
+  const clashes = [...new Set([
+    ...(targetExists ? [plan.name] : []),
+    ...flatArtifactNames(targetTopicDir, plan.name),
+    ...caseVariantCollisions(targetTopicDir, plan.name),
+  ])]
+  if (clashes.length > 0) {
+    throw new ManageError('target-exists', 409, `目标专题已存在同名文献：${clashes.join('、')}`, { conflicts: clashes })
+  }
+  assertInside(root, targetDir)
+  let targetCreated = false
+  const fail = (err: unknown, rollback: () => { rolledBack: string[]; rollbackFailed: string[] } = () => ({ rolledBack: [], rollbackFailed: [] })): never => {
+    const code = (err as NodeJS.ErrnoException).code
+    const { rolledBack, rollbackFailed } = rollback()
+    if (plan.layout === 'legacy' && targetCreated) { try { rmdirSync(targetDir) } catch { /* 非空则保留现场 */ } }
+    const tail = rollbackFailed.length === 0
+      ? '本次移动已全部撤销，文献库未改变'
+      : `但 ${rollbackFailed.length} 个文件未能移回原处，请手动检查：${rollbackFailed.join('、')}`
+    if (code === 'EBUSY' || code === 'EPERM') {
+      throw new ManageError('file-busy', 409, `文件被占用（可能正在阅读器或其他程序中打开），关闭后重试；${tail}`, {
+        busy: plan.name, moved: [], rolledBack, rollbackFailed, cause: code,
+      })
+    }
+    if (typeof code === 'string' && code && rollbackFailed.length === 0) throw err
+    throw new ManageError('rename-partial', 500, `移动文献中途失败；${tail}`, {
+      moved: [], rolledBack, rollbackFailed, cause: code ?? 'unknown',
+    })
+  }
+  if (plan.layout === 'folder') {
+    try { renameImpl(sourceDir, targetDir) } catch (err) { fail(err) }
+  } else {
+    try { mkdirSync(targetDir); targetCreated = true } catch (err) { fail(err) }
+    const moved: Array<{ from: string; to: string }> = []
+    try {
+      for (const f of plan.files) {
+        const from = join(sourceDir, f.name)
+        const to = join(targetDir, f.name)
+        renameImpl(from, to)
+        moved.push({ from, to })
+      }
+    } catch (err) {
+      fail(err, () => {
+        const rolledBack: string[] = []
+        const rollbackFailed: string[] = []
+        for (const m of [...moved].reverse()) {
+          try { renameImpl(m.to, m.from); rolledBack.push(basename(m.from)) } catch { rollbackFailed.push(basename(m.from)) }
+        }
+        return { rolledBack, rollbackFailed }
+      })
+    }
+  }
+  return { ok: true, moved: plan.files.map((f) => f.name), from: plan.name, to: plan.name, fromTopic: plan.topic, toTopic, name: plan.name }
 }
 
 /**

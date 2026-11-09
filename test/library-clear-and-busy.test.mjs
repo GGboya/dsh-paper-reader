@@ -730,14 +730,14 @@ function enclosingBlock(src, idx) {
   assert.fail('代码块未闭合')
 }
 
-test('D2 【F-B】四个失败入口都必须走 clearFailureText，且每个入口都真的把恢复指引拼进 toast（结构性断言，不依赖注释长度）', () => {
+test('D2 【F-B】五个失败入口都必须走 clearFailureText，且每个入口都真的把恢复指引拼进 toast（结构性断言，不依赖注释长度）', () => {
   const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
   // 只数**调用**：排除 `function clearFailureText(err, t)` 这个定义行（旧正则 `clearFailureText((e|err), t)`
   // 会把定义行也算一处 —— 删掉一个真实调用点仍然是 4，护栏形同虚设；评审 R-1 的变异正是这么绕过的）。
   const all = [...src.matchAll(/clearFailureText\((?:e|err), t\)/g)]
   const callSites = all.filter((m) => !/function\s*$/.test(src.slice(Math.max(0, m.index - 32), m.index)))
   assert.equal(all.length, callSites.length + 1, '除定义行外不应有其它匹配（否则计数口径要重核）')
-  assert.equal(callSites.length, 4, `删除/清空/改名共 4 条失败路径都必须调用它（现有 ${callSites.length} 处调用 + 1 处定义）`)
+  assert.equal(callSites.length, 5, `删除/清空/改名/移动共 5 条失败路径都必须调用它（现有 ${callSites.length} 处调用 + 1 处定义）`)
   // 结构性：对每个调用点，用花括号配对取出**它所在的失败分支**，断言该分支同时有 toast 与 f.recovery。
   // 这样「把 clearFailureText 调用删掉」或「调用留着但不渲染 recovery」都会红。
   callSites.forEach((m, i) => {

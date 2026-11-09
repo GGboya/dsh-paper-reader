@@ -245,15 +245,24 @@
     border-bottom: 1px solid var(--border); font-size: 12.5px; font-weight: 600; flex: none; }
   #note-head .spacer, #note-actions .spacer { flex: 1; }
   #note-headcount { font-weight: 400; color: var(--text-2); font-variant-numeric: tabular-nums; }
-  #note-list { flex: 1; overflow: auto; padding: 4px 8px 10px; }
-  .note-item { display: block; width: 100%; text-align: left; border: 1px solid var(--border); border-radius: 6px;
-    background: var(--bg); color: var(--text); padding: 6px 8px; margin: 5px 0; cursor: pointer; font: inherit; font-size: 12px; line-height: 1.5; }
-  .note-item:hover { border-color: var(--accent); }
-  .note-item .ni-meta { display: block; color: var(--accent); font-size: 11px; margin-bottom: 2px; }
-  .note-item .ni-meta .ni-time { float: right; color: var(--text-2); font-weight: 400; }
+  #note-list { flex: 1; overflow: auto; padding: 6px 8px 10px; }
+  .note-item { position: relative; width: 100%; margin: 6px 0; border: 1px solid var(--border); border-radius: 7px;
+    background: var(--bg); color: var(--text); font-size: 12px; line-height: 1.5; }
+  .note-item:hover, .note-item:focus-within { border-color: var(--accent); }
+  .note-item-main { display: block; width: 100%; padding: 7px 9px; border: 0; border-radius: 7px;
+    background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+  .note-item-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .note-item .ni-meta { display: flex; align-items: center; color: var(--accent); font-size: 11px; margin-bottom: 3px; }
+  .note-item .ni-meta .ni-time { margin-left: auto; padding-right: 37px; color: var(--text-2); font-weight: 400; font-size: 10.5px; }
+  .note-item.delete-armed .ni-meta .ni-time { visibility: hidden; }
   .note-item .ni-body { display: block; white-space: pre-wrap; word-break: break-word; }
-  .note-item .ni-quote { display: block; color: var(--text-2); font-size: 11px; margin-top: 3px;
+  .note-item .ni-quote { display: block; color: var(--text-2); font-size: 11px; margin-top: 4px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note-item-delete { position: absolute; z-index: 1; top: 5px; right: 6px; min-width: 32px; height: 21px; padding: 0 4px;
+    border: 0; border-radius: 4px; background: transparent; color: var(--text-2); cursor: pointer; font: inherit; font-size: 11px; }
+  .note-item-delete:hover, .note-item-delete:focus-visible { background: var(--panel); color: #cf222e; outline: 1px solid var(--border); }
+  .note-item-delete.armed { background: #cf222e; color: #fff; }
+  .note-item-delete:disabled { opacity: .55; cursor: default; }
   #note-empty { padding: 14px 6px; color: var(--text-2); font-size: 12px; line-height: 1.6; }
   #note-editor { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 6px 8px 8px; }
   #note-window.editing #note-list, #note-window.editing #note-empty { display: none; }
@@ -1590,11 +1599,12 @@ window.dprFindDebug = () => {
    盒子层 pointer-events:none，悬停/点击靠坐标命中测试 —— 绝不挡住划词选字。 */
 const NOTE_WIN_KEY = 'dpr.noteWin';
 const NOTE_BODY_MAX = 20000;
-const notes = { list: [], shown: false, editing: null, isNew: true, armed: false, loading: false };
+const notes = { list: [], shown: false, editing: null, isNew: true, armed: false, listDeleteId: null, loading: false };
 let noteWin = { x: null, y: null, w: 330, h: 360 };
 const noteWinEl = $('note-window');
 const noteTipEl = $('note-tip');
 let noteArmTimer = 0;
+let noteListDeleteTimer = 0;
 let noteHoverRaf = 0;
 let noteHoverId = null;
 
@@ -1882,6 +1892,7 @@ function noteWinShow(on) {
   if (!on) {
     noteWinEl.classList.remove('on');
     notes.shown = false;
+    noteResetListDelete();
     noteHideTip();
     return;
   }
@@ -1900,6 +1911,7 @@ function renderNoteList() {
   const list = $('note-list');
   const head = $('note-headcount');
   if (!list || !head) return;
+  noteResetListDelete();
   head.textContent = notes.list.length ? `${notes.list.length} 条` : '';
   list.textContent = '';
   if (!notes.list.length) {
@@ -1920,9 +1932,12 @@ function renderNoteList() {
   });
   const frag = document.createDocumentFragment();
   for (const n of sorted) {
+    const item = document.createElement('div');
+    item.className = 'note-item';
+    item.dataset.id = n.id;
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'note-item';
+    btn.className = 'note-item-main';
     btn.dataset.id = n.id;
     btn.title = n.anchor && n.anchor.page ? `跳到第 ${n.anchor.page} 页` : '这条笔记没有可定位的原文位置';
     const meta = document.createElement('span');
@@ -1944,7 +1959,16 @@ function renderNoteList() {
       q.textContent = '「' + String(n.quote).replace(/\s+/g, ' ') + '」';
       btn.appendChild(q);
     }
-    frag.appendChild(btn);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'note-item-delete';
+    del.dataset.noteDelete = n.id;
+    del.textContent = '删除';
+    del.title = '删除这条笔记';
+    del.setAttribute('aria-label', `删除笔记：${body.slice(0, 40)}`);
+    item.appendChild(btn);
+    item.appendChild(del);
+    frag.appendChild(item);
   }
   list.appendChild(frag);
 }
@@ -2005,6 +2029,33 @@ async function noteSave() {
   } catch (e) { toast('保存失败：' + e.message, 6000); }
   $('note-save').disabled = false;
 }
+function noteResetListDelete() {
+  clearTimeout(noteListDeleteTimer);
+  notes.listDeleteId = null;
+  for (const btn of document.querySelectorAll('.note-item-delete')) {
+    btn.disabled = false;
+    btn.classList.remove('armed');
+    btn.textContent = '删除';
+    btn.title = '删除这条笔记';
+    btn.closest('.note-item')?.classList.remove('delete-armed');
+  }
+}
+function noteArmListDelete(note, btn) {
+  if (!note || !note.id || !btn) return;
+  if (notes.listDeleteId !== note.id) {
+    noteResetListDelete();
+    notes.listDeleteId = note.id;
+    btn.classList.add('armed');
+    btn.closest('.note-item')?.classList.add('delete-armed');
+    btn.textContent = '确认删除';
+    btn.title = '再点一次确认删除这条笔记';
+    noteListDeleteTimer = setTimeout(noteResetListDelete, 3000);
+    return;
+  }
+  clearTimeout(noteListDeleteTimer);
+  btn.disabled = true;
+  void noteDoDelete(note);
+}
 function noteArmDelete() {
   const btn = $('note-delete');
   if (!notes.editing || notes.isNew) return;
@@ -2037,6 +2088,7 @@ async function noteDoDelete(note) {
     notesReapply();
     toast('笔记已删除');
   } catch (e) { toast('删除失败：' + e.message, 6000); }
+  finally { noteResetListDelete(); }
 }
 async function noteGoto(note) {
   if (!note) return;
@@ -2089,7 +2141,14 @@ $('note-save').onclick = () => void noteSave();
 $('note-cancel').onclick = () => noteSetEditing(false);
 $('note-delete').onclick = () => noteArmDelete();
 $('note-list').addEventListener('click', (e) => {
-  const btn = e.target.closest ? e.target.closest('.note-item') : null;
+  const del = e.target.closest ? e.target.closest('[data-note-delete]') : null;
+  if (del) {
+    e.preventDefault();
+    e.stopPropagation();
+    noteArmListDelete(noteById(del.dataset.noteDelete), del);
+    return;
+  }
+  const btn = e.target.closest ? e.target.closest('.note-item-main') : null;
   if (!btn) return;
   void noteGoto(noteById(btn.dataset.id));
 });
