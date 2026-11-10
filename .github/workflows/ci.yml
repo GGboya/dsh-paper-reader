@@ -4,6 +4,7 @@
 # 触发：push 到 main + 所有 PR（pull_request 用 merge ref，本文件随 base 生效，
 # 外部贡献者 rebase/push 后自动跑，无需授权）。
 # 三平台阻断（PR #6 清完 Windows 测试债：pathToFileURL / symlink 类型 / 平台差异分支）。
+# Node 22/24 双线：engines 声明 ^22.19.0 || >=24，两条支持线都得在 CI 里真跑过。
 name: ci
 
 on:
@@ -19,20 +20,21 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # traversal-verification 的 V1/V2 用例 pin 基线 commit（a574288）构建
           # 「修复前」对照产物；浅克隆取不到时自动 skip，拉全历史让它们真正跑起来。
           fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
-      - uses: actions/setup-node@v4
+          version: 11
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
