@@ -64,6 +64,7 @@ import { cancelTranslation, pdfVariantPath, restartTranslation, startTranslation
 import {
   clearTranslateConfig,
   deleteTranslateEndpoint,
+  listTranslateModels,
   maskApiKey,
   readTranslateConfig,
   readTranslateEndpointStore,
@@ -71,7 +72,14 @@ import {
   saveTranslateEndpoint,
   selectTranslateEndpoint,
   testTranslateEndpoint,
+  writeTranslateRunOptions,
 } from './translate-config.ts'
+import {
+  currentHarnessModel,
+  openHarnessTranslationBridge,
+  type AgentDefaultModelLike,
+  type HarnessLlmLike,
+} from './harness-translate.ts'
 import {
   clearTypesafeConfig,
   readTypesafeConfig,
@@ -222,7 +230,18 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
   const sessionController = (ctx as unknown as { sessionController: SessionControllerLike }).sessionController
   const workspaceController = (ctx as unknown as { workspaceController: WorkspaceControllerLike }).workspaceController
   const workspaceRegistry = (ctx as unknown as { workspaceRegistry?: WorkspaceRegistryLike }).workspaceRegistry
+  const agentDefaultModel = (ctx as unknown as { agentDefaultModel?: AgentDefaultModelLike }).agentDefaultModel
+  const llm = (ctx as unknown as { llm?: HarnessLlmLike }).llm
   const dataDir = resolveDataDir(config.dataDir)
+  const harnessModel = () => {
+    try { return currentHarnessModel(agentDefaultModel, llm) } catch { return null }
+  }
+  const resolveTranslation = async (...args: Parameters<typeof resolveTranslateEndpoint>) => {
+    const resolved = await resolveTranslateEndpoint(...args)
+    // 测试壳 / 非完整 web profile 没有宿主模型服务时，保持原有「未配置」提示，不假称能跟随。
+    if (resolved.source === 'harness' && !harnessModel()) return { endpoint: {}, source: 'none' as const }
+    return resolved
+  }
   // dist/host.js → 包根/reader/index.html
   const readerHtml = new URL('../reader/index.html', import.meta.url)
   const readerVendorDir = new URL('../reader/vendor/', import.meta.url)
@@ -550,6 +569,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         return
       }
       const mime: Record<string, string> = { '.mjs': 'text/javascript', '.js': 'text/javascript', '.css': 'text/css', '.map': 'application/json',
+        // 字体与厂商 SVG 都是本地打包资源，不请求第三方图标站。
+        '.svg': 'image/svg+xml',
         // 字体（vendored KaTeX 的 woff2 就靠这条；不给对 MIME 时某些浏览器会拒绝 @font-face）
         '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf' }
       try {
@@ -558,7 +579,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         const type = mime[ext] ?? 'application/octet-stream'
         // 只有文本类才追加 charset：给 font/woff2 这类二进制资源加 `; charset=utf-8` 是错的
         // （实测 font/woff2 被浏览器按未知类型处理的风险；见 test/reader-vendor-http.test.mjs）
-        const texty = type.startsWith('text/') || type === 'application/json'
+        const texty = type.startsWith('text/') || type === 'application/json' || type === 'image/svg+xml'
         res.writeHead(200, { 'content-type': texty ? type + '; charset=utf-8' : type, 'content-length': body.length, 'cache-control': 'no-cache' })
         res.end(body)
       } catch {
@@ -1268,7 +1289,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         throw notFound('文献不存在（划词翻译需要先能定位到该文献）')
       }
 
-      const { endpoint, source } = await resolveTranslateEndpoint(config.translate)
+      const { endpoint, source } = await resolveTranslation(config.translate)
       if (source === 'none') {
         json(res, 503, { error: '未配置翻译端点：在阅读器里点 ⚙ 填写（OpenAI 兼容端点即可）', code: 'no-endpoint' })
         return
@@ -1280,7 +1301,17 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         ? await openCodeSessionId(`paper:${ref.topic}/${ref.name}`)
         : ''
       try {
-        const r = await translateSelection(endpoint, asm.source, ocSession ? { openCodeSessionId: ocSession } : {})
+        let r
+        if (source === 'harness') {
+          const selected = harnessModel()
+          if (!selected) throw new SelectionTranslateError('no-endpoint', 503, 'Harness 当前模型不可用，请先在 Harness 模型设置中选择模型')
+          // 划词翻译只跟随本次请求开始时的选择；临时端口与 token 在请求结束立即销毁。
+          const bridge = await openHarnessTranslationBridge(llm!, selected)
+          try { r = await translateSelection(bridge.endpoint, asm.source) }
+          finally { await bridge.close() }
+        } else {
+          r = await translateSelection(endpoint, asm.source, ocSession ? { openCodeSessionId: ocSession } : {})
+        }
         json(res, 200, {
           translation: r.translation,
           model: r.model,
@@ -1402,17 +1433,19 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // 中文版状态：zh=纯中文 dual=中英对照 busy=翻译中。
     // 顺带返回生效端点的脱敏信息，让 UI 能回答「正在用哪个模型/key 翻」——key 只给掩码。
     if (sub === '/api/zh' && req.method === 'GET') {
-      const { endpoint, source } = await resolveTranslateEndpoint(config.translate)
+      const { endpoint, source } = await resolveTranslation(config.translate)
+      const followed = source === 'harness' ? harnessModel() : null
       json(res, 200, {
         ...zhStatus(locate(url)),
-        model: endpoint.model ?? null,
-        apiKeyHint: endpoint.apiKey ? maskApiKey(endpoint.apiKey) : null,
+        model: followed?.model ?? endpoint.model ?? null,
+        provider: followed?.providerName ?? null,
+        apiKeyHint: source === 'harness' ? '由 Harness 管理' : endpoint.apiKey ? maskApiKey(endpoint.apiKey) : null,
         endpointSource: source,
       })
       return
     }
 
-    // 启动后台翻译（幂等；force=true 为重翻：先删已有译文再启动）。端点：UI 里填的 > profile 的 translate
+    // 启动后台翻译（幂等；force=true 为重翻：先删已有译文再启动）。默认 Harness，显式 file/profile 为翻译专用覆盖。
     if (sub === '/api/zh/generate' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; force?: boolean; endpointId?: string }
       let ref: PaperRef
@@ -1423,16 +1456,31 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         if (manageFail(res, err)) return
         throw err
       }
-      const { endpoint, source } = await resolveTranslateEndpoint(config.translate, undefined, body.endpointId)
+      const { endpoint, source } = await resolveTranslation(config.translate, undefined, body.endpointId)
       if (body.endpointId && source === 'none') {
         json(res, 400, { error: '所选翻译端点不存在或配置不完整，请重新选择', code: 'endpoint-not-found' })
         return
       }
       if (body.endpointId && source !== 'none') await selectTranslateEndpoint(body.endpointId)
-      const r = body.force
-        ? await restartTranslation(ref, dataDir, endpoint)
-        : await startTranslation(ref, dataDir, endpoint)
-      json(res, r.started ? 200 : 409, r)
+      const followed = source === 'harness' ? harnessModel() : null
+      if (source === 'harness' && !followed) {
+        json(res, 503, { error: 'Harness 当前模型不可用，请先在 Harness 模型设置中选择模型', code: 'no-endpoint' })
+        return
+      }
+      const bridge = followed ? await openHarnessTranslationBridge(llm!, followed) : null
+      const hooks = bridge ? { onFinish: bridge.close } : {}
+      const runOptions = (await readTranslateEndpointStore()).options
+      try {
+        // 整篇 PDF 在任务开始时固定 provider/model；运行期间换 Harness 模型不会把任务切成两套模型。
+        const r = body.force
+          ? await restartTranslation(ref, dataDir, bridge?.endpoint ?? endpoint, hooks, runOptions)
+          : await startTranslation(ref, dataDir, bridge?.endpoint ?? endpoint, hooks, runOptions)
+        if (!r.started) await bridge?.close()
+        json(res, r.started ? 200 : 409, r)
+      } catch (err) {
+        await bridge?.close()
+        throw err
+      }
       return
     }
 
@@ -1454,11 +1502,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     // ── 翻译端点配置（阅读器浮层的读写口）─────────────────────────────
     // GET 只回显掩码 key：明文永不离开服务端
     if (sub === '/api/translate/config' && req.method === 'GET') {
-      const { endpoint, source } = await resolveTranslateEndpoint(config.translate)
+      const { endpoint, source } = await resolveTranslation(config.translate)
       const store = await readTranslateEndpointStore()
+      const followed = harnessModel()
       const endpoints = store.endpoints.map((e) => ({
         id: e.id,
         label: e.label ?? '',
+        provider: e.provider ?? '',
+        providerName: '',
         baseUrl: e.baseUrl ?? '',
         model: e.model ?? '',
         hasApiKey: Boolean(e.apiKey),
@@ -1468,26 +1519,81 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       }))
       if (config.translate?.baseUrl && config.translate.apiKey && config.translate.model) {
         endpoints.push({
-          id: 'profile', label: 'profile 默认配置', baseUrl: config.translate.baseUrl, model: config.translate.model,
+          id: 'profile', label: 'profile 默认配置', provider: 'custom', providerName: '', baseUrl: config.translate.baseUrl, model: config.translate.model,
           hasApiKey: true, apiKeyHint: maskApiKey(config.translate.apiKey), complete: true, source: 'profile',
+        })
+      }
+      if (followed) {
+        endpoints.unshift({
+          id: 'harness', label: '跟随 Harness', provider: 'harness', baseUrl: '', model: followed.model,
+          providerName: followed.providerName, hasApiKey: true, apiKeyHint: '由 Harness 管理', complete: true, source: 'harness',
         })
       }
       json(res, 200, {
         baseUrl: endpoint.baseUrl ?? '',
-        model: endpoint.model ?? '',
-        hasApiKey: Boolean(endpoint.apiKey),
-        apiKeyHint: endpoint.apiKey ? maskApiKey(endpoint.apiKey) : '',
+        model: followed && source === 'harness' ? followed.model : endpoint.model ?? '',
+        hasApiKey: source === 'harness' ? true : Boolean(endpoint.apiKey),
+        apiKeyHint: source === 'harness' ? '由 Harness 管理' : endpoint.apiKey ? maskApiKey(endpoint.apiKey) : '',
         source,
-        activeId: source === 'none' ? null : source === 'profile' ? 'profile' : store.activeId,
+        mode: source === 'harness' || store.activeId === 'harness' ? 'follow' : 'custom',
+        options: store.options,
+        harness: followed,
+        activeId: source === 'harness' ? 'harness' : source === 'none' ? null : source === 'profile' ? 'profile' : store.activeId,
         endpoints,
       })
+      return
+    }
+
+    // 整篇 PDF 的运行参数：上下文拆段、输出预算与 QPS；不含端点或凭据。
+    if (sub === '/api/translate/config/options' && req.method === 'POST') {
+      const body = await readBody(req)
+      try {
+        const options = await writeTranslateRunOptions(body)
+        json(res, 200, { ok: true, options })
+      } catch (err) {
+        json(res, 400, { error: err instanceof Error ? err.message : String(err) })
+      }
+      return
+    }
+
+    // 只切换翻译来源，不删除专用端点，也绝不调用 Harness 的 saveSelection。
+    if (sub === '/api/translate/config/selection' && req.method === 'POST') {
+      const body = (await readBody(req)) as { id?: string }
+      const id = body.id?.trim() ?? ''
+      if (!id) {
+        json(res, 400, { error: '请选择翻译模型来源' })
+        return
+      }
+      try { await selectTranslateEndpoint(id) }
+      catch {
+        json(res, 400, { error: '所选翻译端点不存在，请重新选择', code: 'endpoint-not-found' })
+        return
+      }
+      json(res, 200, { ok: true, id })
+      return
+    }
+
+    // 填 Key 后自动发现模型：只读 /models，Key 可沿用正在编辑的已保存端点。
+    if (sub === '/api/translate/models' && req.method === 'POST') {
+      const body = (await readBody(req)) as { id?: string; baseUrl?: string; apiKey?: string }
+      const store = await readTranslateEndpointStore()
+      const editing = body.id && body.id !== 'new' ? store.endpoints.find((e) => e.id === body.id) : undefined
+      const result = await listTranslateModels({
+        baseUrl: body.baseUrl?.trim() || editing?.baseUrl || '',
+        apiKey: body.apiKey?.trim() || editing?.apiKey || '',
+      })
+      if (!result.ok) {
+        json(res, 400, { error: `获取模型失败：${result.detail ?? '未知原因'}`, code: 'models-unavailable' })
+        return
+      }
+      json(res, 200, { ok: true, models: result.models })
       return
     }
 
     // POST：校验 → 预检 → 通了才落盘。key 填错在这里就拦下，
     // 不让它拖到 babeldoc 跑几分钟后才异步失败。
     if (sub === '/api/translate/config' && req.method === 'POST') {
-      const body = (await readBody(req)) as { id?: string; label?: string; baseUrl?: string; apiKey?: string; model?: string }
+      const body = (await readBody(req)) as { id?: string; label?: string; provider?: string; baseUrl?: string; apiKey?: string; model?: string }
       const baseUrl = body.baseUrl?.trim() ?? ''
       const model = body.model?.trim() ?? ''
       // key 留空 = 沿用正在编辑的那个端点，而不是误用当前活跃端点的 key。
@@ -1516,7 +1622,7 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       }
       const saved = await saveTranslateEndpoint(
         { baseUrl, apiKey, model },
-        { ...(body.id ? { id: body.id } : {}), ...(body.label ? { label: body.label } : {}) },
+        { ...(body.id ? { id: body.id } : {}), ...(body.label ? { label: body.label } : {}), ...(body.provider ? { provider: body.provider } : {}) },
       )
       json(res, 200, { ok: true, id: saved.id })
       return

@@ -2558,7 +2558,7 @@ function loadClientSyncPure() {
   vm.createContext(ctx)
   vm.runInContext(
     readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
-      + "\n;globalThis.__dprSyncPure = { key: DPR_SYNC_SCROLL_KEY, fromRaw: dprSyncScrollFromRaw, raw: dprSyncScrollRaw };",
+      + "\n;globalThis.__dprSyncPure = { key: dprSyncScrollKey(), fromRaw: dprSyncScrollFromRaw, raw: dprSyncScrollRaw };",
     ctx, { filename: 'client-sync-inline.js' },
   )
   assert.ok(loaded && typeof loaded.factory === 'function', 'client.js 必须通过 __ModuleLoader__.load 注册模块')

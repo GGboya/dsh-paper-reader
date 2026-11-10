@@ -49,12 +49,14 @@ src/
   scope.ts      纯函数：按范围提问（专题子树展开、正文+命中预算 40k 逐篇 coverage、同名 omitted-duplicate、cutToCodePoint re-export）
   transcribe.ts 纯函数：pdf.js 提取 + 页码偏移表 + MinerU 后端选择与缓存来源语义
   mineru.ts     纯函数：MinerU 客户端（本地 /tasks 轮询；mineru.net v4 云端 + 最小 ZIP 读取器）
-  mineru-config.ts / embed-config.ts / translate-config.ts / typesafe-config.ts 纯函数：各端点配置读写（0600）+ 预检
+  mineru-config.ts / embed-config.ts / translate-config.ts / typesafe-config.ts 纯函数：各端点配置读写（0600）+ 预检；翻译空配置默认跟随 Harness，显式 file/profile 为翻译专用覆盖
   search.ts     纯函数：分段 + 关键词打分 + 公式查询归一化 + 嵌入混合召回
   embed.ts      纯函数：/embeddings 客户端 + 分块向量缓存
   formulas.ts   纯函数：MinerU 公式索引（LaTeX + bbox → 阅读器热区/面板）
   study.ts      纯函数：学习档案（计划 + 检验成绩）读写
   translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）
+  translation-options.ts 纯函数：整篇翻译的上下文拆段、输出预算与 QPS（默认 100000/32768/16，配置校验）
+  harness-translate.ts Harness 当前模型的只读适配：agentDefaultModel + llm；临时 127.0.0.1 OpenAI 端点供 BabelDOC，任务结束即关闭，不读写 Harness 凭据
   babeldoc-install.ts 纯函数：无 Python 环境时自动安装 babeldoc（uv → 托管 Python → venv）
   translate-selection.ts 纯函数：划词翻译（公式保留——行内公式与 MinerU 块文本对齐还原、提示词契约、逐公式保全校验、内存 LRU）
   rerank.ts     纯函数：search_paper 语义重排（TypeSafe/Jev，无凭据时退回关键词排序）

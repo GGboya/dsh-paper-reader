@@ -17,7 +17,8 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
 
   // webServer 是可选服务（web profile 有，headless 没有）：出现时再挂路由。
   // connection/sessionController/workspaceController/workspaceRegistry 同属 web profile（cordis 要求访问前先声明 inject）。
-  ctx.inject(['webServer', 'connection', 'sessionController', 'workspaceController', 'workspaceRegistry'], (rctx) => {
+  // agentDefaultModel + llm 用于「全文翻译默认跟随 Harness」：只读当前选择并调用，不写宿主配置。
+  ctx.inject(['webServer', 'connection', 'sessionController', 'workspaceController', 'workspaceRegistry', 'agentDefaultModel', 'llm'], (rctx) => {
     registerRoutes(rctx, config)
   })
 }

@@ -2,13 +2,19 @@
 //
 // 存 $DSH_HOME/.dsh-paper-reader/translate.json（0600）——刻意不放 dataDir：
 // dataDir 是文献库目录，可能被 git / 云盘同步出去，密钥不该跟着走。
-// 优先级：文件 > profile 的 cordis.patch.yml config.translate（后者退为部署方默认值）。
-// 密钥只落盘、只回显掩码：任何读接口都不返回明文（apiKeyHint 是掩码后的展示串）。
+// 优先级：显式选择的 file/profile 覆盖 > 部署方 profile 默认 > Harness 当前模型。
+// 自定义密钥只落盘、只回显掩码；Harness 跟随只保存 activeId='harness'，不复制宿主凭据。
 
 import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { TranslateEndpoint } from './translate.ts'
+import {
+  DEFAULT_TRANSLATION_RUN_OPTIONS,
+  sanitizeTranslationRunOptions,
+  validateTranslationRunOptions,
+  type TranslationRunOptions,
+} from './translation-options.ts'
 import { dshHome } from './library.ts'
 import { isOpenCodeEndpoint, openCodeSessionHeaders, openCodeSessionId } from './opencode.ts'
 // 预检会把端点响应体片段拼进错误文案，必须先脱敏（否则端点回显 Authorization 时 key 会泄露）。
@@ -17,8 +23,8 @@ import { isOpenCodeEndpoint, openCodeSessionHeaders, openCodeSessionId } from '.
 // 所以 translate-config → mineru 是单向依赖，**不会形成运行时循环**。
 import { sanitizeDetail } from './mineru.ts'
 
-/** 端点当前值的来源：file=UI 里填的 / profile=部署方 YAML / none=都没配全 */
-export type EndpointSource = 'file' | 'profile' | 'none'
+/** 端点来源：Harness=跟随宿主当前模型；file/profile=翻译专用覆盖；none=当前环境无法解析。 */
+export type EndpointSource = 'file' | 'profile' | 'harness' | 'none'
 
 export interface ResolvedEndpoint {
   endpoint: TranslateEndpoint
@@ -28,11 +34,14 @@ export interface ResolvedEndpoint {
 export interface StoredTranslateEndpoint extends TranslateEndpoint {
   id: string
   label?: string
+  /** 设置页预设 id（deepseek/openai/anthropic/gemini/zhipu/custom），仅用于 UI 归组。 */
+  provider?: string
 }
 
 export interface TranslateEndpointStore {
   activeId: string | null
   endpoints: StoredTranslateEndpoint[]
+  options: TranslationRunOptions
 }
 
 export function translateConfigPath(home: string = dshHome()): string {
@@ -67,7 +76,7 @@ function endpointFields(rec: object): TranslateEndpoint {
 
 /** 新格式是多端点；旧版单对象自动视为 id=legacy 的第一项，读取无需用户重配。 */
 function parseStore(data: unknown): TranslateEndpointStore {
-  if (typeof data !== 'object' || data === null) return { activeId: null, endpoints: [] }
+  if (typeof data !== 'object' || data === null) return { activeId: null, endpoints: [], options: { ...DEFAULT_TRANSLATION_RUN_OPTIONS } }
   const rec = data as Record<string, unknown>
   const endpoints: StoredTranslateEndpoint[] = []
   if (Array.isArray(rec['endpoints'])) {
@@ -78,6 +87,7 @@ function parseStore(data: unknown): TranslateEndpointStore {
       endpoints.push({
         id: e['id'],
         ...(typeof e['label'] === 'string' && e['label'] ? { label: e['label'] } : {}),
+        ...(typeof e['provider'] === 'string' && e['provider'] ? { provider: e['provider'] } : {}),
         ...endpointFields(e),
       })
     }
@@ -86,13 +96,16 @@ function parseStore(data: unknown): TranslateEndpointStore {
     if (legacy.baseUrl || legacy.apiKey || legacy.model) endpoints.push({ id: 'legacy', ...legacy })
   }
   const requested = typeof rec['activeId'] === 'string' ? rec['activeId'] : null
-  const activeId = requested === 'profile' || endpoints.some((e) => e.id === requested) ? requested : (endpoints[0]?.id ?? null)
-  return { activeId, endpoints }
+  // 空库缺省跟随 Harness；已有文件配置的老用户仍选中自己的端点，不被升级改写。
+  const activeId = requested === 'profile' || requested === 'harness' || endpoints.some((e) => e.id === requested)
+    ? requested
+    : (endpoints[0]?.id ?? 'harness')
+  return { activeId, endpoints, options: sanitizeTranslationRunOptions(rec['options']) }
 }
 
 export async function readTranslateEndpointStore(home: string = dshHome()): Promise<TranslateEndpointStore> {
   try { return parseStore(JSON.parse(await readFile(translateConfigPath(home), 'utf8'))) }
-  catch { return { activeId: null, endpoints: [] } }
+  catch { return { activeId: null, endpoints: [], options: { ...DEFAULT_TRANSLATION_RUN_OPTIONS } } }
 }
 
 async function writeStore(store: TranslateEndpointStore, home: string): Promise<void> {
@@ -111,13 +124,14 @@ export async function readTranslateConfig(home: string = dshHome()): Promise<Tra
 
 /** 兼容旧调用方：单端点写入会替换整个文件；UI 多端点保存走 saveTranslateEndpoint。 */
 export async function writeTranslateConfig(cfg: TranslateEndpoint, home: string = dshHome()): Promise<void> {
-  await writeStore({ activeId: 'legacy', endpoints: [{ id: 'legacy', ...cfg }] }, home)
+  const current = await readTranslateEndpointStore(home)
+  await writeStore({ activeId: 'legacy', endpoints: [{ id: 'legacy', ...cfg }], options: current.options }, home)
 }
 
 /** 新建/更新并选中一个端点；id='new' 强制新增，缺省 id 更新当前项（旧 UI 语义）。 */
 export async function saveTranslateEndpoint(
   cfg: Required<TranslateEndpoint>,
-  options: { id?: string; label?: string; home?: string } = {},
+  options: { id?: string; label?: string; provider?: string; home?: string } = {},
 ): Promise<StoredTranslateEndpoint> {
   const home = options.home ?? dshHome()
   const store = await readTranslateEndpointStore(home)
@@ -125,22 +139,24 @@ export async function saveTranslateEndpoint(
     ? undefined
     : store.endpoints.find((e) => e.id === (options.id ?? store.activeId))
   const label = options.label?.trim() || existing?.label
+  const provider = options.provider?.trim() || existing?.provider
   const entry: StoredTranslateEndpoint = {
     id: existing?.id ?? randomUUID(),
     ...(label ? { label } : {}),
+    ...(provider ? { provider } : {}),
     ...cfg,
   }
   const endpoints = existing
     ? store.endpoints.map((e) => e.id === existing.id ? entry : e)
     : [...store.endpoints, entry]
-  await writeStore({ activeId: entry.id, endpoints }, home)
+  await writeStore({ activeId: entry.id, endpoints, options: store.options }, home)
   return entry
 }
 
-/** 记住生成时选择的端点，划词翻译与下次打开选择器也沿用同一项。 */
+/** 记住生成时选择的来源；harness 不删除任何自定义端点，切回时可继续使用。 */
 export async function selectTranslateEndpoint(id: string, home: string = dshHome()): Promise<void> {
   const store = await readTranslateEndpointStore(home)
-  if (id !== 'profile' && !store.endpoints.some((e) => e.id === id)) throw new Error('翻译端点不存在')
+  if (!['profile', 'harness'].includes(id) && !store.endpoints.some((e) => e.id === id)) throw new Error('翻译端点不存在')
   await writeStore({ ...store, activeId: id }, home)
 }
 
@@ -148,7 +164,15 @@ export async function selectTranslateEndpoint(id: string, home: string = dshHome
 export async function deleteTranslateEndpoint(id: string, home: string = dshHome()): Promise<void> {
   const store = await readTranslateEndpointStore(home)
   const endpoints = store.endpoints.filter((e) => e.id !== id)
-  await writeStore({ activeId: store.activeId === id ? (endpoints[0]?.id ?? null) : store.activeId, endpoints }, home)
+  await writeStore({ activeId: store.activeId === id ? (endpoints[0]?.id ?? null) : store.activeId, endpoints, options: store.options }, home)
+}
+
+/** 更新整篇 PDF 的运行参数；与选择哪个端点无关，写回时不改变 activeId。 */
+export async function writeTranslateRunOptions(input: unknown, home: string = dshHome()): Promise<TranslationRunOptions> {
+  const options = validateTranslationRunOptions(input)
+  const store = await readTranslateEndpointStore(home)
+  await writeStore({ ...store, options }, home)
+  return options
 }
 
 /** 删除配置（回落到 profile 的 translate）。文件不存在也算成功。 */
@@ -156,13 +180,14 @@ export async function clearTranslateConfig(home: string = dshHome()): Promise<vo
   await rm(translateConfigPath(home), { force: true })
 }
 
-/** 解析生效端点：文件配全则用文件，否则用 profile，都配不全则返回能凑到的部分供报错。 */
+/** 解析生效来源：显式 harness 永远跟随宿主；空库有 profile 时兼容部署默认，否则跟随宿主。 */
 export async function resolveTranslateEndpoint(
   profile?: TranslateEndpoint,
   home: string = dshHome(),
   endpointId?: string,
 ): Promise<ResolvedEndpoint> {
   const store = await readTranslateEndpointStore(home)
+  if (endpointId === 'harness' || (!endpointId && store.activeId === 'harness')) return { endpoint: {}, source: 'harness' }
   if (endpointId === 'profile' || (!endpointId && store.activeId === 'profile')) return isComplete(profile)
     ? { endpoint: profile, source: 'profile' }
     : { endpoint: {}, source: 'none' }
@@ -172,6 +197,8 @@ export async function resolveTranslateEndpoint(
   const file = selected ? endpointFields(selected) : null
   if (isComplete(file)) return { endpoint: file, source: 'file' }
   if (!endpointId && isComplete(profile)) return { endpoint: profile, source: 'profile' }
+  // 全新安装没有任何专用配置时默认跟随；显式选择了一个残缺端点仍如实报 none。
+  if (!endpointId && !file) return { endpoint: {}, source: 'harness' }
   return { endpoint: endpointId ? (file ?? {}) : pick(profile, file), source: 'none' }
 }
 
@@ -225,5 +252,49 @@ export async function testTranslateEndpoint(ep: TranslateEndpoint): Promise<{ ok
     // fetch 抛出的原因串可能带上 baseUrl（含凭据/查询参数）或回显 Authorization ——
     // 与同函数上面两条分支一样先过 sanitizeDetail；可读原因（ECONNREFUSED 等）不受影响。
     return { ok: false, detail: sanitizeDetail((err instanceof Error ? err.message : String(err)) + cause, apiKey) }
+  }
+}
+
+/** 自动获取 OpenAI 兼容端点可见的聊天模型；只读，不落盘 Key，也不发推理请求。 */
+export async function listTranslateModels(
+  endpoint: { baseUrl?: string; apiKey?: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: boolean; models: string[]; detail?: string }> {
+  const baseUrl = endpoint.baseUrl?.trim().replace(/\/+$/, '') ?? ''
+  const apiKey = endpoint.apiKey?.trim() ?? ''
+  if (!/^https?:\/\//i.test(baseUrl)) return { ok: false, models: [], detail: '端点 URL 需要以 http:// 或 https:// 开头' }
+  if (!apiKey) return { ok: false, models: [], detail: '请先填写 API Key' }
+  const headers: Record<string, string> = { authorization: `Bearer ${apiKey}` }
+  // Anthropic 的 /v1/models 使用原生鉴权头；其 chat/completions 仍走 OpenAI 兼容模式。
+  if (/^https:\/\/api\.anthropic\.com(?:\/|$)/i.test(baseUrl)) {
+    headers['x-api-key'] = apiKey
+    headers['anthropic-version'] = '2023-06-01'
+  }
+  try {
+    const r = await fetchImpl(baseUrl + '/models', { headers, signal: AbortSignal.timeout(15_000) })
+    const text = (await r.text().catch(() => '')).slice(0, 2_000_000)
+    if (!r.ok) return { ok: false, models: [], detail: `HTTP ${r.status}${text ? ' ' + sanitizeDetail(text.slice(0, 200), apiKey) : ''}` }
+    let data: unknown
+    try { data = JSON.parse(text) } catch { return { ok: false, models: [], detail: '模型列表响应不是合法 JSON' } }
+    const rec = data as { data?: unknown; models?: unknown }
+    const rows = Array.isArray(rec.data) ? rec.data : Array.isArray(rec.models) ? rec.models : []
+    const models: string[] = []
+    for (const row of rows) {
+      const raw = typeof row === 'string'
+        ? row
+        : typeof row === 'object' && row !== null
+          ? (row as { id?: unknown; name?: unknown }).id ?? (row as { name?: unknown }).name
+          : null
+      if (typeof raw !== 'string' || !raw) continue
+      const id = raw.replace(/^models\//, '')
+      // 列表端点常混入嵌入/语音/重排模型，它们不能用于 chat/completions。
+      if (/(?:embedding|embed-|rerank|whisper|tts|transcribe|moderation|dall-e|image)/i.test(id)) continue
+      if (!models.includes(id)) models.push(id)
+    }
+    if (!models.length) return { ok: false, models: [], detail: '端点没有返回可用于翻译的模型，请在高级设置中手动填写' }
+    return { ok: true, models: models.slice(0, 200) }
+  } catch (err) {
+    const cause = err instanceof Error && err.cause instanceof Error ? `: ${err.cause.message}` : ''
+    return { ok: false, models: [], detail: sanitizeDetail((err instanceof Error ? err.message : String(err)) + cause, apiKey) }
   }
 }

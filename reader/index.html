@@ -317,25 +317,70 @@
   #tr-body .tr-math-block .katex-display { margin: 0; }
   #tr-body .tr-math-fallback { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--text-2); word-break: break-all; }
 
-  /* ---------- 翻译端点设置浮层 ---------- */
-  /* 阅读器在窄 iframe 里，宽度要能收缩 */
+  /* ---------- 全文翻译模型设置：与 dsh 设置页同一套跟随 / 覆盖语义 ---------- */
   #cfg-pop, #theme-pop, #generate-pop { position: fixed; z-index: 60; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: min(320px, calc(100vw - 32px)); }
+  #cfg-pop { width: min(640px, calc(100vw - 28px)); max-height: calc(100vh - 28px); overflow-y: auto; padding: 0; }
   #cfg-pop h3, #theme-pop h3 { margin: 0; font-size: 13px; }
-  #cfg-hint { font-size: 12px; color: var(--text-2); margin: 4px 0 2px; }
-  #cfg-pop label, #theme-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 2px; }
-  /* checkbox 例外：width:100% 会把它拉满整行、文字被挤到右边很远（实测视觉松散的根因） */
+  #cfg-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 16px 12px; border-bottom: 1px solid var(--border); }
+  #cfg-cancel { border: 0; background: transparent; color: var(--text-2); cursor: pointer; padding: 2px 5px; border-radius: 4px; }
+  #cfg-cancel:hover { background: var(--bg); color: var(--text); }
+  #cfg-hint { font-size: 12px; color: var(--text-2); line-height: 1.55; margin: 10px 16px 12px; }
+  #cfg-pop label, #theme-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 4px; }
   #cfg-pop input[type="checkbox"], #theme-pop input[type="checkbox"] { width: auto; }
   #theme-pop h3 { display: flex; align-items: center; justify-content: space-between; }
   #theme-close { all: unset; cursor: pointer; font-size: 12px; color: var(--text-2); padding: 2px 6px; border-radius: 4px; }
   #theme-close:hover { background: var(--bg); color: var(--text); }
-  #cfg-pop input, #cfg-pop select, #theme-pop input, #theme-pop select { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; background: var(--panel); color: var(--text); }
-  #cfg-model-hint, #cfg-source { font-size: 11.5px; color: var(--text-2); margin-top: 4px; line-height: 1.5; }
+  #cfg-pop input, #cfg-pop select, #theme-pop input, #theme-pop select { box-sizing: border-box; width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font: inherit; background: var(--panel); color: var(--text); }
+  #cfg-pop input:focus, #cfg-pop select:focus { border-color: var(--accent); outline: 2px solid var(--accent-soft); }
+  .cfg-modes { display: flex; gap: 9px; padding: 0 16px 14px; }
+  .cfg-mode, .cfg-provider, .cfg-model { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); cursor: pointer; text-align: left; }
+  .cfg-mode { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 11px; border-radius: 8px; }
+  .cfg-mode.selected, .cfg-provider.selected, .cfg-model.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); background: var(--accent-soft); }
+  .cfg-radio { width: 15px; height: 15px; flex: none; margin-top: 2px; border: 1.5px solid var(--text-2); border-radius: 50%; display: grid; place-items: center; }
+  .selected > .cfg-radio { border-color: var(--accent); }
+  .selected > .cfg-radio::after { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .cfg-mode-name { display: block; font-size: 12px; font-weight: 650; }
+  .cfg-desc, .cfg-small { display: block; color: var(--text-2); font-size: 11px; line-height: 1.5; margin-top: 4px; }
+  #cfg-follow-panel { display: flex; align-items: center; gap: 12px; margin: 0 16px 14px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--accent-soft); }
+  #cfg-follow-model { margin-top: 4px; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+  #cfg-follow-note { margin-top: 4px; }
+  #cfg-custom-panel[hidden], #cfg-follow-panel[hidden] { display: none; }
+  .cfg-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 16px 9px; font-size: 12px; }
+  #cfg-provider-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; padding: 0 16px 13px; }
+  .cfg-provider { min-width: 0; display: flex; align-items: center; gap: 8px; padding: 9px; border-radius: 7px; }
+  .cfg-mark { width: 29px; height: 29px; flex: none; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 7px; color: var(--accent); background: var(--panel); font-size: 10px; font-weight: 650; }
+  .cfg-icon { width: 22px; height: 22px; display: block; object-fit: contain; background: #fff; border-radius: 4px; }
+  .cfg-provider-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 600; }
+  .cfg-provider-state { color: var(--text-2); font-size: 10px; margin-top: 3px; }
+  .cfg-provider-state.saved { color: #27845d; }
+  #cfg-config { margin: 0 16px 14px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  #cfg-config-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 12px 7px; font-size: 12px; }
+  #cfg-key-link { color: var(--accent); font-size: 11px; text-decoration: none; white-space: nowrap; }
+  #cfg-key-wrap { padding: 0 12px 11px; }
+  #cfg-model-hint, #cfg-source { font-size: 11.5px; color: var(--text-2); margin-top: 5px; line-height: 1.5; }
+  #cfg-source { padding: 0 16px 12px; text-align: center; }
+  #cfg-source.ok { color: #27845d; }
+  #cfg-source.err { color: #d54e4e; }
   #cfg-source:empty { display: none; }
-  #cfg-actions, #generate-actions, #cfg-list-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-  #cfg-list-actions { justify-content: flex-start; margin-top: 4px; }
-  #cfg-save, #generate-start { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; }
+  #cfg-advanced { margin-top: 9px; }
+  #cfg-endpoints { margin: 0 16px 12px; color: var(--text-2); font-size: 11px; }
+  #cfg-endpoints summary, #cfg-advanced summary { cursor: pointer; }
+  #cfg-endpoints #cfg-saved { margin-top: 7px; }
+  #cfg-options-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+  #cfg-list-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  #cfg-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+  #cfg-save, #generate-start { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; white-space: nowrap; }
   #cfg-save:disabled, #generate-start:disabled { opacity: .5; cursor: default; }
-  #cfg-cancel { background: none; border: none; color: var(--text-2); cursor: pointer; }
+  #cfg-delete { color: #d54e4e; }
+  #cfg-models-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 12px 7px; border-top: 1px solid var(--border); font-size: 12px; }
+  #cfg-models { display: grid; gap: 6px; max-height: 230px; overflow-y: auto; padding: 0 12px 12px; }
+  .cfg-model { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 10px; border-radius: 7px; }
+  .cfg-model-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 600; }
+  .cfg-model-action { color: var(--text-2); font-size: 11px; white-space: nowrap; }
+  .cfg-empty { padding: 14px; border: 1px dashed var(--border); border-radius: 7px; color: var(--text-2); font-size: 11px; line-height: 1.6; text-align: center; }
+  #cfg-scope { padding: 0 16px 13px; color: var(--text-2); font-size: 11px; line-height: 1.5; text-align: center; }
+  #generate-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+  @media (max-width: 520px) { #cfg-provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .cfg-modes { flex-direction: column; } }
 
   #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: rgba(30,30,30,.92); color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; display: none; z-index: 99; max-width: 70%; }
   /* ---------- 深色模式（方案 §A2.1；设置项 §A2.3）----------
@@ -514,31 +559,66 @@
   <div id="tr-note"></div>
 </div>
 
-<div id="cfg-pop">
-  <h3>翻译端点</h3>
-  <div id="cfg-hint">选预设供应商，或选「自定义」填任意 OpenAI 兼容端点（通义 / 本地 vLLM 等）。OpenCode Go 需先在 OpenCode Console 订阅并复制 API Key。保存前会先测试连接。</div>
-  <div id="cfg-source"></div>
-  <label for="cfg-saved">已保存端点</label>
-  <select id="cfg-saved"></select>
-  <div id="cfg-list-actions">
-    <button id="cfg-new" class="tbtn">新增端点</button>
-    <button id="cfg-delete" class="tbtn">删除当前</button>
+<div id="cfg-pop" data-mode="follow">
+  <div id="cfg-head"><h3>全文翻译模型</h3><button id="cfg-cancel" title="关闭" aria-label="关闭">✕</button></div>
+  <div id="cfg-hint">生成中文版与划词翻译共用。默认跟随 Harness；专用配置只作用于翻译，不改变宿主模型设置。</div>
+  <div class="cfg-modes" role="radiogroup" aria-label="翻译模型来源">
+    <button id="cfg-follow" class="cfg-mode selected" role="radio" aria-checked="true"><span class="cfg-radio"></span><span><span class="cfg-mode-name">跟随 Harness <small>默认</small></span><span class="cfg-desc">与 Harness 当前模型保持一致</span></span></button>
+    <button id="cfg-custom" class="cfg-mode" role="radio" aria-checked="false"><span class="cfg-radio"></span><span><span class="cfg-mode-name">使用自定义模型</span><span class="cfg-desc">翻译任务单独使用另一套配置</span></span></button>
   </div>
-  <label for="cfg-provider">供应商</label>
-  <select id="cfg-provider"></select>
-  <label for="cfg-url">端点 URL</label>
-  <input id="cfg-url" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off">
-  <label for="cfg-key">API Key</label>
-  <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="new-password">
-  <label for="cfg-model">模型</label>
-  <input id="cfg-model" type="text" placeholder="deepseek-chat" autocomplete="off" list="cfg-model-list">
-  <datalist id="cfg-model-list"></datalist>
-  <div id="cfg-model-hint">glm-5.x / k3 / deepseek-flash 是推理型模型，服务端已自动关闭思考；选自定义端点时建议用非推理模型，否则会慢好几倍。</div>
-  <div id="cfg-actions">
-    <button id="cfg-cancel">取消</button>
-    <button id="cfg-save-new">另存为新端点</button>
-    <button id="cfg-save">保存</button>
-  </div>
+  <section id="cfg-follow-panel">
+    <span id="cfg-follow-icon" class="cfg-mark"></span>
+    <div><div class="cfg-small">● 当前跟随</div><div id="cfg-follow-model"></div><div id="cfg-follow-note" class="cfg-small">Harness 切换模型后，下次翻译自动跟随；进行中的整篇翻译不变。</div></div>
+  </section>
+  <section id="cfg-custom-panel" hidden>
+    <div class="cfg-section-head"><strong>翻译服务商</strong><span id="cfg-saved-count" class="cfg-small"></span></div>
+    <div id="cfg-provider-grid"></div>
+    <details id="cfg-endpoints">
+      <summary>管理已保存配置</summary>
+      <label for="cfg-saved">编辑已保存配置</label>
+      <select id="cfg-saved"></select>
+      <div id="cfg-list-actions">
+        <button id="cfg-new" class="tbtn">新增端点</button>
+        <button id="cfg-delete" class="tbtn">删除当前</button>
+        <button id="cfg-save-new" class="tbtn">另存为新端点</button>
+      </div>
+    </details>
+    <div id="cfg-config">
+      <div id="cfg-config-head"><strong id="cfg-provider-name"></strong><a id="cfg-key-link" target="_blank" rel="noreferrer">申请 API Key ↗</a></div>
+      <div id="cfg-key-wrap">
+        <label for="cfg-key">API Key</label>
+        <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="new-password">
+        <div id="cfg-model-hint">粘贴 Key 后自动验证并获取模型；选择模型后保存。</div>
+        <div id="cfg-url-wrap" hidden>
+          <label for="cfg-url">端点 URL</label>
+          <input id="cfg-url" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off">
+        </div>
+        <details id="cfg-advanced">
+          <summary>高级设置：整篇 PDF 翻译参数</summary>
+          <div id="cfg-manual-wrap" hidden>
+            <label for="cfg-model">手动模型名</label>
+            <input id="cfg-model" type="text" placeholder="deepseek-chat" autocomplete="off" list="cfg-model-list">
+            <datalist id="cfg-model-list"></datalist>
+            <div id="cfg-actions"><button id="cfg-save">使用此模型</button></div>
+          </div>
+          <label for="cfg-split-tokens">单段上下文上限（tokens）</label>
+          <input id="cfg-split-tokens" data-cfg-option="splitTokens" type="number" min="200" max="128000" step="1">
+          <div class="cfg-small">超过后自动拆段；调小可减少单次上下文，调大可减少拆段次数。</div>
+          <label for="cfg-max-output">单次输出上限（tokens）</label>
+          <input id="cfg-max-output" data-cfg-option="maxOutputTokens" type="number" min="0" max="32768" step="1">
+          <div class="cfg-small">0 表示跟随端点默认，不传 max_tokens。</div>
+          <label for="cfg-qps">并发请求数（QPS）</label>
+          <input id="cfg-qps" data-cfg-option="qps" type="number" min="1" max="32" step="1">
+          <div class="cfg-small">过高容易触发端点限流；遇到 429 时可调低。</div>
+          <div id="cfg-options-actions"><button id="cfg-options-save" class="tbtn">保存翻译参数</button></div>
+        </details>
+      </div>
+      <div id="cfg-models-head"><strong>选择翻译模型 <span id="cfg-model-count" class="cfg-small"></span></strong><button id="cfg-refresh" class="tbtn">刷新列表</button></div>
+      <div id="cfg-models"></div>
+    </div>
+  </section>
+  <div id="cfg-scope"></div>
+  <div id="cfg-source" role="status"></div>
 </div>
 
 <div id="generate-pop">
@@ -2401,6 +2481,7 @@ $('split-toggle').onclick = () => setViewMode(viewMode === 'split' ? 'orig' : 's
 let generateForce = false;
 let generateEndpoints = [];
 function endpointDisplay(e) {
+  if (e.source === 'harness') return `跟随 Harness · ${e.providerName || '当前模型'} / ${e.model}`;
   const provider = providerOf(e.baseUrl).name;
   return `${e.label || provider} · ${e.model || '未填模型'} · ${e.apiKeyHint || '无 Key'}`;
 }
@@ -2505,65 +2586,175 @@ $('zh-regen').onclick = async () => {
   regenArmTimer = setTimeout(disarmRegen, 3000);
 };
 
-/* ================= 翻译端点设置 ================= */
-// 供应商预设（OpenAI 兼容端点，对齐 lflow 的供应商清单）：选中即回填 URL + 推荐模型。
-// 一律走 Coding 套餐端点——买套餐是常态；套餐 key 走按量口会报余额不足。按量用户选「自定义」手填。
-// models 仅作 datalist 建议，输入框仍可自由填写（新型号上线不用发版）。
-// glm-5.x / k3 / deepseek-flash 是推理型，服务端会对这三家域名自动关 thinking（translate.ts）。
+/* ================= 全文翻译模型设置（与 dsh 设置页一致） ================= */
 const PROVIDERS = [
-  { id: 'custom',   name: '自定义（OpenAI 兼容）', baseUrl: '', models: [] },
-  { id: 'deepseek', name: 'DeepSeek',  baseUrl: 'https://api.deepseek.com',                     models: ['deepseek-v4-pro', 'deepseek-flash'] },
-  { id: 'glm',      name: '智谱 GLM',   baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4', models: ['glm-5.3-flash', 'glm-5.3', 'glm-4.6'] },
-  { id: 'kimi',     name: 'Kimi',      baseUrl: 'https://api.kimi.com/coding/v1',              models: ['k3'] },
-  // OpenCode Go：订阅后到 OpenCode Console 复制 API Key；模型列表以控制台为准（此处只做输入建议）。
-  // 服务端会对 opencode.ai 的请求自带 x-opencode-session（见 src/opencode.ts）。
-  { id: 'opencode', name: 'OpenCode Go', baseUrl: 'https://opencode.ai/inference/go/openai/v1', models: ['deepseek-v4.1-flash', 'glm-5.3-flash', 'kimi-k3.1-pro', 'qwen3.8-flash', 'minimax-m3.1-flash'] },
+  { id: 'deepseek', name: 'DeepSeek', mark: 'DS', icon: 'deepseek.svg', baseUrl: 'https://api.deepseek.com/v1', keyUrl: 'https://platform.deepseek.com/api_keys' },
+  { id: 'openai', name: 'OpenAI', mark: '◎', icon: 'openai.svg', mono: true, baseUrl: 'https://api.openai.com/v1', keyUrl: 'https://platform.openai.com/api-keys' },
+  { id: 'anthropic', name: 'Anthropic', mark: 'A', icon: 'anthropic.svg', baseUrl: 'https://api.anthropic.com/v1', keyUrl: 'https://console.anthropic.com/settings/keys' },
+  { id: 'gemini', name: 'Gemini', mark: '✦', icon: 'gemini.svg', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', keyUrl: 'https://aistudio.google.com/app/apikey' },
+  { id: 'zhipu', name: '智谱 GLM', mark: 'GL', icon: 'zhipu.svg', baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4', keyUrl: 'https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys' },
+  { id: 'kimi', name: 'Kimi', mark: 'K', icon: 'kimi.svg', mono: true, baseUrl: 'https://api.kimi.com/coding/v1', keyUrl: 'https://platform.kimi.com/console/api-keys' },
+  { id: 'opencode', name: 'OpenCode Go', mark: 'OC', icon: 'opencode.svg', mono: true, baseUrl: 'https://opencode.ai/inference/go/openai/v1', keyUrl: 'https://opencode.ai/' },
+  { id: 'custom', name: '自定义', mark: '+', baseUrl: '', keyUrl: '' },
 ];
 const normUrl = (u) => (u || '').trim().replace(/\/+$/, '');
-// 按 baseUrl 反查预设（打开表单时回显选中项）；查不到就是 custom
-const providerOf = (baseUrl) => PROVIDERS.find((p) => p.id !== 'custom' && normUrl(p.baseUrl) === normUrl(baseUrl)) || PROVIDERS[0];
+function providerOf(baseUrl) {
+  const u = (baseUrl || '').toLowerCase();
+  if (/opencode\.ai/.test(u)) return PROVIDERS.find((p) => p.id === 'opencode');
+  if (/kimi|moonshot/.test(u)) return PROVIDERS.find((p) => p.id === 'kimi');
+  if (/deepseek/.test(u)) return PROVIDERS.find((p) => p.id === 'deepseek');
+  if (/openai\.com/.test(u)) return PROVIDERS.find((p) => p.id === 'openai');
+  if (/anthropic/.test(u)) return PROVIDERS.find((p) => p.id === 'anthropic');
+  if (/googleapis\.com/.test(u)) return PROVIDERS.find((p) => p.id === 'gemini');
+  if (/bigmodel|z\.ai/.test(u)) return PROVIDERS.find((p) => p.id === 'zhipu');
+  return PROVIDERS.find((p) => p.id === 'custom');
+}
 
-(function initProviderSelect() {
-  const sel = $('cfg-provider');
-  for (const p of PROVIDERS) {
-    const opt = document.createElement('option');
-    opt.value = p.id; opt.textContent = p.name;
-    sel.appendChild(opt);
-  }
-  sel.onchange = () => {
-    const p = PROVIDERS.find((x) => x.id === sel.value) || PROVIDERS[0];
-    if (p.baseUrl) $('cfg-url').value = p.baseUrl;   // custom 不动用户已填的 URL
-    $('cfg-model-list').innerHTML = p.models.map((m) => `<option value="${esc(m)}">`).join('');
-    if (p.models.length && !p.models.includes($('cfg-model').value.trim())) $('cfg-model').value = p.models[0];
-  };
-})();
-
-// 保存成功后是否自动接着生成：点「中译」/「重翻」发现没配 → 弹本表单 → 填完直接开跑
 let cfgRetryGenerate = false;
-let cfgRetryForce = false;   // 待重试的是不是「重翻」（regen 图标进来时旧译文还在，zh-toggle 点击语义不对，必须带 force）
-let cfgRetryTranslate = false; // 待重试的是不是「划词翻译」（点「译」发现没配端点 → 填完自动重试这次翻译）
+let cfgRetryForce = false;
+let cfgRetryTranslate = false;
+let cfgData = null;
 let cfgEndpoints = [];
 let cfgEditingId = 'new';
+let cfgProviderId = 'deepseek';
+let cfgDraft = { baseUrl: PROVIDERS[0].baseUrl, model: '', apiKey: '' };
+let cfgModels = [];
+let cfgOptions = { splitTokens: 100000, maxOutputTokens: 32768, qps: 16 };
+const CFG_OPTION_IDS = { splitTokens: 'cfg-split-tokens', maxOutputTokens: 'cfg-max-output', qps: 'cfg-qps' };
+let cfgManualModel = false;
+let cfgMode = 'follow';
+let cfgBusy = '';
+let cfgModelRequest = 0;
+let cfgKeyTimer = null;
 let cfgDeleteArmed = false;
 
+function cfgMessage(text, ok) {
+  const el = $('cfg-source');
+  el.textContent = text || '';
+  el.className = text ? (ok ? 'ok' : 'err') : '';
+}
+function endpointProvider(e) {
+  return PROVIDERS.some((p) => p.id === e?.provider) ? PROVIDERS.find((p) => p.id === e.provider) : providerOf(e?.baseUrl);
+}
+function cfgProviderIcon(provider) {
+  if (!provider.icon) {
+    const fallback = document.createElement('span');
+    fallback.textContent = provider.mark || '+';
+    return fallback;
+  }
+  const img = document.createElement('img');
+  img.className = 'cfg-icon' + (provider.mono ? ' mono' : '');
+  img.src = '/paper-reader/vendor/' + provider.icon;
+  img.alt = '';
+  img.setAttribute('aria-hidden', 'true');
+  img.dataset.cfgProviderIcon = provider.id;
+  return img;
+}
+function renderCfgModels() {
+  const wrap = $('cfg-models');
+  wrap.innerHTML = '';
+  $('cfg-model-count').textContent = cfgModels.length ? `(${cfgModels.length})` : '';
+  $('cfg-model-list').innerHTML = cfgModels.map((m) => `<option value="${esc(m)}">`).join('');
+  if (!cfgModels.length) {
+    const empty = document.createElement('div');
+    empty.className = 'cfg-empty';
+    empty.textContent = '填写 API Key 后，模型列表会自动出现在这里。';
+    wrap.appendChild(empty);
+    return;
+  }
+  for (const model of cfgModels) {
+    const using = cfgData?.activeId === cfgEditingId && cfgData?.source !== 'harness' && cfgDraft.model === model;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cfg-model' + (using ? ' selected' : '');
+    btn.dataset.cfgModel = model;
+    btn.disabled = cfgBusy === 'save';
+    const radio = document.createElement('span'); radio.className = 'cfg-radio';
+    const name = document.createElement('span'); name.className = 'cfg-model-name'; name.textContent = model;
+    const action = document.createElement('span'); action.className = 'cfg-model-action'; action.textContent = using ? '使用中' : '使用';
+    btn.append(radio, name, action);
+    btn.onclick = () => saveCfg(false, model);
+    wrap.appendChild(btn);
+  }
+}
+function renderCfg() {
+  $('cfg-pop').dataset.mode = cfgMode;
+  for (const [id, selected] of [['cfg-follow', cfgMode === 'follow'], ['cfg-custom', cfgMode === 'custom']]) {
+    $(id).classList.toggle('selected', selected);
+    $(id).setAttribute('aria-checked', String(selected));
+  }
+  $('cfg-follow').disabled = !cfgData?.harness;
+  $('cfg-follow-panel').hidden = cfgMode !== 'follow';
+  $('cfg-custom-panel').hidden = cfgMode !== 'custom';
+  $('cfg-follow-icon').innerHTML = '';
+  $('cfg-follow-icon').appendChild(cfgProviderIcon(providerOf(cfgData?.harness?.providerName || '')));
+  $('cfg-follow-model').textContent = cfgData?.harness
+    ? `${cfgData.harness.model} · ${cfgData.harness.providerName}`
+    : 'Harness 当前模型不可用，请先在 Harness 中完成模型设置。';
+  $('cfg-scope').textContent = cfgMode === 'follow'
+    ? '跟随模式不保存或复制 Harness 的 Key，也不会改写 Harness 配置。'
+    : '自定义配置仅用于翻译，不会写入或改变 Harness 的模型设置。';
+  const provider = PROVIDERS.find((p) => p.id === cfgProviderId) || PROVIDERS[0];
+  const savedForProvider = cfgEndpoints.some((e) => e.source === 'file' && endpointProvider(e).id === cfgProviderId);
+  $('cfg-saved-count').textContent = `已保存 ${cfgEndpoints.filter((e) => e.source === 'file').length} 个`;
+  $('cfg-provider-name').textContent = provider.name + (savedForProvider ? '  ● 已保存' : '');
+  $('cfg-key-link').style.display = provider.keyUrl ? '' : 'none';
+  $('cfg-key-link').href = provider.keyUrl || '#';
+  $('cfg-key').value = cfgDraft.apiKey;
+  $('cfg-key').placeholder = savedForProvider
+    ? `已保存（${cfgEndpoints.find((e) => e.id === cfgEditingId)?.apiKeyHint || '掩码'}），留空则不修改`
+    : 'sk-...';
+  $('cfg-url').value = cfgDraft.baseUrl;
+  $('cfg-url-wrap').hidden = provider.id !== 'custom';
+  $('cfg-manual-wrap').hidden = !cfgManualModel;
+  for (const key of ['splitTokens', 'maxOutputTokens', 'qps']) {
+    $(CFG_OPTION_IDS[key]).value = cfgOptions[key];
+  }
+  $('cfg-model').value = cfgDraft.model;
+  $('cfg-model-hint').textContent = cfgBusy === 'models' ? '正在验证 Key 并获取模型…' : '粘贴 Key 后自动验证并获取模型；选择模型后保存。';
+  $('cfg-refresh').disabled = cfgBusy === 'models' || cfgBusy === 'save';
+  $('cfg-save').disabled = cfgBusy === 'save' || !cfgDraft.model.trim();
+  $('cfg-save').textContent = cfgBusy === 'save' ? '测试连接中…' : '使用此模型';
+  $('cfg-delete').disabled = cfgEditingId === 'new' || cfgEditingId === 'profile';
+  $('cfg-delete').textContent = cfgDeleteArmed ? '确认删除?' : '删除当前';
+  const grid = $('cfg-provider-grid');
+  grid.innerHTML = '';
+  for (const p of PROVIDERS) {
+    const saved = cfgEndpoints.some((e) => e.source === 'file' && endpointProvider(e).id === p.id);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cfg-provider' + (p.id === cfgProviderId ? ' selected' : '');
+    btn.dataset.cfgProvider = p.id;
+    const mark = cfgProviderIcon(p);
+    const copy = document.createElement('span');
+    const name = document.createElement('div'); name.className = 'cfg-provider-name'; name.textContent = p.name;
+    const state = document.createElement('div'); state.className = 'cfg-provider-state' + (saved ? ' saved' : ''); state.textContent = saved ? '已保存' : (p.id === 'custom' ? 'OpenAI API' : '可选');
+    copy.append(name, state);
+    btn.append(mark, copy);
+    btn.onclick = () => chooseCfgProvider(p.id);
+    grid.appendChild(btn);
+  }
+  renderCfgModels();
+  if ($('cfg-pop').style.display === 'block') positionCfgPop();
+}
+function positionCfgPop() {
+  const pop = $('cfg-pop');
+  pop.style.left = Math.max(8, (window.innerWidth - pop.offsetWidth) / 2) + 'px';
+  pop.style.top = Math.max(14, (window.innerHeight - pop.offsetHeight) / 2) + 'px';
+}
 function fillCfgEndpoint(e) {
+  cfgModelRequest += 1;
+  clearTimeout(cfgKeyTimer);
+  cfgBusy = '';
   cfgEditingId = e?.id || 'new';
+  cfgProviderId = endpointProvider(e).id;
+  const preset = PROVIDERS.find((p) => p.id === cfgProviderId) || PROVIDERS[0];
+  cfgDraft = { baseUrl: e?.baseUrl || preset.baseUrl, model: e?.model || '', apiKey: '' };
+  cfgModels = e?.model ? [e.model] : [];
+  cfgManualModel = false;
   cfgDeleteArmed = false;
-  $('cfg-delete').textContent = '删除当前';
-  $('cfg-delete').disabled = !e || e.source === 'profile';
-  $('cfg-url').value = e?.baseUrl || '';
-  $('cfg-model').value = e?.model || '';
-  const sel = $('cfg-provider');
-  sel.value = providerOf(e?.baseUrl).id;
-  const keepUrl = $('cfg-url').value, keepModel = $('cfg-model').value;
-  sel.onchange();
-  $('cfg-url').value = keepUrl || $('cfg-url').value;
-  $('cfg-model').value = keepModel || $('cfg-model').value;
-  $('cfg-key').value = '';
-  $('cfg-key').placeholder = e?.hasApiKey ? `已保存（${e.apiKeyHint}），留空则不修改` : 'sk-...';
-  $('cfg-source').textContent = e
-    ? `${e.source === 'profile' ? 'profile 默认配置（保存会另存为本界面配置）' : '本界面保存的配置'}（key ${e.apiKeyHint || '未填'}）`
-    : '新端点：保存前会先做连接测试';
+  cfgMessage('');
+  renderCfg();
 }
 function fillCfgList(activeId) {
   const sel = $('cfg-saved');
@@ -2576,88 +2767,168 @@ function fillCfgList(activeId) {
   const add = document.createElement('option');
   add.value = 'new'; add.textContent = '＋ 新建端点…';
   sel.appendChild(add);
-  const selected = cfgEndpoints.find((e) => e.id === activeId) || null;
+  const selected = cfgEndpoints.find((e) => e.id === activeId) || cfgEndpoints[0] || null;
   sel.value = selected?.id || 'new';
   fillCfgEndpoint(selected);
 }
+function chooseCfgProvider(id) {
+  const saved = cfgEndpoints.find((e) => e.source === 'file' && endpointProvider(e).id === id);
+  if (saved) {
+    $('cfg-saved').value = saved.id;
+    fillCfgEndpoint(saved);
+    return;
+  }
+  const preset = PROVIDERS.find((p) => p.id === id) || PROVIDERS[0];
+  $('cfg-saved').value = 'new';
+  cfgModelRequest += 1;
+  clearTimeout(cfgKeyTimer);
+  cfgBusy = '';
+  cfgEditingId = 'new';
+  cfgProviderId = id;
+  cfgDraft = { baseUrl: preset.baseUrl, model: '', apiKey: '' };
+  cfgModels = [];
+  cfgManualModel = false;
+  cfgDeleteArmed = false;
+  cfgMessage('');
+  renderCfg();
+}
+
+async function discoverCfgModels() {
+  if (cfgBusy === 'save' || cfgBusy === 'follow') return;
+  const seq = ++cfgModelRequest;
+  cfgBusy = 'models'; cfgMessage(''); renderCfg();
+  try {
+    const d = await api('/translate/models', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: cfgEditingId, baseUrl: cfgDraft.baseUrl.trim(), apiKey: cfgDraft.apiKey.trim() }),
+    });
+    if (seq !== cfgModelRequest) return;
+    cfgModels = d.models || [];
+    cfgManualModel = false;
+    if (!cfgModels.includes(cfgDraft.model)) cfgDraft.model = cfgModels[0] || cfgDraft.model;
+    cfgMessage(`已获取 ${cfgModels.length} 个模型，请选择翻译模型`, true);
+  } catch (e) {
+    if (seq === cfgModelRequest) { cfgManualModel = true; cfgMessage(e.message, false); }
+  } finally {
+    if (seq === cfgModelRequest) { cfgBusy = ''; renderCfg(); }
+  }
+}
+function scheduleCfgDiscovery() {
+  clearTimeout(cfgKeyTimer);
+  if (!cfgDraft.apiKey.trim()) return;
+  cfgKeyTimer = setTimeout(() => { void discoverCfgModels(); }, 700);
+}
+$('cfg-key').addEventListener('input', (e) => { cfgDraft.apiKey = e.target.value; scheduleCfgDiscovery(); });
+$('cfg-url').addEventListener('input', (e) => { cfgDraft.baseUrl = e.target.value; $('cfg-save').disabled = !cfgDraft.model.trim(); scheduleCfgDiscovery(); });
+$('cfg-model').addEventListener('input', (e) => { cfgDraft.model = e.target.value; $('cfg-save').disabled = !cfgDraft.model.trim(); });
+for (const key of ['splitTokens', 'maxOutputTokens', 'qps']) {
+  $(CFG_OPTION_IDS[key]).addEventListener('input', (e) => { cfgOptions[key] = e.target.value; });
+}
+$('cfg-options-save').onclick = async () => {
+  $('cfg-options-save').disabled = true;
+  try {
+    const d = await api('/translate/config/options', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ splitTokens: Number(cfgOptions.splitTokens), maxOutputTokens: Number(cfgOptions.maxOutputTokens), qps: Number(cfgOptions.qps) }),
+    });
+    cfgOptions = d.options;
+    cfgMessage('翻译参数已保存，下一篇 PDF 起生效', true);
+    renderCfg();
+  } catch (e) { cfgMessage(e.message, false); } finally { $('cfg-options-save').disabled = false; }
+};
+$('cfg-refresh').onclick = () => { void discoverCfgModels(); };
 $('cfg-saved').onchange = () => fillCfgEndpoint(cfgEndpoints.find((e) => e.id === $('cfg-saved').value) || null);
 $('cfg-new').onclick = () => { $('cfg-saved').value = 'new'; fillCfgEndpoint(null); };
 $('cfg-delete').onclick = async () => {
   const e = cfgEndpoints.find((x) => x.id === cfgEditingId);
   if (!e || e.source === 'profile') return;
   if (!cfgDeleteArmed) {
-    cfgDeleteArmed = true;
-    $('cfg-delete').textContent = '确认删除?';
-    setTimeout(() => { cfgDeleteArmed = false; $('cfg-delete').textContent = '删除当前'; }, 3000);
+    cfgDeleteArmed = true; renderCfg();
+    setTimeout(() => { cfgDeleteArmed = false; renderCfg(); }, 3000);
     return;
   }
   try {
     await api('/translate/config?id=' + encodeURIComponent(e.id), { method: 'DELETE' });
-    toast('端点已删除');
+    await api('/translate/config/selection', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'harness' }) });
+    toast('端点已删除，已恢复跟随 Harness');
     await openCfgPop(false);
-  } catch (err) { toast('删除失败：' + err.message, 8000); }
+  } catch (err) { cfgMessage('删除失败：' + err.message, false); }
 };
 
 async function openCfgPop(retryGenerate) {
-  $('theme-pop').style.display = 'none'; // 与深色面板互斥：同时只开一个
+  $('theme-pop').style.display = 'none';
   cfgRetryGenerate = Boolean(retryGenerate);
   let cfg;
-  try {
-    cfg = await api('/translate/config');
-  } catch (e) { toast('读取配置失败：' + e.message, 8000); return; }
-  cfgEndpoints = cfg.endpoints || [];
+  try { cfg = await api('/translate/config'); }
+  catch (e) { toast('读取配置失败：' + e.message, 8000); return; }
+  cfgData = cfg;
+  cfgOptions = cfg.options || { splitTokens: 100000, maxOutputTokens: 32768, qps: 16 };
+  cfgEndpoints = (cfg.endpoints || []).filter((e) => e.source !== 'harness');
   fillCfgList(cfg.activeId);
+  cfgMode = cfg.mode === 'follow' ? 'follow' : 'custom';
+  cfgMessage('');
+  renderCfg();
   const pop = $('cfg-pop');
   pop.style.display = 'block';
-  // 先显示再量尺寸（不像 #ask-pop 那样写死尺寸常量，免得跟 CSS 漂移）
-  pop.style.left = Math.max(8, (window.innerWidth - pop.offsetWidth) / 2) + 'px';
-  pop.style.top = Math.max(8, (window.innerHeight - pop.offsetHeight) / 3) + 'px';
-  $('cfg-key').focus();
+  positionCfgPop();
+  (cfgMode === 'custom' ? $('cfg-key') : $('cfg-follow')).focus();
 }
 function closeCfgPop() { $('cfg-pop').style.display = 'none'; cfgRetryGenerate = false; cfgRetryForce = false; cfgRetryTranslate = false; }
-
-// toggle 语义：面板开着时再点 ⚙ 直接收回（不重新拉配置重开）
 $('cfg-open').onclick = (e) => {
   e.stopPropagation();
   if ($('cfg-pop').style.display === 'block') { closeCfgPop(); return; }
   void openCfgPop(false);
 };
 document.addEventListener('click', (e) => {
-  if (e.target.closest('#cfg-pop') || e.target.closest('#cfg-open')) return;
-  // 点面板外关闭设置（与 theme-pop 同一交互口径；面板内有自己的取消/保存，这里只兜底空白处）
-  if ($('cfg-pop').style.display === 'block' && !e.target.closest('#cfg-actions')) closeCfgPop();
+  // 厂商/模型点击会同步重绘并移除原按钮；composedPath 仍保留事件开始时的浮层路径，
+  // 不能再用 e.target.closest()——那会把一次浮层内点击误判成外部点击并提前关闭。
+  const path = e.composedPath();
+  if (path.includes($('cfg-pop')) || path.includes($('cfg-open'))) return;
+  if ($('cfg-pop').style.display === 'block') closeCfgPop();
 });
 $('cfg-cancel').onclick = closeCfgPop;
-
-async function saveCfg(saveAsNew) {
-  // retry/force/translate 先捞出来：closeCfgPop 会把这三个待确认态清零
-  const btn = saveAsNew ? $('cfg-save-new') : $('cfg-save'), label = btn.textContent;
+$('cfg-custom').onclick = () => { cfgMode = 'custom'; cfgMessage(''); renderCfg(); };
+$('cfg-follow').onclick = async () => {
+  if (cfgMode === 'follow' || !cfgData?.harness) return;
+  cfgModelRequest += 1;
+  cfgBusy = 'follow'; cfgMessage('');
   const retry = cfgRetryGenerate, force = cfgRetryForce, retryTr = cfgRetryTranslate;
-  btn.disabled = true; btn.textContent = '测试中…';
+  try {
+    await api('/translate/config/selection', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'harness' }) });
+    closeCfgPop();
+    await refreshZhState();
+    if (retry) startGenerate(force, 'harness');
+    else if (retryTr) translateSelection();
+    else toast('已恢复为跟随 Harness，自定义配置已保留');
+  } catch (e) { cfgMessage(e.message, false); } finally { cfgBusy = ''; }
+};
+
+async function saveCfg(saveAsNew, modelOverride) {
+  const model = (modelOverride ?? cfgDraft.model).trim();
+  if (!model) return;
+  const retry = cfgRetryGenerate, force = cfgRetryForce, retryTr = cfgRetryTranslate;
+  cfgModelRequest += 1;
+  cfgBusy = 'save'; cfgMessage(''); renderCfg();
   let saved;
   try {
-    // 服务端先打一发极小的 chat/completions 验证 url/key/model，通过才落盘
     saved = await api('/translate/config', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         id: saveAsNew ? 'new' : cfgEditingId,
-        baseUrl: $('cfg-url').value.trim(),
-        apiKey: $('cfg-key').value.trim(),
-        model: $('cfg-model').value.trim(),
+        label: PROVIDERS.find((p) => p.id === cfgProviderId)?.name || '自定义',
+        provider: cfgProviderId,
+        baseUrl: cfgDraft.baseUrl.trim(), apiKey: cfgDraft.apiKey.trim(), model,
       }),
     });
   } catch (e) {
-    toast('保存失败：' + e.message, 8000);
+    cfgMessage('保存失败：' + e.message, false);
     return;
-  } finally {
-    btn.disabled = false; btn.textContent = label;
-  }
+  } finally { cfgBusy = ''; }
   closeCfgPop();
   await refreshZhState();
-  if (retry) startGenerate(force, saved.id);  // 用刚保存的端点继续，不让旧 active 抢回去
-  else if (retryTr) translateSelection(); // 划词翻译发现没配端点 → 填完自动重试这一次翻译（§3.7①）
-  else toast('翻译端点已保存');
+  if (retry) startGenerate(force, saved.id);
+  else if (retryTr) translateSelection();
+  else toast('翻译模型已保存，仅影响翻译');
 }
 $('cfg-save').onclick = () => saveCfg(false);
 $('cfg-save-new').onclick = () => saveCfg(true);

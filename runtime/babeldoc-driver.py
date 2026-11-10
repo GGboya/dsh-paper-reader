@@ -16,8 +16,8 @@
    拆成小段分别翻译再拼回，避免整段丢译文或整篇失败。
 
 环境变量（都可选）：
-  DPR_MAX_OUTPUT_TOKENS  单次请求的 max_tokens 上限，默认 8192；0 = 不传该参数
-  DPR_SPLIT_TOKENS       触发拆分的输入上限（估算 token），默认 3000
+  DPR_MAX_OUTPUT_TOKENS  单次请求的 max_tokens 上限，默认 32768；0 = 不传该参数
+  DPR_SPLIT_TOKENS       触发拆分的输入上限（估算 token），默认 100000
   DPR_OPENCODE_SESSION   OpenCode Go 的稳定会话 ID；设置后每次 LLM 请求都带 x-opencode-session
   DPR_DEBUG=1            额外把补丁动作打到 stderr
 """
@@ -80,8 +80,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-MAX_OUT = _env_int("DPR_MAX_OUTPUT_TOKENS", 8192)
-SPLIT_TOKENS = max(200, _env_int("DPR_SPLIT_TOKENS", 3000))
+MAX_OUT = _env_int("DPR_MAX_OUTPUT_TOKENS", 32768)
+SPLIT_TOKENS = max(200, _env_int("DPR_SPLIT_TOKENS", 100000))
 OPENCODE_SESSION = os.environ.get("DPR_OPENCODE_SESSION", "").strip()
 DEBUG = os.environ.get("DPR_DEBUG", "") not in ("", "0", "false", "False")
 REPORT_MIN_INTERVAL = 0.35  # 进度事件最小间隔（秒），别把 stdout 刷爆

@@ -40,6 +40,7 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 - ⚡ **Smooth on long papers**: scroll mode paints only the pages near the viewport and frees the canvas once a page leaves it (the rest keep equal-height placeholders, so the scrollbar and page numbers stay accurate); switching original ↔ Chinese just re-attaches cached page nodes — no re-parsing, no repainting; changing language or reopening a paper no longer re-sends the PDF (ETag 304). Prerequisites and known limits: [docs/features_EN.md](docs/features_EN.md)
 - 🗂️ **Library management**: rename topics and papers inline, move papers between topics, and recover deletions from the trash
 - 🛰️ **OpenCode Go endpoint** (v1.9.0): an "OpenCode Go" provider preset for the translate endpoint (subscribe, copy the API key, done — model names follow the console); requests to opencode.ai automatically carry a stable `x-opencode-session` header (whole-paper and selection translation share one ID per paper, stable across restarts; the ID is derived from a local 0600 secret and contains no paper names) — other endpoints get no extra headers
+- 🔀 **Follow or override the translation model**: translation follows the current Harness model by default, including account-based authorization without copying a key. For a dedicated translation model, go to **Settings → Paper Reader → Translation model** for provider presets, official API-key links, and automatic model discovery. Custom endpoints affect translation only, are kept when switching back to Follow, and never change Harness settings
 - ➕ **Optional add-ons** (off by default): MinerU parsing — scanned PDFs become readable, formulas become **Click to cite a formula** and searchable; an embeddings endpoint — plain-language semantic search
 
 Prerequisites and configuration details live in [docs/features_EN.md](docs/features_EN.md)（中文：[docs/features.md](docs/features.md)）.
@@ -79,7 +80,7 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # same command 
 1. **Enter**: click "📚 Paper Reading" at the bottom of the sidebar (click again to restore)
 2. **Add papers**: ＋ create a topic → ⬆ upload PDFs
 3. **Read + ask**: just ask (answers cite pages), or select text for a pop-up question; click "page N" to jump back
-4. **Chinese version**: the "中" button generates a translation (first use asks for an OpenAI-compatible endpoint once — DeepSeek/GLM/Kimi keys all work)
+4. **Chinese version**: the "中" button generates a translation using the current Harness model by default; configure a dedicated translation model under **Settings → Paper Reader → Translation model** only when needed
 5. **Manage**: hover a row and open **⋯** to rename inline (Enter saves, Esc cancels), move a paper to another topic, or delete; 🕐 in the chat header shows history, ＋ starts a new chat
 
 ## Library management (safety notes)

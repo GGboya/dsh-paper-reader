@@ -121,6 +121,20 @@ test('V2 路由安全边界：嵌套路径 / .. / 编码变形 一律不得 200�
   } finally { close() }
 })
 
+test('V4 翻译厂商图标全部为本地 SVG，路由 200 且 MIME 正确', async (t) => {
+  const D = mkdtempSync(join(tmpdir(), 'dpr-vendor-icons-'))
+  t.after(() => rmSync(D, { recursive: true, force: true }))
+  const { base, close } = await bootRoutes(D)
+  try {
+    for (const name of ['deepseek.svg', 'openai.svg', 'anthropic.svg', 'gemini.svg', 'zhipu.svg', 'kimi.svg', 'opencode.svg']) {
+      const r = await fetch(base + '/paper-reader/vendor/' + name)
+      assert.equal(r.status, 200, `${name} 必须可由阅读器与 dsh 设置页加载`)
+      assert.equal(r.headers.get('content-type'), 'image/svg+xml; charset=utf-8')
+      assert.match(await r.text(), /<svg\b/, `${name} 必须是真实 SVG`)
+    }
+  } finally { close() }
+})
+
 test('V3 页面里 KaTeX 资源的 URL 形状与 host 白名单一致（静态核对，防再次放回子目录）', () => {
   const html = readFileSync(join(REPO, 'reader', 'index.html'), 'utf8')
   const urls = [...html.matchAll(/<(?:link|script)[^>]*?(?:href|src)="(\/paper-reader\/vendor\/[^"]+)"/g)].map((m) => m[1])

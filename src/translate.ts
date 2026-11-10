@@ -1,7 +1,7 @@
 // translate.ts — 中文对照 PDF 生成（纯函数，不依赖 Cordis）。
 // 移植 pdfqa 的 runPdf2zh：shell 调 babeldoc（pdf2zh 2.x），版式/图/公式原地保留，
 // 产出 <文献>-zh.pdf（纯中文）与 <文献>-dual.pdf（中英对照）。
-// babeldoc 只支持 OpenAI 兼容端点 → 端点/key/模型由插件配置提供。
+// babeldoc 只支持 OpenAI 兼容端点 → 使用翻译专用端点，或由宿主路由传入临时 Harness 适配端点。
 //
 // 注：本文件里 TranslatePaperRef / TranslateEndpoint 是「结构最小要求」，只声明本模块真正
 // 用到的字段；仓库里若已有 library.ts 的 PaperRef 与 translate-config.ts 的端点类型，
@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { dshHome } from "./library.js";
 import { ensureBabeldoc } from "./babeldoc-install.js";
 import { isOpenCodeEndpoint, openCodeDriverEnv, openCodeSessionId } from "./opencode.js";
+import { DEFAULT_TRANSLATION_RUN_OPTIONS, type TranslationRunOptions } from "./translation-options.js";
 
 /** 文献引用（paperRefFor 的返回形状；本模块只用到 pdfPath / name / topic）。 */
 export interface TranslatePaperRef {
@@ -211,7 +212,12 @@ function babeldocFlags(bin: string): Promise<Set<string>> {
  * babeldoc 缺失时不再报错：后台自动走 uv 安装链路（首次约几分钟），
  * 期间 zhStatus.phase 展示安装进度，装完直接接着翻译。
  */
-export async function startTranslation(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint): Promise<StartResult> {
+export interface TranslationHooks {
+    /** 任务完全结束（含取消/失败）后释放临时端点等资源。 */
+    onFinish?: () => void | Promise<void>;
+}
+
+export async function startTranslation(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks = {}, options: TranslationRunOptions = DEFAULT_TRANSLATION_RUN_OPTIONS): Promise<StartResult> {
     const st = zhStatus(ref);
     if (st.zh || st.dual)
         return { started: false, reason: 'already-exists' };
@@ -221,7 +227,7 @@ export async function startTranslation(ref: TranslatePaperRef, dataDir: string, 
     if (pre)
         return pre;
     const firstRun = !(await findBabeldoc(dataDir));
-    void runPipeline(ref, dataDir, endpoint);
+    void runPipeline(ref, dataDir, endpoint, hooks, options);
     return { started: true, firstRun };
 }
 
@@ -239,7 +245,7 @@ function precheck(endpoint: TranslateEndpoint): StartResult | null {
 }
 
 /** 后台流水线：确保 babeldoc 可用（缺失则自动安装）→ 拉起翻译。 */
-async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint): Promise<void> {
+async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks, options: TranslationRunOptions): Promise<void> {
     const task: TranslationTask = { cancelled: false, kill: null };
     tasks.set(ref.pdfPath, task);
     const setPhase = (phase: string) => setTaskBusy(ref, task, { phase });
@@ -253,7 +259,7 @@ async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: Tr
         if (task.cancelled || tasks.get(ref.pdfPath) !== task) return;
         if (!bin)
             throw new Error('找不到 babeldoc 可执行文件');
-        await launch(ref, dataDir, endpoint, bin, task);
+        await launch(ref, dataDir, endpoint, bin, task, options);
     }
     catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -262,6 +268,8 @@ async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: Tr
     }
     finally {
         if (tasks.get(ref.pdfPath) === task) tasks.delete(ref.pdfPath);
+        try { await hooks.onFinish?.(); }
+        catch (e) { console.warn('[dsh-paper-reader] 翻译资源清理失败:', e instanceof Error ? e.message : String(e)); }
     }
 }
 
@@ -270,7 +278,7 @@ async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: Tr
  * 先预检再删——端点不齐时不动旧译文，免得删完才发现跑不起来。
  * babeldoc 的段落缓存 key 含模型名，换模型自然失效，无需 --ignore-cache。
  */
-export async function restartTranslation(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint): Promise<StartResult> {
+export async function restartTranslation(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks = {}, options: TranslationRunOptions = DEFAULT_TRANSLATION_RUN_OPTIONS): Promise<StartResult> {
     if (zhStatus(ref).busy)
         return { started: false, reason: 'busy' };
     const pre = precheck(endpoint);
@@ -279,7 +287,7 @@ export async function restartTranslation(ref: TranslatePaperRef, dataDir: string
     await rm(zhPdfPath(ref), { force: true });
     await rm(dualPdfPath(ref), { force: true });
     const firstRun = !(await findBabeldoc(dataDir));
-    void runPipeline(ref, dataDir, endpoint);
+    void runPipeline(ref, dataDir, endpoint, hooks, options);
     return { started: true, firstRun };
 }
 
@@ -364,7 +372,7 @@ function resolveDriverPython(bin: string | null): string | null {
 }
 
 /** 真正拉起 babeldoc 子进程（bin 已就绪、产物不存在/已删）。 */
-async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, bin: string, task: TranslationTask): Promise<void> {
+async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, bin: string, task: TranslationTask, options: TranslationRunOptions): Promise<void> {
     // 走到这里之前 precheck 已保证三项齐全；收窄一次，后续按 string 用
     const ep = endpoint as Required<TranslateEndpoint>;
     const tmpDir = join(dataDir, '.pdf2zh-tmp');
@@ -401,7 +409,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
         '--openai', '--openai-model', ep.model,
         '--openai-base-url', ep.baseUrl, '--openai-api-key', ep.apiKey,
         ...noThink,
-        '--qps', '16', '--no-watermark', '--output', tmpDir,
+        '--qps', String(options.qps), '--no-watermark', '--output', tmpDir,
         ...(workParent ? ['--working-dir', workParent] : []),
         // 图/图片区域内的文字保持原文（架构图术语不翻）——目前仅 fork(PR#616)支持
         ...opt('skip-figure-text'),
@@ -436,7 +444,14 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
         const child = spawnError
             ? null
             : spawn(cmd, args, {
-                env: { ...process.env, HF_ENDPOINT: 'https://hf-mirror.com', PYTHONIOENCODING: 'utf-8', ...openCodeDriverEnv(ep.baseUrl, ocSession) },
+                env: {
+                    ...process.env,
+                    HF_ENDPOINT: 'https://hf-mirror.com',
+                    PYTHONIOENCODING: 'utf-8',
+                    DPR_SPLIT_TOKENS: String(options.splitTokens),
+                    DPR_MAX_OUTPUT_TOKENS: String(options.maxOutputTokens),
+                    ...openCodeDriverEnv(ep.baseUrl, ocSession),
+                },
                 windowsHide: true,
                 stdio: ['ignore', logFd, logFd],
             });
