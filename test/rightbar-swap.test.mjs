@@ -29,7 +29,7 @@ assert.ok(SRC_MID > SRC_START && SRC_MID < SRC_END, 'lib/client.js 含 lastPdfTa
 const APPLY_SRC = CLIENT.slice(SRC_START, SRC_END)
 
 /* ---------- 假 DOM：只实现 applySwap 用到的面 ---------- */
-function makeDom({ tracks, tabEl, fullscreen = false }) {
+function makeDom({ tracks, tabEl, fullscreen = false, intent = 0 }) {
   const st = { tabEl } // 可变持有：C3 要中途撤掉锚点
   const center = { style: {} }
   const panel = { style: {} }
@@ -53,8 +53,9 @@ function makeDom({ tracks, tabEl, fullscreen = false }) {
     gridTemplateColumns: el === frame ? tracks : '',
     getPropertyValue: () => '40', // --dsh-dockkit-dock-layer（全屏层级分支）
   })
-  const applySwap = new Function('document', 'getComputedStyle', 'readerIframeEl', APPLY_SRC + '\nreturn applySwap')(
-    document, getComputedStyle, iframe,
+  // P5 起 applySwap 还会读「换轨意图」两个模块级变量：由调用方按场景注入
+  const applySwap = new Function('document', 'getComputedStyle', 'readerIframeEl', 'swapIntentAt', 'SWAP_INTENT_MS', APPLY_SRC + '\nreturn applySwap')(
+    document, getComputedStyle, iframe, intent, 3000,
   )
   return { st, col, center, panel, iframe, applySwap }
 }
@@ -114,4 +115,24 @@ test('C5: 全屏态优先于换位——不换位且阅读器层级抬到 dockLa
   applySwap()
   assert.equal(col.style.gridColumn, '', '全屏时不做列换位')
   assert.equal(iframe.style.zIndex, '42', '全屏时阅读器 iframe 层级 = dockLayer(40)+2')
+})
+
+test('C7 (P5): 刚点论文（换轨意图新鲜）即便右栏轨还是 0 也先钉列——等轨撑开时已换好，无翻位', () => {
+  const { col, center, applySwap } = makeDom({ tracks: '280px 1320px 0px', tabEl: null, intent: Date.now() })
+  applySwap()
+  assert.equal(col.style.gridColumn, '2', '意图期必须先占宽轨（否则 PDF 先画右边再跳左边）')
+  assert.equal(center.style.gridColumn, '3')
+})
+
+test('C8 (P5): 意图过期（页签 3s 没出现）→ 回滚撤钉，绝不留宽轨空着/对话被挤窄', () => {
+  const { col, center, applySwap } = makeDom({ tracks: '280px 1320px 0px', tabEl: null, intent: Date.now() - 5000 })
+  applySwap()
+  assert.equal(col.style.gridColumn, '', '意图过期必须恢复官方布局')
+  assert.equal(center.style.gridColumn, '')
+})
+
+test('C9 (P5): 意图期内但官方其它右栏页签已在（轨宽≥50、无 dpr 页签）→ 仍然先钉（本插件页签马上要开）', () => {
+  const { col, applySwap } = makeDom({ tracks: '56px 700px 280px', tabEl: null, intent: Date.now() })
+  applySwap()
+  assert.equal(col.style.gridColumn, '2')
 })
