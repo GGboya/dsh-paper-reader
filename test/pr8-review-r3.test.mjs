@@ -242,7 +242,9 @@ async function startFakeTranslation(data, ref, root) {
   }
 }
 
-test('R3-D3/E3b 子专题论文生成中译文 ⇒ 清空 409 translation-busy；在飞译文时 /migrate 409 busy（零改动）', async (t) => {
+test('R3-D3/E3b 子专题论文生成中译文 ⇒ 清空 409 translation-busy；在飞译文时 /migrate 409 busy（零改动）',
+  { skip: process.platform === 'win32' && 'win32：假 babeldoc 是 POSIX 脚本（.venv-pdf2zh/bin/babeldoc），与 src/translate.ts 的 win32 候选 Scripts/babeldoc.exe 不一致 —— 未验证' },
+  async (t) => {
   const { root, data } = newLib('dpr-r3-d3-')
   putPaper(data, 'T', 'P1')
   const subDir = putPaper(data, 'T/Sub', 'P2', 'P2-body')
