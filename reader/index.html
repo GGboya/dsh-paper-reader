@@ -968,6 +968,8 @@ function syncTranscribeButton() {
 async function openPaper(topic, name, opts = {}) {
   if (!name) return;
   openingPaper = true;
+  // P2：打开/切换文献后先留出静默窗，别让译文预取在这段里挤进来
+  preloadNotBefore = Date.now() + PRELOAD_GRACE_MS;
   currentHasTranscript = null;
   syncTranscribeButton();
   current = { topic, name };
@@ -2971,7 +2973,11 @@ let viewLoadSeq = 0;
 let activeKey = 'orig';
 let preloadSeq = 0;
 let preloadTimer = null;
+let preloadIdle = null;      // requestIdleCallback 句柄（和 timeout 句柄分开取消）
+let preloadNotBefore = 0;    // 刚打开文献的静默窗：这段时间内不预取译文
 let openingPaper = false;
+// P2：译文预取不再和「点开论文」抢主线程 —— 打开后先让首帧/切换喘口气，再等真空闲。
+const PRELOAD_GRACE_MS = 1800;
 let lazyView = null; // {doc, pane, container, scale, token, observer, pages: Map<pageNo,{div,page,vp,rendered,painting}>}
 const LAZY_MIN_PAGES = 12; // 页数少的文档全量渲染更快；长文档滚动模式才启用懒渲染
 
@@ -3120,6 +3126,15 @@ async function dropView(key) {
 }
 
 /** 换论文/重置：释放所有缓存的非活动文档；活动文档由 loadPdf 负责释放。 */
+/** 取消已排队的译文预取（timeout 句柄 + requestIdleCallback 句柄一起清）。 */
+function cancelPreload() {
+  if (preloadTimer) { clearTimeout(preloadTimer); preloadTimer = null }
+  if (preloadIdle) {
+    try { if (typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(preloadIdle) } catch { /* 旧浏览器 */ }
+    preloadIdle = null
+  }
+}
+
 async function resetViewCache() {
   const docs = new Set()
   for (const v of viewCache.values()) if (v.doc) docs.add(v.doc)
@@ -3129,7 +3144,7 @@ async function resetViewCache() {
   viewLoads.clear()
   viewLoadSeq++
   preloadSeq++
-  if (preloadTimer) { clearTimeout(preloadTimer); preloadTimer = null }
+  cancelPreload()
   for (const doc of docs) {
     if (doc !== pdfDoc && doc !== pdfDocZh) await destroyPdfDoc(doc)
   }
@@ -3240,23 +3255,39 @@ async function preloadView(key) {
   }
 }
 
-/** 空闲时预加载「中」按钮下一次会切到的那个版本（有 zh 优先 zh，否则 dual）。 */
+/** 空闲时预加载「中」按钮下一次会切到的那个版本（有 zh 优先 zh，否则 dual）。
+ *  P2：预取译文会多下 3MB 量级的 -zh.pdf 并解析渲染，绝不能和「点开论文」抢主线程 ——
+ *  ① 刚打开文献的 PRELOAD_GRACE_MS 静默窗内不排期；② 只在文档可见时排；
+ *  ③ 排期本身走 requestIdleCallback（拿不到 idle 的老浏览器退回 setTimeout），
+ *  timeout 放宽到 4s：真的长期不空闲就延后，而不是 2.5s 强行插队。 */
 function schedulePreload() {
   if (openingPaper) return
   const key = zhState.zh ? 'zh' : zhState.dual ? 'dual' : null
   if (!key || key === activeKey || viewCache.has(key) || (viewDocs.has(key) && viewCache.has(key))) return
-  if (preloadTimer) clearTimeout(preloadTimer)
+  cancelPreload()
   const run = () => {
     preloadTimer = null
+    preloadIdle = null
     if (!current || key === activeKey) return
+    if (document.visibilityState !== 'visible') return // 后台标签页不预取，切回前台再排
     void preloadView(key)
   }
-  if (typeof window.requestIdleCallback === 'function') {
-    window.requestIdleCallback(run, { timeout: 2500 })
-  } else {
-    preloadTimer = setTimeout(run, 350)
+  const arm = () => {
+    if (typeof window.requestIdleCallback === 'function') {
+      preloadIdle = window.requestIdleCallback(run, { timeout: 4000 })
+    } else {
+      preloadTimer = setTimeout(run, 600)
+    }
   }
+  const wait = Math.max(0, preloadNotBefore - Date.now())
+  if (wait > 0) preloadTimer = setTimeout(arm, wait)
+  else arm()
 }
+
+// 从后台切回前台：补排一次被 visibilityState 挡掉的预取
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') schedulePreload()
+})
 
 /** 译文重新生成/被删除后：释放旧译文文档与节点；若正在看译文，重新加载新版本。 */
 async function invalidateAltViews() {
@@ -5188,13 +5219,76 @@ async function bootstrap() {
     await openPaper(target.topic, target.name, { page: pPage, q: pQ });
   }
 }
-bootstrap().catch((e) => {
-  $('empty').style.display = 'block';
-  $('empty').textContent = '文献库加载失败：' + e.message;
-});
+bootstrap()
+  .catch((e) => {
+    $('empty').style.display = 'block';
+    $('empty').textContent = '文献库加载失败：' + e.message;
+  })
+  // 宿主握手（P1）：告诉父页面「可以收 dpr:open，原地换文献了」。首屏失败也发 ——
+  // 宿主仍可用消息驱动重开，读器不必整页重载。
+  .finally(() => { postToParent({ type: 'dpr:ready' }); drainOpenQueue(); });
 
 // 版本号未被 host 注入（旧宿主配新页面的错位场景）时藏掉占位符
 if (!/^v\d/.test(document.getElementById('ver').textContent)) document.getElementById('ver').style.display = 'none';
+
+/* ================= 宿主原地换文献（P1） =================
+   iframe 只导航一次；之后宿主用 postMessage 让阅读器换论文，不再整页重载
+   （省掉 245KB 页面 + pdf.js 重新解析 + 重新建 PDF 文档）。
+   约定：宿主 → 阅读器 {type:'dpr:open', topic, name, page?, q?}
+        阅读器 → 宿主 {type:'dpr:ready'}（可接收）/ {type:'dpr:open-failed'}（退回改 src 重载）
+   只认同源 + 父窗口发来的消息；payload 只用于 openPaper/jumpTo，不落日志。 */
+function postToParent(msg) {
+  try {
+    if (window.parent && window.parent !== window) window.parent.postMessage(msg, location.origin);
+  } catch { /* 父页面已卸载 */ }
+}
+
+let queuedOpenRequest = null;
+
+function drainOpenQueue() {
+  const next = queuedOpenRequest;
+  queuedOpenRequest = null;
+  if (next) void runOpenRequest(next);
+}
+
+async function runOpenRequest(req) {
+  // openPaper 是异步的：正在开上一篇时把最新请求排队（旧请求直接丢弃，只认最后一篇）
+  if (openingPaper) { queuedOpenRequest = req; return; }
+  // openPaper 会在最前面把 dpr.last 写成这篇；失败时要还原，否则整页重载后
+  // bootstrap 会拿着这个坏名字再试一次（旧路径能回到上一篇好论文，就是靠这个）
+  const prevLast = localStorage.getItem('dpr.last');
+  try {
+    await openPaper(req.topic, req.name, { page: req.page || undefined, q: req.q || undefined });
+    postToParent({ type: 'dpr:opened', topic: req.topic, name: req.name });
+  } catch (err) {
+    // 原地换失败：让宿主退回「改 src 整页导航」的旧路径（一定切得过去）
+    openingPaper = false;
+    try { if (prevLast) localStorage.setItem('dpr.last', prevLast); else localStorage.removeItem('dpr.last') } catch { /* 隐私模式 */ }
+    postToParent({ type: 'dpr:open-failed', topic: req.topic, name: req.name });
+    console.error('[dpr-reader] in-place open failed:', err);
+  } finally {
+    drainOpenQueue();
+  }
+}
+
+window.addEventListener('message', (e) => {
+  if (e.origin !== location.origin) return;
+  if (e.source !== window.parent) return;
+  const d = e.data;
+  if (!d || typeof d !== 'object' || d.type !== 'dpr:open') return;
+  const topic = typeof d.topic === 'string' ? d.topic : '';
+  const name = typeof d.name === 'string' ? d.name : '';
+  if (!topic || !name) return;
+  const page = Number(d.page) || 0;
+  const q = typeof d.q === 'string' ? d.q : '';
+  // 同一篇：只跳页/定位引文（等价于宿主原来直接调 window.dpr.jumpPage 的路径，不重载）
+  if (current && current.topic === topic && current.name === name) {
+    if (page) jumpTo(page, q || undefined);
+    return;
+  }
+  queuedOpenRequest = { topic, name, page, q };
+  drainOpenQueue();
+});
 
 window.dpr = {
   version: document.getElementById('ver').textContent,
