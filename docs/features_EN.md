@@ -90,7 +90,7 @@ That bubble has **no** "insert into chat" and **no** "copy" button, and the plug
 
 ## Notes
 
-**How to use**: selecting text still opens the original "select-to-ask" bubble exactly as before, now with two extra small buttons — **Note** saves the passage with its page, and **Global search** finds that passage in the document. Annotated text gets a blue wavy underline; hover to read the note, click to edit or delete it. The **Notes** button in the toolbar opens the notes window, which shares the find window's behaviour (draggable, edge-resizable, position remembered); the list is ordered by page and clicking an entry jumps back and flashes the source. Every entry also has a **Delete** button in its upper-right corner; click **Confirm delete** to remove it without returning to the source first. Notes taken in the Chinese column of the split view jump back correctly too.
+**How to use**: selecting text still opens the original "select-to-ask" bubble exactly as before, now with two extra small buttons — **Note** saves the passage with its page, and **Global search** finds that passage in the document. Annotated passages are circled by a **dashed blue rounded box**; hover the **dashed border** (a ±5px ring around it) to read the note, click it to edit or delete — the interior of the box stays completely inert, so selecting text inside works as usual. The **Notes** button in the toolbar opens the notes window, which shares the find window's behaviour (draggable, edge-resizable, position remembered); the list is ordered by page and clicking an entry jumps back with a flash inside the box. Every entry also has a **Delete** button in its upper-right corner; click **Confirm delete** to remove it without returning to the source first. Notes taken in the Chinese column of the split view jump back correctly too.
 
 **Where they live**: one `<paper>.notes.json` per paper, next to `.txt` / `.study.json`. Notes follow the paper file — they survive a browser change, and move with the library if you take it to another machine; they also move with the paper on rename/delete (deletion goes to the trash and is recoverable). The file is plain JSON, so you can back it up or migrate it by hand.
 
@@ -131,7 +131,7 @@ That bubble has **no** "insert into chat" and **no** "copy" button, and the plug
 
 ## Bilingual split view (two modes)
 
-Two toolbar buttons; switch any time and **click again to return to the original**. Each paper remembers its last view (and the memory follows the paper across renames):
+Two toolbar buttons; switch any time and **click again to return to the original**. Each paper remembers its last view (stored in the browser's localStorage: rename/move migrates the record, but a new browser or machine starts back at the original view):
 
 | Button | Mode | What you are looking at | Prerequisite |
 | --- | --- | --- | --- |

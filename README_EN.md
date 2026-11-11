@@ -11,39 +11,28 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 
 > 💬 **QQ group: 1127244508** — questions, feature requests, and bug reports are all welcome.
 
-## Why Paper Reader
+## Why
 
 1. **A growing paper library gets messy fast.** Organize papers into topics and subtopics, with each paper's PDF, translations, notes, and study progress kept together. Rename, move, or delete papers from one place — deletions can be recovered from the trash.
-2. **Translation should not interrupt reading.** No copying paragraphs into another app: generate Chinese directly on the original PDF layout, with Chinese-only, bilingual, split-view, and selection translation modes — formulas included.
+2. **Translation should not interrupt reading.** No copying paragraphs into another app: Chinese is generated directly on the original PDF layout — Chinese-only, bilingual, split-view, and selection translation, formulas included.
 3. **AI answers need verifiable evidence.** Answers cite page numbers that jump straight to the highlighted source. Ask about one paper or an entire topic, so fluent answers never leave you searching for the evidence yourself.
 
-![Demo: select-to-ask, answers cite page numbers, click a page to jump back to the highlighted passage](docs/demo.gif)
+![Current demo: library management → select to ask (selection translation / notes) → page citations → highlighted source → Chinese view](docs/demo.gif)
 
 ![Default: official sidebar untouched, just one extra toggle](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/screenshot-default.png)
 
 ![Reading mode: paper library + PDF reader + native chat](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/screenshot-reading.png)
 
-## Core capabilities
+## Highlights
 
-- 📚 **Three-pane workbench**: topic library + PDF reader + native chat on the right; installing does not modify the official UI — just one extra toggle in the sidebar
-- 💬 **Page-cited companion**: every answer cites page numbers; click one to jump back and flash the passage; select-to-ask on any text; conversation history supported
-- 🌙 **PDF dark mode**: when dsh goes dark the PDF follows (follow by default); one shared config for the settings panel and the reader "A" button, four strength presets. It inverts the whole page and rotates hue back, so **photos/figures visibly desaturate and shift colour** (measured: pure red `[255,0,0]` → pink `[229,134,134]`, not a true negative; a known cost, switch it off in one click); downloads/exports are always the original bytes
-- 🗂️ **Per-paper folders**: each paper's PDF/translations/transcript/study file live in `<topic>/<paper>/`; an existing flat library migrates with an **idempotent, interruptible, revertible** move (copy-first-then-delete, dry-run report before any change)
-- 🌳 **Nested subtopics**: create subtopics to any depth, rename them, move them under another parent; deleting a non-empty topic still goes through the clear-plan + typed-confirmation flow
-- 🎯 **Scoped asking**: pick a scope (this paper / this topic incl. subtopics) and only that scope's directory contents and retrieved passages are given to the model; out-of-scope content never appears, truncation is stated explicitly
-- 🤖 **Optional tutor mode**: a dedicated preset makes step-by-step plans; you read the original and answer, then the AI gives feedback and follow-ups. Advance only after demonstrating understanding; progress accumulates across sessions
-- 🀄 **One-click Chinese version**: in-place original ↔ Chinese toggle; exportable translation PDFs (Chinese / bilingual); the translation engine auto-installs, zero preinstall
-- 📏 **No more truncated paragraphs + live progress**: translation runs through `babeldoc-driver.py` — per-input output budgets (instead of babeldoc's hard-wired 2048), auto split-and-retry on `finish_reason=length`; a top-bar progress bar shows live stage progress like "Translate Paragraphs 76% (521/798)", and the driver retries with lower reasoning effort when the endpoint refuses to disable thinking
-- 🈯 **Selection translation (formulas preserved)** (v1.11.0): select text, click "译" (Translate) for a translation-only bubble; when the selection overlaps a formula, the garbage text-layer glyphs are replaced with the LaTeX MinerU recognized and the model is asked to keep formulas verbatim
-- 🖥️ **Bilingual side-by-side / split view** (v1.11.0): a doubled-width对照 page or a two-pane split with synchronised scrolling — switch any time, remembered per paper
-- 📝 **Notes** (v1.11.0): selecting text still opens the original "select-to-ask" bubble; new small **Note** and **Global search** buttons sit in that bubble. Annotated text gets a blue wavy underline — hover to read the note, click to edit or delete. The notes window matches the find window (draggable, edge-resizable, position remembered), lists notes by page, jumps back to the source, and lets you delete any entry directly with a second-click confirmation. Notes live in `<paper>.notes.json` beside the paper, so they follow it across browsers
-- ⚡ **Smooth on long papers**: scroll mode paints only the pages near the viewport and frees the canvas once a page leaves it (the rest keep equal-height placeholders, so the scrollbar and page numbers stay accurate); switching original ↔ Chinese just re-attaches cached page nodes — no re-parsing, no repainting; changing language or reopening a paper no longer re-sends the PDF (ETag 304). Prerequisites and known limits: [docs/features_EN.md](docs/features_EN.md)
-- 🗂️ **Library management**: rename topics and papers inline, move papers between topics, and recover deletions from the trash
-- 🛰️ **OpenCode Go endpoint** (v1.11.0): an "OpenCode Go" provider preset for the translate endpoint (subscribe, copy the API key, done — model names follow the console); requests to opencode.ai automatically carry a stable `x-opencode-session` header (whole-paper and selection translation share one ID per paper, stable across restarts; the ID is derived from a local 0600 secret and contains no paper names) — other endpoints get no extra headers
-- 🔀 **Follow or override the translation model**: translation follows the current Harness model by default, including account-based authorization without copying a key. For a dedicated translation model, go to **Settings → Paper Reader → Translation model** for provider presets, official API-key links, and automatic model discovery. Custom endpoints affect translation only, are kept when switching back to Follow, and never change Harness settings
-- ➕ **Optional add-ons** (off by default): MinerU parsing — scanned PDFs become readable, formulas become **Click to cite a formula** and searchable; an embeddings endpoint — plain-language semantic search
+- 🔌 **Zero-config, non-intrusive**: works right after install — translation follows the current Harness model and account authorization, no API keys to copy; the official UI is untouched, just one extra toggle in the sidebar
+- 🔒 **Local-first**: PDFs, translations, notes, and study records are plain files inside each paper's folder — copy the `data/` directory and they all come along; with no optional endpoint configured, the plugin sends no requests to any external service (chat history and endpoint settings live on the dsh side and do not follow the folder)
+- ➕ **Optional add-ons, off by default**: MinerU parsing makes scanned PDFs readable and formulas **Click to cite a formula** and searchable; an embeddings endpoint lets plain-language queries hit jargon passages — not a single request until you configure them
+- ⚡ **Smooth on long papers**: only pages near the viewport are painted; original ↔ Chinese switching reloads nothing; reopening a paper re-uploads nothing
+- 🤖 **Optional tutor mode**: the AI makes a step-by-step plan; you read the original and answer, and it advances you only after you demonstrate understanding — progress accumulates across sessions
+- 🌙 **PDF dark mode**: follows the dsh theme with four strength presets (whole-page inversion, so photos desaturate and shift — a known cost, one click to turn off)
 
-Prerequisites and configuration details live in [docs/features_EN.md](docs/features_EN.md)（中文：[docs/features.md](docs/features.md)）.
+> Prerequisites, costs, and known limits of every feature live in [docs/features_EN.md](docs/features_EN.md); read the relevant section before configuring MinerU, embeddings, or translation endpoints.
 
 ## Install
 
@@ -59,13 +48,16 @@ Done. Click "📚 Paper Reading" at the bottom of the sidebar, upload a PDF, and
 ![Install and use the paper-reading plugin on the official desktop app](https://raw.githubusercontent.com/GGboya/dsh-paper-reader/main/docs/desktop-official-use.gif)
 
 > Requires official desktop V0.2.0-rc.2 or newer (bundled dsh ≥0.2.0-rc.2); dsh 0.1.5 is no longer supported.
-> To browse a plugin marketplace inside the client, also install the community plugin [`dshmarket`](https://github.com/dsh-market/dsh-market); this plugin is listed there.
 
-**Pitfalls (all hit in real testing)**:
+<details>
+<summary><b>Installation pitfalls (all hit in real testing)</b></summary>
 
 - **After upgrading, the enable switch resets to off**: flip **Enable** again and restart. The symptom is misleading — the library tree is still there but clicking papers does nothing
 - **Always add with `@latest`**: a bare add on an already-installed plugin is a no-op
 - If pnpm's `minimumReleaseAge` policy blocks the new package: wait out the window, or exempt this package (`minimum-release-age-exclude[]` in `~/.dsh/profiles/web/.npmrc`; on desktop, `minimumReleaseAgeExclude` in `~/.dsh/profiles/desktop/pnpm-workspace.yaml`)
+- To browse a plugin marketplace inside the client, also install the community plugin [`dshmarket`](https://github.com/dsh-market/dsh-market); this plugin is listed there
+
+</details>
 
 ### Developers: CLI dsh
 
@@ -75,17 +67,19 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # same command 
 
 > Do NOT install via `github:GGboya/dsh-paper-reader` — dist is not committed, so a git install leaves the profile unable to start.
 
-## How to use
+## Quick start
 
 1. **Enter**: click "📚 Paper Reading" at the bottom of the sidebar (click again to restore)
 2. **Add papers**: ＋ create a topic → ⬆ upload PDFs
 3. **Read + ask**: just ask (answers cite pages), or select text for a pop-up question; click "page N" to jump back
-4. **Chinese version**: the "中" button generates a translation using the current Harness model by default; configure a dedicated translation model under **Settings → Paper Reader → Translation model** only when needed
+4. **Chinese version**: the "中" button generates a translation; configure a dedicated translation model under **Settings → Paper Reader → Translation model** only when needed
 5. **Manage**: hover a row and open **⋯** to rename inline (Enter saves, Esc cancels), move a paper to another topic, or delete; 🕐 in the chat header shows history, ＋ starts a new chat
 
-## Library management (safety notes)
+## Data & safety
 
-- Deletion = **moved to trash** `data/.trash/` (with a manifest; move files back to recover); it handles every artifact of the paper: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, `.notes.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is not deleted. Papers with a running session or an in-flight translation are refused up front; path traversal is rejected and mid-way failures roll back — details in [docs/features_EN.md](docs/features_EN.md)
+- Everything is a local file: the library defaults to `~/.dsh-paper-reader/data` (configurable in the profile); the plugin's own endpoint credentials live in `$DSH_HOME/.dsh-paper-reader/` (mode 0600, masked in the UI)
+- Deletion = **moved to trash** `data/.trash/` (with a manifest; move files back to recover); it handles every artifact of the paper: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, `.notes.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is not deleted
+- Papers with a running session or an in-flight translation are refused up front; path traversal is rejected and mid-way failures roll back
 
 ## Contributing
 
@@ -96,7 +90,7 @@ dsh plugin --profile web add ./dsh-paper-reader   # run from the parent dir, or 
 dsh --profile web                                  # sidebar becomes the library tree
 ```
 
-After changes, `pnpm run build` and restart the profile; `npm test` runs the full suite (354 cases; CI on ubuntu/macos/windows). Architecture, test guards and dev conventions: see [AGENTS.md](AGENTS.md).
+After changes, `pnpm run build` and restart the profile; `npm test` runs the full suite (CI on ubuntu / macOS / Windows). Architecture, test guards and dev conventions: see [AGENTS.md](AGENTS.md).
 
 ## Contributors
 

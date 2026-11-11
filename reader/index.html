@@ -55,7 +55,9 @@
   .tbtn svg.spin { transform-origin: center; animation: dpr-spin 1s linear infinite; }
   @keyframes dpr-spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .tbtn svg.spin { animation-duration: 2.4s; } }
-  #zoom-label { flex: none; min-width: 44px; text-align: center; color: var(--text-2); }
+  #zoom-label { flex: none; min-width: 44px; text-align: center; color: var(--text-2); cursor: pointer; border-radius: 5px; }
+  #zoom-label:hover { color: var(--text); background: var(--bg); }
+  #zoom-label input { border-radius: 5px; }
   #bar .spacer { flex: 1; }
   /* min-width:0 —— flex 项默认 min-width:auto 会拒绝收缩，空间不够时转而去挤按钮；
      让标题自己截断（已有 ellipsis），按钮才能保持原样 */
@@ -222,14 +224,13 @@
   .textLayer span.find-hit.cur { background: rgba(255,146,0,.55); }
 
   /* ---------- 笔记（划词标注 + 可移动笔记窗口） ----------
-     标注用「百分比盒子 + 底部波浪底图」而不是给 span 加 text-decoration：一个选区常跨多个 span，
-     加类会把整行都画上波浪线（与查找高亮同一条教训）。盒子层 pointer-events:none，
-     悬停/点击靠坐标命中测试，不会挡住划词选字。 */
+     issue #22-7 定稿（维护者拍板）：不用波浪线（长笔记连成密集「斑马纹」），也不加 ✎ 小标记
+     （放行尾/页边都会压到论文内容）——所有笔记统一一个**蓝色虚线圆角框**圈住原文范围。
+     框本身 pointer-events:none 不挡正文；悬停/点击的命中区是**虚线边框本体**（±5px 环带，
+     见 noteFindAt），框内部阅读零干扰。跳转定位时框内闪一层浅蓝。 */
   .noteLayer { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
-  .note-under { position: absolute; border-radius: 2px; pointer-events: none;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='4'%3E%3Cpath d='M0 3 Q2.25 .6 4.5 3 T9 3' fill='none' stroke='%232f6bff' stroke-width='1.1'/%3E%3C/svg%3E");
-    background-repeat: repeat-x; background-position: 0 100%; background-size: 9px 4px; }
-  .note-under.flash { background-color: rgba(47,107,255,.20); }
+  .note-under { position: absolute; pointer-events: none; border: 2px dashed rgba(47,107,255,.8); border-radius: 6px; background-color: rgba(47,107,255,.04); }
+  .note-under.flash { background-color: rgba(47,107,255,.12); }
   #note-tip { position: fixed; z-index: 58; display: none; max-width: 320px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.18);
     padding: 8px 10px; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; pointer-events: none; }
@@ -281,18 +282,21 @@
 
   /* ---------- 选中即问浮层 ---------- */
   #ask-scope-row { display: flex; align-items: center; gap: 6px; margin: 2px 0 4px; font-size: 12px; color: var(--text-2); }
+  #ask-scope-label { flex: none; white-space: nowrap; }
   #ask-scope-row select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text); max-width: 60%; }
-  #ask-scope-hint { opacity: .75; font-size: 11px; }
+  #ask-scope-hint { flex: 1; min-width: 0; opacity: .75; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #cfg-pop hr { border: none; border-top: 1px solid var(--border); margin: 12px 0 8px; }
   #cfg-theme-hint { font-size: 11.5px; color: var(--text-2); line-height: 1.5; margin-top: 4px; }
   #ask-scope-row { display: flex; align-items: center; gap: 6px; margin: 2px 0 4px; font-size: 12px; color: var(--text-2); }
+  #ask-scope-label { flex: none; white-space: nowrap; }
   #ask-scope-row select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text); max-width: 60%; }
-  #ask-scope-hint { opacity: .75; font-size: 11px; }
+  #ask-scope-hint { flex: 1; min-width: 0; opacity: .75; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #cfg-pop hr { border: none; border-top: 1px solid var(--border); margin: 12px 0 8px; }
   #cfg-theme-hint { font-size: 11.5px; color: var(--text-2); line-height: 1.5; margin-top: 4px; }
   #ask-pop { position: fixed; z-index: 50; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: 320px; }
   #ask-quote { font-size: 12px; color: var(--text-2); max-height: 64px; overflow: hidden; margin-bottom: 8px; border-left: 3px solid var(--accent-soft); padding-left: 8px; }
-  #ask-input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; resize: none; }
+  #ask-input { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; resize: none; }
+  #ask-input:focus { border-color: var(--accent); outline: 2px solid var(--accent-soft); }
   #ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
   #ask-send { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; }
   #ask-send:disabled { opacity: .5; cursor: default; }
@@ -311,6 +315,13 @@
   #tr-body { font-size: 13px; white-space: pre-wrap; word-break: break-word; }
   #tr-note { font-size: 12px; color: var(--text-2); margin-top: 6px; line-height: 1.5; }
   #tr-note:empty { display: none; }
+  /* 气泡拖动把手（issue #22-4）：顶部居中的胶囊条（sheet-handle 样式），hover 亮起提示可拖；两处气泡共用 */
+  .pop-grip { display: flex; align-items: center; justify-content: center; height: 14px; margin: -5px -2px 3px;
+    cursor: grab; user-select: none; }
+  .pop-grip::after { content: ''; width: 26px; height: 4px; border-radius: 2px; background: var(--text-2); opacity: .4; }
+  .pop-grip:hover::after { opacity: .85; }
+  .pop-grip:active { cursor: grabbing; }
+  .pop-grip:active::after { opacity: 1; }
   /* 公式段：KaTeX 渲染进我们新建的元素（.tr-math / .tr-math-block）；渲染失败时该段落回原始 LaTeX
      文本并加 .tr-math-fallback（可读可复制，绝不留白）。 */
   #tr-body .tr-math-block { margin: 6px 0; overflow-x: auto; }
@@ -320,18 +331,18 @@
   /* ---------- 全文翻译模型设置：与 dsh 设置页同一套跟随 / 覆盖语义 ---------- */
   #cfg-pop, #theme-pop, #generate-pop { position: fixed; z-index: 60; display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.16); padding: 10px; width: min(320px, calc(100vw - 32px)); }
   #cfg-pop { width: min(640px, calc(100vw - 28px)); max-height: calc(100vh - 28px); overflow-y: auto; padding: 0; }
-  #cfg-pop h3, #theme-pop h3 { margin: 0; font-size: 13px; }
+  #cfg-pop h3, #theme-pop h3, #generate-pop h3 { margin: 0 0 6px; font-size: 13px; }
   #cfg-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 16px 12px; border-bottom: 1px solid var(--border); }
   #cfg-cancel { border: 0; background: transparent; color: var(--text-2); cursor: pointer; padding: 2px 5px; border-radius: 4px; }
   #cfg-cancel:hover { background: var(--bg); color: var(--text); }
   #cfg-hint { font-size: 12px; color: var(--text-2); line-height: 1.55; margin: 10px 16px 12px; }
-  #cfg-pop label, #theme-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 4px; }
+  #cfg-pop label, #theme-pop label, #generate-pop label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 4px; }
   #cfg-pop input[type="checkbox"], #theme-pop input[type="checkbox"] { width: auto; }
   #theme-pop h3 { display: flex; align-items: center; justify-content: space-between; }
   #theme-close { all: unset; cursor: pointer; font-size: 12px; color: var(--text-2); padding: 2px 6px; border-radius: 4px; }
   #theme-close:hover { background: var(--bg); color: var(--text); }
-  #cfg-pop input, #cfg-pop select, #theme-pop input, #theme-pop select { box-sizing: border-box; width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font: inherit; background: var(--panel); color: var(--text); }
-  #cfg-pop input:focus, #cfg-pop select:focus { border-color: var(--accent); outline: 2px solid var(--accent-soft); }
+  #cfg-pop input, #cfg-pop select, #theme-pop input, #theme-pop select, #generate-pop select { box-sizing: border-box; width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font: inherit; background: var(--panel); color: var(--text); }
+  #cfg-pop input:focus, #cfg-pop select:focus, #generate-pop select:focus { border-color: var(--accent); outline: 2px solid var(--accent-soft); }
   .cfg-modes { display: flex; gap: 9px; padding: 0 16px 14px; }
   .cfg-mode, .cfg-provider, .cfg-model { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); cursor: pointer; text-align: left; }
   .cfg-mode { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 11px; border-radius: 8px; }
@@ -380,6 +391,7 @@
   .cfg-empty { padding: 14px; border: 1px dashed var(--border); border-radius: 7px; color: var(--text-2); font-size: 11px; line-height: 1.6; text-align: center; }
   #cfg-scope { padding: 0 16px 13px; color: var(--text-2); font-size: 11px; line-height: 1.5; text-align: center; }
   #generate-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+  #generate-hint { font-size: 12px; color: var(--text-2); line-height: 1.55; }
   @media (max-width: 520px) { #cfg-provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .cfg-modes { flex-direction: column; } }
 
   #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: rgba(30,30,30,.92); color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; display: none; z-index: 99; max-width: 70%; }
@@ -428,7 +440,7 @@
   <button id="zh-regen" class="tbtn tucked" title="重新翻译：删除现有译文，用当前端点重跑（换模型后用）" style="display:none" data-icon="regen"></button>
   <span class="bar-sep"></span>
   <button id="zoom-out" class="tbtn" title="缩小" data-icon="minus"></button>
-  <span id="zoom-label">100%</span>
+  <span id="zoom-label" title="点击输入精确缩放百分比（40–300）">100%</span>
   <button id="zoom-in" class="tbtn" title="放大" data-icon="plus"></button>
   <button id="zoom-fit" class="tbtn">适宽</button>
   <button id="mode-toggle" class="tbtn" title="切换 滚动/翻页模式" style="display:none" data-icon="paged"></button>
@@ -531,6 +543,7 @@
 </div>
 
 <div id="ask-pop">
+  <div class="pop-grip" id="ask-grip" title="拖动移动气泡"></div>
   <div id="ask-quote"></div>
   <!-- 提问范围（方案 §B3.3 入口 1）：默认「本篇」＝改造前行为；「所在专题」会带上整棵子专题的目录内容 -->
   <div id="ask-scope-row">
@@ -554,6 +567,7 @@
 
 <!-- 划词译文气泡：只有译文 + 状态行 + 一行诚实提示，**零按钮**（用户明确不要插入会话/复制） -->
 <div id="tr-pop">
+  <div class="pop-grip" id="tr-grip" title="拖动移动气泡"></div>
   <div id="tr-status"></div>
   <div id="tr-body"></div>
   <div id="tr-note"></div>
@@ -1011,9 +1025,9 @@ async function openPaper(topic, name, opts = {}) {
   $('zh-toggle').classList.toggle('active', zhVariant !== null);
   // 译文版页宽与原文不同（对照双栏≈2×），分屏每列只有一半宽 ⇒ 都先进适宽
   if (zhVariant || viewMode === 'split') { fitMode = true; fitBtn.classList.add('active'); }
-  // 笔记与公式索引都必须在首次 paintPage 之前到货：paintPage 直接按 notes.list 铺波浪线。
+  // 笔记与公式索引都必须在首次 paintPage 之前到货：paintPage 直接按 notes.list 铺笔记标注框。
   // 两者互不依赖，并行拉取；笔记读失败不阻塞 PDF（loadNotes 内部吞错并保留空列表）。
-  const notesReady = loadNotes().catch(() => { /* 读失败：本页只是没有波浪线，不影响读论文 */ });
+  const notesReady = loadNotes().catch(() => { /* 读失败：本页只是没有标注框，不影响读论文 */ });
   // 公式索引（MinerU content_list）：**必须在 loadPdf 之前到货**——热区是在 paintPage 里
   // 按 eqIndex 铺的，先渲染会漏画/残留上一篇的矩形；又必须排在 zhVariant 定稿之后——
   // eqHotEnabled()/renderEqPanel() 都按 zhVariant 决定「译文视图关热区」。失败不影响打开文献。
@@ -1676,8 +1690,8 @@ window.dprFindDebug = () => {
 /* ================= 笔记（划词标注 + 可移动笔记窗口）=================
    存储：服务端 `<论文>.notes.json`（与 `.study.json` 同目录 ⇒ 跟文献走、换浏览器不丢、将来也能被伴读读到）。
    锚点：页号 + 「该页 DOM 文本层拼接串」里的字符区间。文本层的内容只由 PDF 决定（与缩放/模式无关），
-        所以偏移在重渲染后仍然有效 → 每次渲染完成按偏移重建 Range → 百分比盒子（蓝色波浪线）。
-   为什么不用给 span 加 text-decoration：一个选区常跨多个 span，加类会把整行都画上波浪线。
+        所以偏移在重渲染后仍然有效 → 每次渲染完成按偏移重建 Range → 百分比盒子（蓝色虚线框）。
+   为什么不用给 span 加 text-decoration：一个选区常跨多个 span，加类会把整行都画上标注。
    盒子层 pointer-events:none，悬停/点击靠坐标命中测试 —— 绝不挡住划词选字。 */
 const NOTE_WIN_KEY = 'dpr.noteWin';
 const NOTE_BODY_MAX = 20000;
@@ -1865,7 +1879,7 @@ function noteAnchorFromSelection() {
   return { page, start: a, end: b, doc, quote: sel.text.slice(0, 400) };
 }
 
-/* ---------- 画波浪线（蓝色，选中文字下方） ---------- */
+/* ---------- 画笔记标注框（蓝色虚线圆角框，圈住选区范围） ---------- */
 function noteClearLayers() {
   document.querySelectorAll('.noteLayer').forEach((l) => l.remove());
   noteHideTip();
@@ -1881,7 +1895,7 @@ function notePaintPageDiv(div) {
   const hay = noteTextHay(div);
   const rect = tl.getBoundingClientRect();
   if (!hay || !rect.width || !rect.height) return;
-  // 同一页可能被重画多次（逐页渲染 + 收尾重放）：先清掉这一页旧的装饰层，避免叠出两层波浪线
+  // 同一页可能被重画多次（逐页渲染 + 收尾重放）：先清掉这一页旧的装饰层，避免叠出两层框
   const stale = div.querySelector(':scope > .noteLayer');
   if (stale) stale.remove();
   const pct = (v, base) => (v / base * 100).toFixed(3) + '%';
@@ -1898,22 +1912,27 @@ function notePaintPageDiv(div) {
       const rng = document.createRange();
       rng.setStart(na, oa);
       rng.setEnd(nb, ob);
+      // 统一样式（issue #22-7 定稿）：一条笔记一个虚线圆角框圈住全部矩形——不用波浪线
+      // （长笔记逐行画会连成「斑马纹」），也不加小标记（会压到论文内容）。
+      const rs = [];
       for (const r of rng.getClientRects()) {
         if (r.width < 0.6 || r.height < 0.6) continue;   // 换行点产生的退化矩形
-        const box = document.createElement('span');
-        box.className = 'note-under';
-        box.dataset.note = n.id;
-        box.style.left = pct(r.left - rect.left, rect.width);
-        box.style.top = pct(r.top - rect.top, rect.height);
-        box.style.width = pct(r.width, rect.width);
-        box.style.height = pct(r.height, rect.height);
-        layer.appendChild(box);
+        rs.push(r);
       }
+      if (!rs.length) continue;
+      const box = document.createElement('span');
+      box.className = 'note-under';
+      box.dataset.note = n.id;
+      box.style.left = pct(Math.min(...rs.map((r) => r.left)) - 4 - rect.left, rect.width);
+      box.style.top = pct(Math.min(...rs.map((r) => r.top)) - 3 - rect.top, rect.height);
+      box.style.width = pct(Math.max(...rs.map((r) => r.right)) - Math.min(...rs.map((r) => r.left)) + 8, rect.width);
+      box.style.height = pct(Math.max(...rs.map((r) => r.bottom)) - Math.min(...rs.map((r) => r.top)) + 6, rect.height);
+      layer.appendChild(box);
     } catch { /* 单条锚点算不出几何：跳过这条，列表里仍能看到 */ }
   }
   if (!layer.childElementCount) layer.remove();
 }
-/** 缩放/切模式/换文档会重建整个 DOM：重画全部波浪线 */
+/** 缩放/切模式/换文档会重建整个 DOM：重画全部标注框 */
 function notesReapply() {
   noteClearLayers();
   if (!pdfDoc || !notes.list.length) return;
@@ -1925,9 +1944,13 @@ function noteById(id) {
   return notes.list.find((n) => n.id === id) || null;
 }
 function noteFindAt(x, y) {
+  // 命中区是虚线框的**边框环带**（框外 2px、框内 5px）：贴边悬停/点击 = 操作这条笔记；
+  // 框内部保持纯净——阅读时鼠标扫过整段不会一直弹「点击编辑」提示，框内划词提问照常。
   for (const box of document.querySelectorAll('.note-under')) {
     const r = box.getBoundingClientRect();
-    if (x >= r.left - 1 && x <= r.right + 1 && y >= r.top - 1 && y <= r.bottom + 2) return box.dataset.note || null;
+    if (x < r.left - 2 || x > r.right + 2 || y < r.top - 2 || y > r.bottom + 2) continue;
+    const d = Math.min(x - r.left, r.right - x, y - r.top, r.bottom - y);
+    if (d <= 5) return box.dataset.note || null;
   }
   return null;
 }
@@ -2081,7 +2104,7 @@ function noteCreateFromSelection() {
   if (!sel || !current) { toast('先在正文里选中一段文字'); return; }
   const anchor = noteAnchorFromSelection();
   noteStartEdit({ quote: sel.text, anchor: anchor || undefined, body: '' });
-  if (!anchor) toast('这段选区没能精确锚定：笔记会留在列表里，但不会画波浪线', 5000);
+  if (!anchor) toast('这段选区没能精确锚定：笔记会留在列表里，但不会画标注框', 5000);
 }
 function noteCreateBlank() {
   const sel = askSelection;
@@ -2482,10 +2505,13 @@ $('split-toggle').onclick = () => setViewMode(viewMode === 'split' ? 'orig' : 's
 
 let generateForce = false;
 let generateEndpoints = [];
+/** 选项文本截断（issue #22-1）：端点名/模型名/掩码 Key 拼起来可以很长，select 的固有宽度
+    由最长选项决定，曾把 320px 的弹窗撑破 ~100px。宽度已用 CSS 约束（width:100%），这里再截断文本。 */
+const clipStr = (v, n) => { const s = String(v ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 function endpointDisplay(e) {
-  if (e.source === 'harness') return `跟随 Harness · ${e.providerName || '当前模型'} / ${e.model}`;
+  if (e.source === 'harness') return `跟随 Harness · ${clipStr(e.providerName || '当前模型', 20)} / ${clipStr(e.model, 36)}`;
   const provider = providerOf(e.baseUrl).name;
-  return `${e.label || provider} · ${e.model || '未填模型'} · ${e.apiKeyHint || '无 Key'}`;
+  return `${clipStr(e.label || provider, 18)} · ${clipStr(e.model || '未填模型', 30)} · ${clipStr(e.apiKeyHint || '无 Key', 14)}`;
 }
 function closeGeneratePop() { $('generate-pop').style.display = 'none'; }
 async function openGeneratePop(force) {
@@ -3679,6 +3705,42 @@ function fitToWidth() {
 }
 $('zoom-in').onclick = () => { exitFitMode(); setZoom(zoomScale + 0.25); };
 $('zoom-out').onclick = () => { exitFitMode(); setZoom(zoomScale - 0.25); };
+/* 点百分比直接输入缩放值（issue #22-6）：只有 ± 按钮不够精确。Enter 提交 / Esc 取消 / 失焦提交；
+   setZoom 自己会夹在 0.6–4.5（即标签口径的 40%–300%），越界输入不会出错。 */
+$('zoom-label').addEventListener('click', () => {
+  const label = $('zoom-label');
+  if (label.querySelector('input')) return;
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.inputMode = 'numeric';
+  inp.value = Math.round(zoomScale / 1.5 * 100);
+  inp.title = '40–300，Enter 确认';
+  inp.style.cssText = 'width: 50px; font: inherit; font-size: 12px; text-align: center; border: 1px solid var(--accent); border-radius: 5px; background: var(--panel); color: var(--text); padding: 1px 2px';
+  label.textContent = '';
+  label.appendChild(inp);
+  inp.focus();
+  inp.select();
+  let closed = false;
+  const done = (commit) => {
+    if (closed) return;
+    closed = true;
+    if (commit) {
+      const v = Math.round(parseFloat(String(inp.value).replace('%', '').trim()));
+      if (Number.isFinite(v) && v > 0) { exitFitMode(); setZoom(v / 100 * 1.5); }
+    }
+    label.textContent = Math.round(zoomScale / 1.5 * 100) + '%';
+  };
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); done(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); done(false); }
+    e.stopPropagation();
+  });
+  inp.addEventListener('blur', () => done(true));
+});
+
+/* 捏合缩放（issue #22-6）：不上。做过两版——逐帧重渲（卡）、CSS transform 预览 +
+   停顿提交 + wheel/gesture 双通道（合成手势下指标全绿，真触控板体验仍不佳）。
+   维护者裁定撤销：缩放 = ± 按钮 / 适宽 / 点百分比输入。 */
 fitBtn.onclick = () => { if (!pdfDoc) return; fitMode = true; fitBtn.classList.add('active'); fitBtn.blur(); fitToWidth(); };
 window.addEventListener('resize', () => {
   if (viewMode === 'split' && window.innerWidth < SPLIT_MIN_WIDTH) {
@@ -4282,7 +4344,7 @@ let downPt = null;
 
 /** 弹层共用的展示动作（文字引用与公式引用都走这里）。 */
 function showAskPop(o) {
-  $('ask-quote').textContent = o.quote.length > 140 ? o.quote.slice(0, 140) + '…' : o.quote;
+  $('ask-quote').textContent = o.quote.length > 220 ? o.quote.slice(0, 220) + '…' : o.quote;
   $('ask-input').value = '';
   $('ask-copy').style.display = askSelection && askSelection.kind === 'equation' ? 'inline-block' : 'none';
   // 「译」只在「纯文字选区 + 原文视图 + **原文列** + 长度可翻译」时出现。
@@ -4306,9 +4368,79 @@ function showAskPop(o) {
   askPop.style.left = Math.max(8, Math.min(o.x, window.innerWidth - popW - 8)) + 'px';
   askPop.style.top = Math.max(8, Math.min(o.y, window.innerHeight - popH - 8)) + 'px';
   $('ask-input').focus();
+  // focus() 会把文档选区清掉（Chromium：焦点进可编辑区即清页面选区）——实测让「三击选段」
+  // 看起来像没生效：段落已选中、气泡也引用了整段，但 PDF 上的高亮瞬间消失。把刚克隆的
+  // 选区放回去：输入框保持焦点可直接打字，选中高亮不再消失（划词/双击选词同样受益）。
+  try {
+    const r0 = askSelection && askSelection.range;
+    if (r0 && r0.startContainer && r0.startContainer.isConnected !== false && typeof r0.cloneRange === 'function') {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r0.cloneRange());
+    }
+  } catch { /* 选区已失效：气泡里仍有引用文本，不阻塞 */ }
 }
 
 document.addEventListener('mousedown', (e) => { downPt = { x: e.clientX, y: e.clientY }; }, true);
+
+/* 三击选中整段（issue #22-3）：文本层没有段落语义，原生三击会选中整个 textLayer（≈整页）。
+   行盒分组版：先把 span 按 top 归并成「行」（行盒 = 成员并集），再从命中行向上下扩——
+   同列（水平区间有重叠，双栏左右栏因此自然断开）且行间竖直间隙 ≤ 0.45×行高的连续行算同段。
+   pdf.js 的 span 高度≈字号而非行距，行间间隙明显小于段间距，这个阈值分得开两种间隙。
+   上一版按 span 连通 + 「分量占全页 60% 就放弃」的守卫会在单栏满页段落上误判成「只选一行」，
+   已换成绝对行数封顶（>60 行视为整页误并，退回命中行）。设好选区后走同一条
+   mouseup →「选中即问」链路，不另接气泡。 */
+document.addEventListener('mousedown', (e) => {
+  if (e.detail < 3) return;
+  const tl = e.target && e.target.closest ? e.target.closest('.textLayer') : null;
+  if (!tl || !tl.isConnected) return;
+  const items = Array.from(tl.querySelectorAll('span'))
+    .filter((s) => (s.textContent || '').trim())
+    .map((s) => { const r = s.getBoundingClientRect(); return { s, l: r.left, r2: r.right, t: r.top, b: r.bottom }; })
+    .filter((r) => r.r2 > r.l && r.b > r.t)
+    .sort((a, b) => a.t - b.t || a.l - b.l);
+  if (!items.length) return;
+  // 1) 归行：top 相差 ≤2px 的 span 属于同一行
+  const lines = [];
+  for (const it of items) {
+    const ln = lines[lines.length - 1];
+    if (ln && Math.abs(ln.t - it.t) <= 2) {
+      ln.b = Math.max(ln.b, it.b); ln.l = Math.min(ln.l, it.l); ln.r2 = Math.max(ln.r2, it.r2);
+      ln.items.push(it);
+    } else {
+      lines.push({ t: it.t, b: it.b, l: it.l, r2: it.r2, items: [it] });
+    }
+  }
+  // 2) 命中行（±3px 容差）
+  const idx = lines.findIndex((x) => e.clientY >= x.t - 3 && e.clientY <= x.b + 3 && e.clientX >= x.l - 3 && e.clientX <= x.r2 + 3);
+  if (idx < 0) return;
+  e.preventDefault();   // 替换原生三击（整页全选）
+  // 3) 向上下扩段：同列 + 竖直间隙小
+  const lh = Math.max(5, lines[idx].b - lines[idx].t);
+  const gapY = lh * 0.45;
+  const colOver = (a, b) => Math.min(a.r2, b.r2) - Math.max(a.l, b.l) > 0;
+  let lo = idx, hi = idx;
+  while (lo > 0 && lines[lo].t - lines[lo - 1].b <= gapY && colOver(lines[lo], lines[lo - 1])) lo--;
+  while (hi < lines.length - 1 && lines[hi + 1].t - lines[hi].b <= gapY && colOver(lines[hi], lines[hi + 1])) hi++;
+  if (hi - lo + 1 > 60) lo = hi = idx;   // 整页误并：退回命中行，宁可少选不多选
+  const first = lines[lo].items[0].s;                      // 段首 = 首行最左
+  const last = lines[hi].items[lines[hi].items.length - 1].s; // 段尾 = 末行最右
+  // 端点必须落在**文本节点**上（setStart(spanEl, 0) 会得到元素端点）：笔记锚定的
+  // noteAnchorFromSelection → offsetOf 只认文本节点，元素端点会让笔记画不出波浪线
+  // （实测教训：选区正常、气泡正常，唯独笔记锚定失败）。
+  const firstText = (sp) => { for (let n = sp.firstChild; n; n = n.nextSibling) if (n.nodeType === 3 && n.nodeValue) return n; return null; };
+  const lastText = (sp) => { for (let n = sp.lastChild; n; n = n.previousSibling) if (n.nodeType === 3 && n.nodeValue) return n; return null; };
+  try {
+    const ft = firstText(first) || first.firstChild || first;
+    const lt = lastText(last) || last.lastChild || last;
+    const rng = document.createRange();
+    rng.setStart(ft, 0);
+    rng.setEnd(lt, lt.nodeType === 3 ? (lt.nodeValue || '').length : (lt.childNodes || []).length);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(rng);
+  } catch { /* 跨节点边界算不出 Range：放回原生行为（下次三击仍走原生整页） */ }
+}, true);
 
 document.addEventListener('mouseup', (e) => {
   if (askPop.contains(e.target)) return;
@@ -4359,6 +4491,30 @@ document.addEventListener('mouseup', (e) => {
 });
 document.addEventListener('mousedown', (e) => { if (!askPop.contains(e.target)) askPop.style.display = 'none'; });
 $('ask-cancel').onclick = () => { askPop.style.display = 'none'; };
+
+/* 气泡可拖动（issue #22-4）：把手 mousedown → 跟随指针移动，夹在视口内。位置不记忆——
+   气泡是临时的，下次选中/翻译会按锚点重新定位；拖动只是当下把它挪开别挡字。 */
+function makePopDraggable(gripId, popId) {
+  const grip = $(gripId);
+  const pop = $(popId);
+  grip.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const r = pop.getBoundingClientRect();
+    const dx = e.clientX - r.left;
+    const dy = e.clientY - r.top;
+    const move = (ev) => {
+      pop.style.left = Math.max(0, Math.min(window.innerWidth - 60, ev.clientX - dx)) + 'px';
+      pop.style.top = Math.max(0, Math.min(window.innerHeight - 30, ev.clientY - dy)) + 'px';
+    };
+    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+}
+makePopDraggable('ask-grip', 'ask-pop');
+makePopDraggable('tr-grip', 'tr-pop');
 
 // 复制 LaTeX（显式动作：不自动写剪贴板，静默覆盖用户剪贴板是意外副作用）
 $('ask-copy').onclick = async () => {
