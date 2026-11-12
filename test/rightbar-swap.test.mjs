@@ -29,23 +29,32 @@ assert.ok(SRC_MID > SRC_START && SRC_MID < SRC_END, 'lib/client.js 含 lastPdfTa
 const APPLY_SRC = CLIENT.slice(SRC_START, SRC_END)
 
 /* ---------- 假 DOM：只实现 applySwap 用到的面 ---------- */
-function makeDom({ tracks, tabEl, fullscreen = false, intent = 0 }) {
+function makeDom({ tracks, tabEl, fullscreen = false, intent = 0, nav = null, hdrRect = null, seatRect = null }) {
   const st = { tabEl } // 可变持有：C3 要中途撤掉锚点
   const center = { style: {} }
   const panel = { style: {} }
   const frameAttrs = fullscreen ? { 'data-rightbar-fullscreen': '' } : {}
   const frame = { attrs: frameAttrs, hasAttribute: (n) => Object.hasOwn(frameAttrs, n) }
+  // 红绿灯避让（C10~）用：右栏页签条 + 宿主左上浮动控件（leadingSeat）
+  const rect = (r) => () => ({ left: r[0], top: r[1], right: r[2], bottom: r[3], width: (r[2] || 0) - (r[0] || 0), height: (r[3] || 0) - (r[1] || 0) })
+  const hdr = hdrRect ? { style: {}, getBoundingClientRect: rect(hdrRect) } : null
+  const seat = seatRect ? { getBoundingClientRect: rect(seatRect) } : null
   const col = {
     style: {},
     parentElement: frame,
     previousElementSibling: center,
-    querySelector: (sel) => (sel === '[data-sidebar-right-panel]' ? panel : null),
+    querySelector: (sel) => {
+      if (sel === '[data-sidebar-right-panel]') return panel
+      if (sel === '[class*="tabHostHeader"]') return hdr
+      return null
+    },
   }
   const iframe = { style: {} }
   const document = {
     querySelector: (sel) => {
       if (sel === '[data-rightbar-col]') return col
       if (sel === '[data-dpr-tab]') return st.tabEl
+      if (sel === '[class*="leadingSeat"]') return seat
       return null
     },
   }
@@ -53,11 +62,12 @@ function makeDom({ tracks, tabEl, fullscreen = false, intent = 0 }) {
     gridTemplateColumns: el === frame ? tracks : '',
     getPropertyValue: () => '40', // --dsh-dockkit-dock-layer（全屏层级分支）
   })
-  // P5 起 applySwap 还会读「换轨意图」两个模块级变量：由调用方按场景注入
-  const applySwap = new Function('document', 'getComputedStyle', 'readerIframeEl', 'swapIntentAt', 'SWAP_INTENT_MS', APPLY_SRC + '\nreturn applySwap')(
-    document, getComputedStyle, iframe, intent, 3000,
+  // P5 起 applySwap 还会读「换轨意图」两个模块级变量 + navigator（红绿灯避让的门控）：
+  // 由调用方按场景注入；不传时用 Node 自带 navigator（非 Electron → 避让分支整体跳过）
+  const applySwap = new Function('document', 'getComputedStyle', 'readerIframeEl', 'swapIntentAt', 'SWAP_INTENT_MS', 'navigator', APPLY_SRC + '\nreturn applySwap')(
+    document, getComputedStyle, iframe, intent, 3000, nav ?? navigator,
   )
-  return { st, col, center, panel, iframe, applySwap }
+  return { st, col, center, panel, iframe, hdr, applySwap }
 }
 
 /* 行尾无关地确认锚点标记在 PdfTab 上（C6 源码契约） */
@@ -135,4 +145,48 @@ test('C9 (P5): 意图期内但官方其它右栏页签已在（轨宽≥50、无
   const { col, applySwap } = makeDom({ tracks: '56px 700px 280px', tabEl: null, intent: Date.now() })
   applySwap()
   assert.equal(col.style.gridColumn, '2')
+})
+
+/* ---------- C10~C12：macOS 桌面端红绿灯避让（issue #22 追问实测定位） ----------
+   换位生效 + 侧栏收起时，右栏页签条被钉到窗口最左上（实测 left=1/top=0），原生红绿灯
+   （≈x 0..70）浮在「论文 PDF」页签文字上；宿主自己的左上浮动控件（leadingSeat，实测
+   x 88..152）已为红绿灯让位。避让 = 页签条补 padding-left 到 leadingSeat 右缘 +6。 */
+const MAC_NAV = { userAgent: 'Mozilla/5.0 (Macintosh) … Electron/37.1 …', platform: 'MacIntel' }
+
+test('C10: mac 桌面端 + 换位生效 + 页签条贴窗口左上 → padding 腾出红绿灯与浮动控件区', () => {
+  // 实测几何：页签条 left=1 top=0；leadingSeat x∈[88,152] y=11 → 让位目标 152+6=158，pad=158-1
+  const { hdr, applySwap } = makeDom({ tracks: '56px 700px 280px', tabEl: { style: {} }, nav: MAC_NAV, hdrRect: [1, 0, 705, 36], seatRect: [88, 11, 152, 40] })
+  applySwap()
+  assert.equal(hdr.style.paddingLeft, '157px', '页签条内容必须让位到 leadingSeat 右缘 +6')
+})
+
+test('C10b: mac 桌面端 + 侧栏展开（页签条远离左缘）→ 不加 padding', () => {
+  const { hdr, applySwap } = makeDom({ tracks: '280px 700px 280px', tabEl: { style: {} }, nav: MAC_NAV, hdrRect: [381, 0, 1000, 36], seatRect: [88, 11, 152, 40] })
+  applySwap()
+  assert.equal(hdr.style.paddingLeft, '', '页签条不在红绿灯区，不得加 padding')
+})
+
+test('C10c: mac 桌面端 + leadingSeat 不在左上（宿主改版）→ 回落 76px 常量让位', () => {
+  const { hdr, applySwap } = makeDom({ tracks: '56px 700px 280px', tabEl: { style: {} }, nav: MAC_NAV, hdrRect: [1, 0, 705, 36], seatRect: [900, 500, 960, 540] })
+  applySwap()
+  assert.equal(hdr.style.paddingLeft, '75px', '找不到左上浮动控件时按红绿灯常量 76px 让位')
+})
+
+test('C10d: mac 桌面端 + 撤换位（页签关了）→ padding 清掉', () => {
+  const m = makeDom({ tracks: '56px 700px 0px', tabEl: null, nav: MAC_NAV, hdrRect: [1, 0, 705, 36], seatRect: [88, 11, 152, 40] })
+  m.hdr.style.paddingLeft = '157px' // 先处于避让态
+  m.applySwap()
+  assert.equal(m.hdr.style.paddingLeft, '', '撤换位必须清掉避让 padding')
+})
+
+test('C11: 浏览器（非 Electron UA）→ 避让分支零行为，页签条不被碰', () => {
+  const { hdr, applySwap } = makeDom({ tracks: '56px 700px 280px', tabEl: { style: {} }, nav: { userAgent: 'Mozilla/5.0 (Macintosh) Safari', platform: 'MacIntel' }, hdrRect: [1, 0, 705, 36], seatRect: [88, 11, 152, 40] })
+  applySwap()
+  assert.equal(hdr.style.paddingLeft, undefined, '浏览器没有左上原生控件，不得改页签条')
+})
+
+test('C12: Windows 桌面端（红绿灯在右侧）→ 同样零行为', () => {
+  const { hdr, applySwap } = makeDom({ tracks: '56px 700px 280px', tabEl: { style: {} }, nav: { userAgent: 'Mozilla/5.0 (Windows) Electron/37', platform: 'Win32' }, hdrRect: [1, 0, 705, 36] })
+  applySwap()
+  assert.equal(hdr.style.paddingLeft, undefined, 'Win 端窗口控件在右上，左上无需避让')
 })
