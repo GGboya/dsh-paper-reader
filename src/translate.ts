@@ -294,6 +294,15 @@ export async function restartTranslation(ref: TranslatePaperRef, dataDir: string
 /** 驱动脚本：包装 babeldoc（加结构化进度事件 + 解除单次请求的输出长度限制）。 */
 const DRIVER_PATH = fileURLToPath(new URL('../runtime/babeldoc-driver.py', import.meta.url));
 
+/** babeldoc 报「Scanned PDF detected」时附带的处理指引（issue #26）：
+ *  扫描件没有文字层，babeldoc 拒绝翻译属预期行为；插件不自带 OCR，
+ *  如实告诉用户先 OCR 再来，而不是只甩一行英文错误。 */
+function scannedHint(tail: string): string {
+    return /scanned pdf/i.test(tail)
+        ? '。这份 PDF 是扫描件（没有文字层）：插件不自带 OCR，请先用 OCR 工具（如 pdfcraft、ocrmypdf）生成带文字层的版本后再翻译'
+        : '';
+}
+
 /** babeldoc 的阶段名 → 中文（进度条上给人看）。 */
 const STAGE_LABELS: Record<string, string> = {
     'Parse PDF and Create Intermediate Representation': '解析 PDF',
@@ -570,7 +579,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                 if (error || code !== 0) {
                     const detail = (tail.trim() || error?.message || '').slice(-MAX_TAIL_CHARS);
                     console.error('[dsh-paper-reader] babeldoc failed:', detail);
-                    setTaskBusy(ref, task, { error: `babeldoc 执行失败: ${detail || `退出码 ${code}`}` });
+                    setTaskBusy(ref, task, { error: `babeldoc 执行失败: ${detail || `退出码 ${code}`}${scannedHint(tail)}` });
                     resolveDone();
                     return;
                 }
@@ -586,7 +595,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                     }
                     if (!existsSync(zhPdfPath(ref)) && !existsSync(dualPdfPath(ref))) {
                         const why = tail.trim().split('\n').pop() ?? '';
-                        setTaskBusy(ref, task, { error: `babeldoc 未产出译文 PDF${why ? `：${why}` : ''}` });
+                        setTaskBusy(ref, task, { error: `babeldoc 未产出译文 PDF${why ? `：${why}` : ''}${scannedHint(tail)}` });
                         resolveDone();
                         return;
                     }
