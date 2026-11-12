@@ -47,12 +47,18 @@ test('V1 页面与 CSS 引到的每个 vendor 资源都必须真能 200（含 MI
     const pageRes = await fetch(base + '/paper-reader/')
     assert.equal(pageRes.status, 200, '阅读器页面必须 200')
     const html = await pageRes.text()
-    // 静态标签（katex js/css）+ 脚本里动态 import 的（pdf.js 走 import('/paper-reader/vendor/pdf.min.mjs')）
-    const pageUrls = [...new Set([...html.matchAll(/<(?:link|script)[^>]*?(?:href|src)="(\/paper-reader\/vendor\/[^"]+)"/g)].map((m) => m[1])
-      .concat([...html.matchAll(/['"](\/paper-reader\/vendor\/[\w.-]+)['"]/g)].map((m) => m[1])))]
+    // 静态标签（katex js/css，属性里的绝对路径）+ 脚本里引的 pdf.js 两个文件。
+    // 注意 pdf.js 不再写死 '/paper-reader/vendor/…' 字面量：它由 PR_ASSET_BASE 拼接，
+    // 以支持反向代理把页面挂到子路径（fnOS 的 /app/<应用名>）。这里按**文件名**收，
+    // 再拼到本测试自己的 base 上取——路由侧的扁平路径契约才是本用例要守的东西。
+    const staticUrls = [...html.matchAll(/<(?:link|script)[^>]*?(?:href|src)="(\/paper-reader\/vendor\/[^"]+)"/g)].map((m) => m[1])
+    const names = [...new Set([...html.matchAll(/vendor\/([\w.-]+\.(?:mjs|js|css))/g)].map((m) => m[1]))]
+    const pageUrls = [...new Set(staticUrls.concat(names.map((n) => `/paper-reader/vendor/${n}`)))]
     assert.ok(pageUrls.length >= 3, `页面必须至少引 3 个 vendor 资源（pdf.js ×2 + katex js/css）：${pageUrls}`)
     assert.ok(pageUrls.includes('/paper-reader/vendor/katex.min.js') && pageUrls.includes('/paper-reader/vendor/katex.min.css'),
       `KaTeX 必须以**扁平**路径引用（子目录会被路由 400）：${pageUrls}`)
+    assert.ok(pageUrls.includes('/paper-reader/vendor/pdf.min.mjs') && pageUrls.includes('/paper-reader/vendor/pdf.worker.min.mjs'),
+      `pdf.js 主模块与 worker 都必须被页面引用：${pageUrls}`)
 
     // ② 逐个取页面引的资源：200 + 非空
     for (const u of pageUrls) {

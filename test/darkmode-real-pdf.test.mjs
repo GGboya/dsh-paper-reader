@@ -215,8 +215,10 @@ test('RD2 下载/导出不受客户端滤镜影响：下载走服务端字节流
   const { normalizeEol, extractModuleScript } = await import('./reader-script.mjs')
   const html = normalizeEol((await import('node:fs')).readFileSync(join(REPO, 'reader', 'index.html'), 'utf8'))
   const script = extractModuleScript(html, { where: 'reader/index.html' })
-  // 下载按钮走 /api/pdf（服务端直接吐原始字节；滤镜是客户端合成期效果，字节里没有它）
-  assert.match(script, /\/paper-reader\/api\/pdf\?/, '下载必须走服务端 PDF 字节流')
+  // 下载按钮走 /api/pdf（服务端直接吐原始字节；滤镜是客户端合成期效果，字节里没有它）。
+  // 基址改由 PR_API_BASE 派生（支持子路径反代），故断言落在「拼出 /api/pdf 且带 topic/name」，
+  // 而不是写死的 '/paper-reader/api/pdf?' 字面量。
+  assert.match(script, /PR_API_BASE\s*\}\/pdf\?|\/api\/pdf\?/, '下载必须走服务端 PDF 字节流')
   // 绝不能把画布内容当导出源（那会把反色后的像素导出去）
   assert.ok(!/toDataURL|toBlob\s*\(/.test(script), '不得用 canvas.toDataURL/toBlob 作为导出路径')
   assert.ok(!/\/api\/pdf[^\n]*filter/.test(script), '下载 URL 不得掺入客户端滤镜参数')

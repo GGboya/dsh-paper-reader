@@ -678,6 +678,39 @@
 
 <script>
 'use strict';
+/* 资源与接口基址：/paper-reader 挂在什么路径下由部署环境决定，不能写死到域名根。
+   反向代理把 dsh web 挂到子路径时（如 fnOS 应用中心的 /app/fn-deepseek-harness），
+   以域名根为基准的绝对路径会打到代理根、被别的应用接管并返回 HTML，后果有二：
+     · 接口请求拿到 HTML，r.json() 解析失败 ⇒ 文献库静默空白、上传 403
+     · pdf.js 的 ES 模块拿不到 JS ⇒ 浏览器按 MIME 拒绝，报
+       Failed to fetch dynamically imported module
+   后者尤其隐蔽：反代注入的 fetch/XHR/属性改写钩子**改不到**原生模块动态 import
+   与 Worker 的 workerSrc（它们不经过 fetch），只能在这里自己算对。
+
+   PR_ASSET_BASE 由当前页面 URL 派生，直连与子路径反代两种部署都对。
+   <link>/<script> 保持绝对路径不动：它们在解析期就被反代改写过，
+   且 test/reader-script.mjs 约定本页只有一个 <script> 块，基址只能定义在这里。
+
+   降级链（与文件其余部分同风格：绝不因环境缺失抛错）：
+     ① location.href 可解析 → 由它派生（浏览器与 jsdom 都是这条）
+     ② 否则退回 '/paper-reader/' 拼绝对 URL（老 vm 测试沙箱只给了 location.search）
+   绝不假设 URL 全局存在——顶层抛 ReferenceError 会让整页脚本停摆，比路径错更糟。 */
+const PR_ASSET_BASE = (() => {
+  const fallback = '/paper-reader/';
+  try {
+    const href = typeof location !== 'undefined' && location.href;
+    if (typeof href !== 'string' || !href) return fallback;
+    const u = new URL(href);                          // ② 无 URL 时进 catch
+    if (!u.pathname.endsWith('/')) u.pathname += '/'; // 兼容 /paper-reader 无尾斜杠
+    u.search = '';
+    u.hash = '';
+    return u.href;
+  } catch (e) {
+    return fallback;
+  }
+})();
+const PR_API_BASE = PR_ASSET_BASE + 'api';
+
 /* 深色首帧判定（方案 §A2.2 的四级降级链 + §A2.5「朝亮色回退」）——必须在首帧**之前**同步完成，
    否则会出现「先白后黑」的白闪（Firefox/pdf.js #18680 同款公开案例）。放在模块脚本最前面：
    解析期同步执行、早于首帧，且**不新增第二个 <script> 块**（test/reader-script.mjs 的提取约定）。
@@ -735,7 +768,7 @@ const iconHtml = (name) => `<svg class="ic${name === 'spin' ? ' spin' : ''}" vie
 // 静态按钮按 data-icon 注入一次；动态按钮（翻译/重翻/模式切换）在状态变化时用同一函数换图标
 // #pager：翻页条挪到阅读区底部（#main 内）后也要扫到，否则上一页/下一页图标空白
 document.querySelectorAll('#bar [data-icon], #pager [data-icon], #find-window [data-icon], #note-window [data-icon]').forEach((b) => b.insertAdjacentHTML('afterbegin', iconHtml(b.dataset.icon)));
-const api = (p, opts) => fetch('/paper-reader/api' + p, opts).then(async (r) => {
+const api = (p, opts) => fetch(PR_API_BASE + p, opts).then(async (r) => {
   if (!r.ok) {
     // 服务端错误体有两种：{error}（参数/权限）与 {reason}（zh/generate 的未启动原因，带完整说明）
     const body = await r.json().catch(() => ({}));
@@ -969,7 +1002,7 @@ function pdfUrl(variant) {
   const q = `topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`;
   // 不带 t=Date.now()：/api/pdf 已有 ETag（文件 mtime+size），浏览器会 304 复用；
   // 重新翻译后 ETag 自动变化，不会拿到旧译文。
-  return `/paper-reader/api/pdf?${q}${variant ? '&variant=' + variant : ''}`;
+  return `${PR_API_BASE}/pdf?${q}${variant ? '&variant=' + variant : ''}`;
 }
 
 function syncTranscribeButton() {
@@ -2672,7 +2705,7 @@ function cfgProviderIcon(provider) {
   }
   const img = document.createElement('img');
   img.className = 'cfg-icon' + (provider.mono ? ' mono' : '');
-  img.src = '/paper-reader/vendor/' + provider.icon;
+  img.src = PR_ASSET_BASE + 'vendor/' + provider.icon;
   img.alt = '';
   img.setAttribute('aria-hidden', 'true');
   img.dataset.cfgProviderIcon = provider.id;
@@ -2968,15 +3001,15 @@ $('cfg-save-new').onclick = () => saveCfg(true);
 let pdfjsReadyP = null;
 function ensurePdfjs() {
   if (!pdfjsReadyP) {
-    pdfjsReadyP = import('/paper-reader/vendor/pdf.min.mjs').then(
+    pdfjsReadyP = import(PR_ASSET_BASE + 'vendor/pdf.min.mjs').then(
       (m) => {
         window.pdfjsLib = m;
-        m.GlobalWorkerOptions.workerSrc = '/paper-reader/vendor/pdf.worker.min.mjs';
+        m.GlobalWorkerOptions.workerSrc = PR_ASSET_BASE + 'vendor/pdf.worker.min.mjs';
         return m;
       },
       (e) => {
         pdfjsReadyP = null; // 失败后清缓存：瞬时故障不至于让本页签永久坏掉，下次 loadPdf 重试
-        throw new Error('pdf.js 加载失败（/paper-reader/vendor/pdf.min.mjs）：' + (e && e.message ? e.message : e));
+        throw new Error(`pdf.js 加载失败（${PR_ASSET_BASE}vendor/pdf.min.mjs）：` + (e && e.message ? e.message : e));
       },
     );
   }
