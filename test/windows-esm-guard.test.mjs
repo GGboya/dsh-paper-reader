@@ -146,9 +146,15 @@ test('C1 动态 import() 必须走 pathToFileURL（Windows 上裸路径 = ERR_UN
     for (const m of code.matchAll(/(?<![.\w])import\s*\(/g)) {
       const arg = balanced(src, m.index + m[0].length - 1).trim()
       if (arg === '') continue // 空实参不是调用（HTML 注释/说明文字里的 `import()` 字面量）
-      // 允许：pathToFileURL(...) 包一层；或字面量（'node:fs'、'pdfjs-dist/…'；
-      // reader/*.html 里 `import('/paper-reader/vendor/…')` 是**浏览器 URL**，按页面 origin 解析，不是文件系统路径）
-      const ok = arg.startsWith('pathToFileURL(') || /^['"`]/.test(arg)
+      // 允许三种实参，都**不可能**是文件系统裸路径：
+      //   ① pathToFileURL(...)
+      //   ② 字面量（'node:fs'、'pdfjs-dist/…'）
+      //   ③ reader/*.html 里的浏览器 URL：字面量 '/paper-reader/vendor/…'，或是
+      //      以 URL 常量（PR_ASSET_BASE，由 location.href 派生）开头的拼接 —— 反向代理把页面
+      //      挂到子路径时，写死的前导斜杠会打到代理根，因此必须用拼接形式。
+      const ok = arg.startsWith('pathToFileURL(')
+        || /^['"`]/.test(arg)
+        || /^[A-Z][A-Z0-9_]*\s*\+/.test(arg)   // PR_ASSET_BASE + '…'
       if (!ok) offenders.push(`${rel}: ${'import(' + arg.split('\n')[0].slice(0, 70)}…)`)
     }
   }
