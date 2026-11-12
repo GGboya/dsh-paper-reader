@@ -4416,28 +4416,41 @@ function showAskPop(o) {
 
 document.addEventListener('mousedown', (e) => { downPt = { x: e.clientX, y: e.clientY }; }, true);
 
-/* 三击选中整段（issue #22-3）：文本层没有段落语义，原生三击会选中整个 textLayer（≈整页）。
-   行盒分组版：先把 span 按 top 归并成「行」（行盒 = 成员并集），再从命中行向上下扩——
-   同列（水平区间有重叠，双栏左右栏因此自然断开）且行间竖直间隙 ≤ 0.45×行高的连续行算同段。
-   pdf.js 的 span 高度≈字号而非行距，行间间隙明显小于段间距，这个阈值分得开两种间隙。
-   上一版按 span 连通 + 「分量占全页 60% 就放弃」的守卫会在单栏满页段落上误判成「只选一行」，
-   已换成绝对行数封顶（>60 行视为整页误并，退回命中行）。设好选区后走同一条
-   mouseup →「选中即问」链路，不另接气泡。 */
+/* 三击序列的首击落点（见 dprPickParagraph 处的三击 handler）：双击弹出的提问气泡可能
+   恰好盖住原位置，第 3 击的 target 就成了气泡 div 而非 textLayer——三击选段会静默失效
+   （退回原生行为，实测选中一个词）。handler 在 detail≥3 且 target 不在 textLayer 时，
+   用这里记下的首击落点回退（要求近距离 + 短间隔，只 reinterpret 同一次连击）。 */
+let dprLastTlHit = null;
 document.addEventListener('mousedown', (e) => {
-  if (e.detail < 3) return;
   const tl = e.target && e.target.closest ? e.target.closest('.textLayer') : null;
-  if (!tl || !tl.isConnected) return;
-  const items = Array.from(tl.querySelectorAll('span'))
-    .filter((s) => (s.textContent || '').trim())
-    .map((s) => { const r = s.getBoundingClientRect(); return { s, l: r.left, r2: r.right, t: r.top, b: r.bottom }; })
-    .filter((r) => r.r2 > r.l && r.b > r.t)
-    .sort((a, b) => a.t - b.t || a.l - b.l);
-  if (!items.length) return;
-  // 1) 归行：top 相差 ≤2px 的 span 属于同一行
+  if (tl && tl.isConnected) dprLastTlHit = { x: e.clientX, y: e.clientY, at: Date.now(), tl };
+}, true);
+
+/* 三击选中整段（issue #22-3，#22 追加反馈修复跨栏误并）：文本层没有段落语义，原生三击会
+   选中整个 textLayer（≈整页）。核心算法在 dprPickParagraph（纯函数，可测），事件层只做
+   DOM 度量与选区落地。设好选区后走同一条 mouseup →「选中即问」链路，不另接气泡。 */
+/* 行盒分组版，两处与初版不同的关键点（都是双栏/对照版的真实教训，见 issue #22 追加反馈）：
+   · 归行不能只看 top：双栏论文同一行的左右栏、babeldoc 对照版的原文块与译文块 top 相同，
+     只按 top 归并会得到一条横贯全页的「行」，它和谁都水平重叠 ⇒ 扩段整页串联 ⇒ 撞行数
+     上限退回单行——「有时候一行 / 有时候超长一段 / 对照版三击没用」三个症状同一根因。
+     现在加水平相邻判据：同行还得间隙 ≤ gapX（词距并入、栏沟断开）。
+   · 扩段不能只看数组相邻行：正确分行后，(t,l) 排序里双栏相邻项恰是**另一栏**，逐相邻扩
+     会在跨栏处立刻断掉 ⇒ 永远只选一行。现在按「竖直间隙小 + 与段落栏区间有重叠」在
+     附近行里扫描跳过异栏行；栏区间每并一行取**交集**，防止居中标题把区间 creep 到另一栏。
+   阈值依据（真浏览器实测 GFS 双栏 + babeldoc 对照版的 textLayer 盒）：行内词距（含两端对齐
+   拉伸）≤ 2×行高（≈2% 页宽），双栏栏沟 ≈ 4% 页宽（GFS 在 1368px 页宽下 54px），对照版栏沟
+   ≥ 27% 页宽。gapX = max(2×行高, 3% 页宽) 落在词距与栏沟之间；比它更宽的词距偶发拆行也无害——
+   同 top 的两个碎片在扩段时竖直间隙为负、水平与栏区间重叠，会立即并回。
+   竖直方向 pdf.js 的 span 高度≈字号而非行距，行间间隙明显小于段间距，0.45×行高分得开。 */
+function dprPickParagraph(items, x, y, pageW) {
+  // items: [{s, l, r2, t, b}]（已按 t,l 排序的 span 盒）；返回 {first, last, hit} 或 null
+  // 1) 归行：top 相差 ≤2px 且水平相邻（间隙 ≤ gapX）
   const lines = [];
   for (const it of items) {
     const ln = lines[lines.length - 1];
-    if (ln && Math.abs(ln.t - it.t) <= 2) {
+    const h = Math.max(1, it.b - it.t);
+    const gapX = Math.max(2 * h, pageW * 0.03);
+    if (ln && Math.abs(ln.t - it.t) <= 2 && it.l - ln.r2 <= gapX) {
       ln.b = Math.max(ln.b, it.b); ln.l = Math.min(ln.l, it.l); ln.r2 = Math.max(ln.r2, it.r2);
       ln.items.push(it);
     } else {
@@ -4445,21 +4458,60 @@ document.addEventListener('mousedown', (e) => {
     }
   }
   // 2) 命中行（±3px 容差）
-  const idx = lines.findIndex((x) => e.clientY >= x.t - 3 && e.clientY <= x.b + 3 && e.clientX >= x.l - 3 && e.clientX <= x.r2 + 3);
-  if (idx < 0) return;
-  e.preventDefault();   // 替换原生三击（整页全选）
-  // 3) 向上下扩段：同列 + 竖直间隙小
+  const idx = lines.findIndex((r) => y >= r.t - 3 && y <= r.b + 3 && x >= r.l - 3 && x <= r.r2 + 3);
+  if (idx < 0) return null;
+  // 3) 向上下扩段：竖直间隙 ≤ 0.45×行高 且 与栏区间有水平重叠（跳过异栏行继续扫）
   const lh = Math.max(5, lines[idx].b - lines[idx].t);
   const gapY = lh * 0.45;
-  const colOver = (a, b) => Math.min(a.r2, b.r2) - Math.max(a.l, b.l) > 0;
-  let lo = idx, hi = idx;
-  while (lo > 0 && lines[lo].t - lines[lo - 1].b <= gapY && colOver(lines[lo], lines[lo - 1])) lo--;
-  while (hi < lines.length - 1 && lines[hi + 1].t - lines[hi].b <= gapY && colOver(lines[hi], lines[hi + 1])) hi++;
-  if (hi - lo + 1 > 60) lo = hi = idx;   // 整页误并：退回命中行，宁可少选不多选
-  const first = lines[lo].items[0].s;                      // 段首 = 首行最左
-  const last = lines[hi].items[lines[hi].items.length - 1].s; // 段尾 = 末行最右
+  const up = [], down = [];
+  let boxL = lines[idx].l, boxR = lines[idx].r2;
+  let curT = lines[idx].t, curB = lines[idx].b;
+  for (let i = idx - 1; i >= 0; i--) {
+    const c = lines[i];
+    if (curT - c.b > gapY) break;            // 行按 t 升序，往上间隙只增不减
+    if (Math.min(boxR, c.r2) - Math.max(boxL, c.l) <= 0) continue;  // 异栏：跳过继续找同栏
+    up.push(c);
+    curT = c.t;
+    const nl = Math.max(boxL, c.l), nr = Math.min(boxR, c.r2);
+    if (nr - nl > 0) { boxL = nl; boxR = nr; }   // 栏区间取交集，防 creep
+  }
+  for (let i = idx + 1; i < lines.length; i++) {
+    const c = lines[i];
+    if (c.t - curB > gapY) break;
+    if (Math.min(boxR, c.r2) - Math.max(boxL, c.l) <= 0) continue;
+    down.push(c);
+    curB = c.b;
+    const nl = Math.max(boxL, c.l), nr = Math.min(boxR, c.r2);
+    if (nr - nl > 0) { boxL = nl; boxR = nr; }
+  }
+  const members = [...up.reverse(), lines[idx], ...down];
+  if (members.length > 60) return { first: lines[idx].items[0].s, last: lines[idx].items[lines[idx].items.length - 1].s, hit: lines[idx] };
+  return { first: members[0].items[0].s, last: members[members.length - 1].items[members[members.length - 1].items.length - 1].s, hit: lines[idx] };
+}
+document.addEventListener('mousedown', (e) => {
+  if (e.detail < 3) return;
+  const tl = e.target && e.target.closest ? e.target.closest('.textLayer') : null;
+  let px = e.clientX, py = e.clientY, tlEl = tl;
+  if (!tlEl || !tlEl.isConnected) {
+    // 第 3 击被双击弹出的气泡挡住：回退到同一次连击的首击落点（近距离 + 短间隔才认）
+    const h = dprLastTlHit;
+    if (!h || !h.tl || !h.tl.isConnected || Date.now() - h.at > 600
+      || Math.abs(h.x - e.clientX) + Math.abs(h.y - e.clientY) > 8) return;
+    px = h.x; py = h.y; tlEl = h.tl;
+  }
+  const tlRect = tlEl.getBoundingClientRect();
+  const items = Array.from(tlEl.querySelectorAll('span'))
+    .filter((s) => (s.textContent || '').trim())
+    .map((s) => { const r = s.getBoundingClientRect(); return { s, l: r.left, r2: r.right, t: r.top, b: r.bottom }; })
+    .filter((r) => r.r2 > r.l && r.b > r.t)
+    .sort((a, b) => a.t - b.t || a.l - b.l);
+  const pick = dprPickParagraph(items, px, py, tlRect.width);
+  if (!pick) return;
+  e.preventDefault();   // 替换原生三击（整页全选）
+  const first = pick.first;                      // 段首 = 首行最左
+  const last = pick.last;                        // 段尾 = 末行最右
   // 端点必须落在**文本节点**上（setStart(spanEl, 0) 会得到元素端点）：笔记锚定的
-  // noteAnchorFromSelection → offsetOf 只认文本节点，元素端点会让笔记画不出波浪线
+  // noteAnchorFromSelection → offsetOf 只认文本节点，元素端点会让笔记画不出虚线框
   // （实测教训：选区正常、气泡正常，唯独笔记锚定失败）。
   const firstText = (sp) => { for (let n = sp.firstChild; n; n = n.nextSibling) if (n.nodeType === 3 && n.nodeValue) return n; return null; };
   const lastText = (sp) => { for (let n = sp.lastChild; n; n = n.previousSibling) if (n.nodeType === 3 && n.nodeValue) return n; return null; };
