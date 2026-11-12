@@ -2300,8 +2300,15 @@ function makeFakeReact() {
     },
     useEffect(fn) { effects[cursor++] = fn },
     useCallback(fn) { cursor++; return fn },
+    useRef(init) { cursor++; return { current: init } },
   }
-  return { React, begin() { cursor = 0; effects.length = 0 }, effects }
+  return {
+    React,
+    begin() { cursor = 0; effects.length = 0 },
+    /** 全新组件实例（G9 逐卡片渲染用）：连同 useState 的槽一起清掉，避免跨卡片串状态。 */
+    reset() { cursor = 0; state.length = 0; effects.length = 0 },
+    effects,
+  }
 }
 
 /** 按 props 递归找节点（**不调用**函数组件，只按属性定位）。 */
@@ -2331,7 +2338,7 @@ function collectStrings(node, out = []) {
  * 有没有监听 storage 事件（= 与阅读器互相同步的那一半）。
  */
 function loadSettingsPanel({ store }) {
-  const { React, begin, effects } = makeFakeReact()
+  const { React, begin, reset, effects } = makeFakeReact()
   let loaded = null
   const win = {
     __ModuleLoader__: { load: (m) => { loaded = m } },
@@ -2380,7 +2387,7 @@ function loadSettingsPanel({ store }) {
       texts: collectStrings(out),
     }
   }
-  return { render, win, store }
+  return { render, win, store, panel, React, begin, reset, effects }
 }
 
 test('G4 设置面板那一项是真的（真跑组件渲染）：默认勾上、可取消、与阅读器同一键、改了立即反映', () => {
@@ -2496,6 +2503,41 @@ test('G7 只涉及模式 B：模式 A/原文/译文下开关不可见、点不�
   assert.equal(R.t.getSplitLead(), null)
   assert.equal(R.doc.getElementById('pdf-pane').onscroll, null)
   assert.equal(R.doc.getElementById('pdf-pane-zh').onscroll, null)
+})
+
+test('G9 设置分区卸载不炸：每个 effect 的返回值必须是清理函数或 undefined（Promise 会让整壳被 abdicate）', () => {
+  const P = loadSettingsPanel({ store: new Map() })
+  // SettingsPanel 本身没有 hooks：直接调用拿到所有卡片元素（h() 只创建元素，不执行卡片）
+  const tree = P.panel.comp({})
+  const cards = []
+  const collect = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) { for (const n of node) collect(n); return }
+    if (typeof node.type === 'function') { cards.push(node); return }
+    collect(node.props && node.props.children)
+  }
+  collect(tree)
+  assert.ok(cards.length >= 5, `必须收集到全部设置卡片（实际 ${cards.length} 张）`)
+  const seen = new Set()
+  for (const card of cards) {
+    P.reset()
+    card.type(card.props)
+    // effects 是按 hook 下标稀疏存放的 useEffect 回调（useCallback 只占位）
+    for (const fn of P.effects) {
+      if (typeof fn !== 'function') continue
+      let ret
+      try { ret = fn() } catch (e) { assert.fail(`${card.type.name} 的 effect 同步抛错：${(e && e.stack) || e}`) }
+      assert.ok(ret === undefined || typeof ret === 'function',
+        `${card.type.name} 的 effect 返回了 ${Object.prototype.toString.call(ret)}：React 会把返回值当清理函数，` +
+        '卸载设置分区时调用它 → TypeError → 错误越过卡片边界 abdicate 整个 sidebar.settings（弹窗自关 + 左下入口消失）')
+      seen.add(card.type.name)
+    }
+  }
+  // 四张会拉配置的卡片是这次卸载崩溃的触发面：TranslateSettingsCard 的 load() 返回
+  // api(...) 的 Promise，被 React 当清理函数调用；逐张真跑，避免任何一张回退。
+  for (const name of ['EndpointCard', 'TranslateSettingsCard', 'MineruCard', 'ThemeCard']) {
+    assert.ok(seen.has(name), `必须覆盖会拉配置的卡片 ${name}（实际：${[...seen].join(', ')}）`)
+  }
 })
 
 test('G8 结构性红线：开关在 #bar 里（覆盖不到选区）、只加一个 window storage 监听、不碰 textLayer/.eqLayer', () => {
