@@ -149,6 +149,19 @@
   .textLayer span.dpr-hl { background: rgba(255,196,0,.45); border-radius: 2px; }
   #empty { margin: 60px auto; color: var(--text-2); text-align: center; max-width: 420px; }
 
+  /* ---------- 扫描件查看态 ----------
+     Web 与 Electron 统一走 pdf.js + 纯 JS 图像解码（vendor 下的 *nowasm_fallback.js），
+     不依赖浏览器内置 PDF 插件/ wasm；只给提示，不伪装成可检索文本。 */
+  #scan-banner { display: none; position: sticky; top: -16px; z-index: 6; margin: -16px -16px 12px;
+    padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+    color: var(--text-2); font-size: 12.5px; line-height: 1.55; }
+  #scan-banner.on { display: block; }
+  #scan-banner strong { color: var(--text); margin-right: 6px; }
+  #scan-banner a { color: var(--accent); text-decoration: none; white-space: nowrap; }
+  #scan-banner a:hover { text-decoration: underline; }
+  body.dpr-scan #find-open, body.dpr-scan #note-open, body.dpr-scan #eq-toggle,
+  body.dpr-scan #zh-toggle, body.dpr-scan #view-menu-btn, body.dpr-scan #view-menu { display: none !important; }
+
   /* ---------- 公式引用（MinerU bbox 热区 + 列表面板）----------
      契约 §1.3/§1.4：热区**不用** pointer-events:auto 的覆盖层——那会夺走 textLayer 的
      mousedown/拖拽，破坏既有划词提问。这里 .eqLayer 只负责画描边（pointer-events:none），
@@ -471,6 +484,11 @@
   <div id="split-wrap">
     <div id="pdf-pane">
       <div id="pane-label" class="pane-label">原文</div>
+      <div id="scan-banner">
+        <strong id="scan-title">扫描件：只能查看</strong>
+        <span id="scan-msg"></span>
+        <a id="scan-open" href="#" target="_blank" rel="noreferrer">在新窗口打开 PDF</a>
+      </div>
       <div id="pdf-pages"></div>
       <div id="empty" style="display:none"></div>
     </div>
@@ -1014,6 +1032,7 @@ function syncTranscribeButton() {
 
 async function openPaper(topic, name, opts = {}) {
   if (!name) return;
+  exitScannedView();
   openingPaper = true;
   // P2：打开/切换文献后先留出静默窗，别让译文预取在这段里挤进来
   preloadNotBefore = Date.now() + PRELOAD_GRACE_MS;
@@ -1583,6 +1602,7 @@ async function findRun(q) {
 /** 打开查找窗口（focus=true 时选中输入框内容，方便直接改写关键词） */
 function findPanelOpen(focus) {
   if (!findWinEl) return;
+  if (scannedPdfMode) { toast('扫描件没有文本层，只能查看；全文查找不可用', 4000); return; }
   findWinShow(true);
   if (find.idx >= 0) findReapply();   // 重新打开时把上次的当前命中重新标出来，不用再跳一次
   if (focus) { findInputEl.focus(); findInputEl.select(); }
@@ -2027,6 +2047,7 @@ $('main').addEventListener('mousemove', (e) => {
 /* ---------- 笔记窗口：列表态 / 编辑态 ---------- */
 function noteWinShow(on) {
   if (!noteWinEl) return;
+  if (on && scannedPdfMode) { toast('扫描件没有文本层，只能查看；笔记不可用', 4000); return; }
   if (!on) {
     noteWinEl.classList.remove('on');
     notes.shown = false;
@@ -3018,6 +3039,15 @@ function ensurePdfjs() {
 ensurePdfjs().catch(() => {}); // 预热：与 bootstrap 的 API 请求并行拉取，不把首屏串行化
 
 let pdfDoc = null;
+// pdf.js 6 把 CCITT/JBIG2/JPX 解码放到了 wasm/JS 模块里；插件不打包 wasm，
+// 统一走 vendor 下的**纯 JS 兜底模块**（useWasm:false）。这样 Web 与 Electron
+// 桌面端都不依赖浏览器的内嵌 PDF 插件，扫描件也能正常出图。
+const PDFJS_IMAGE_OPTS = {
+  useWasm: false, wasmUrl: PR_ASSET_BASE + 'vendor/',
+  // 预定义 CMap（Adobe-GB1-UCS2 等）：ESP32 那类 TeX 中文 PDF 的内嵌字体没有 /ToUnicode，
+  // pdf.js 必须靠这张字符映射表才能把中文画出来。平铺在 vendor/ 下，路由无需放子目录。
+  cMapUrl: PR_ASSET_BASE + 'vendor/', cMapPacked: true, useSystemFonts: true,
+};
 let pdfLoadSeq = 0;   // loadPdf 的序号：旧请求晚到时直接丢弃，避免覆盖新文档
 let zoomScale = 1.5;
 let dpr = window.devicePixelRatio || 1;
@@ -3038,6 +3068,7 @@ let openingPaper = false;
 // P2：译文预取不再和「点开论文」抢主线程 —— 打开后先让首帧/切换喘口气，再等真空闲。
 const PRELOAD_GRACE_MS = 1800;
 let lazyView = null; // {doc, pane, container, scale, token, observer, pages: Map<pageNo,{div,page,vp,rendered,painting}>}
+let scannedPdfMode = false; // true = 当前文档无文本层：只作查看，不参与译文/分屏
 const LAZY_MIN_PAGES = 12; // 页数少的文档全量渲染更快；长文档滚动模式才启用懒渲染
 
 /** 释放 pdf.js 文档（worker + 页面缓存）。销毁前调用方必须先 ++renderToken，
@@ -3057,10 +3088,62 @@ async function destroyPdfDoc(doc) {
   });
 })();
 
+/** 只在真实浏览器/Electron 里做扫描件判定；Node 测试桩不进入这条 UI 分支。 */
+function browserRuntime() {
+  try { const ua = (typeof navigator !== 'undefined' && navigator && navigator.userAgent) || ''; return ua.length > 0 && !/Node\.js/i.test(ua) } catch { return false }
+}
+
+/** 扫描件判定：前 3 页 + 中间 + 末页都没有可读文本。只影响「怎么显示」，不影响转录/翻译缓存。 */
+async function docLooksScanned(doc) {
+  if (!doc || !doc.numPages || !browserRuntime()) return false;
+  // 前 3 页 + 中间 + 末页：避免「封面/版权页是图，正文有字」的文本 PDF 被误判为扫描件。
+  const probe = new Set([1, 2, 3].filter((n) => n <= doc.numPages));
+  probe.add(Math.max(1, Math.ceil(doc.numPages / 2)));
+  probe.add(doc.numPages);
+  let chars = 0;
+  for (const i of probe) {
+    try {
+      const page = await doc.getPage(i);
+      const tc = await page.getTextContent();
+      for (const item of tc.items) {
+        if (typeof item.str === 'string') chars += item.str.replace(/\s+/g, '').length;
+      }
+    } catch { /* 单页读不出文本：当作没文本继续探测 */ }
+    if (chars >= 12) return false;
+  }
+  return true;
+}
+
+const SCAN_TITLE = '扫描件：只能查看';
+const SCAN_MSG = '这篇 PDF 没有文本层，只能按原样查看；选词提问、笔记、全文查找与翻译在此视图不可用。如需 OCR，可在「设置 → 论文伴读」启用 MinerU 后点顶栏「转录」。';
+
+/** 进入扫描件查看态：Web 与客户端统一走 pdf.js 画页（纯 JS 图像解码），只显示提示、禁用文本功能。 */
+function enterScannedView(url) {
+  const banner = $('scan-banner');
+  if (!banner) return;
+  scannedPdfMode = true;
+  document.body.classList.add('dpr-scan');
+  banner.classList.add('on');
+  $('scan-title').textContent = SCAN_TITLE;
+  $('scan-msg').textContent = SCAN_MSG;
+  const open = $('scan-open');
+  if (open) { open.href = url; open.target = '_blank'; open.rel = 'noreferrer'; }
+  if (current) $('status').textContent = `${current.name} · 扫描件（只能查看）`;
+}
+
+/** 退出扫描件查看态。调用点：换论文 / 换视图 / 重新加载普通 PDF。 */
+function exitScannedView() {
+  if (!scannedPdfMode) return;
+  scannedPdfMode = false;
+  document.body.classList.remove('dpr-scan');
+  $('scan-banner').classList.remove('on');
+}
+
 async function loadPdf(url, opts = {}) {
+  exitScannedView(); // 换文档/换视图：上一次的兜底态必须先撤掉
   await ensurePdfjs(); // 就绪前禁止触 pdfjsLib（defer 竞态，见文件头注释）
   const seq = ++pdfLoadSeq;
-  const task = pdfjsLib.getDocument({ url }); // v6 起不接受字符串参数，必须传对象
+  const task = pdfjsLib.getDocument({ url, ...PDFJS_IMAGE_OPTS }); // v6 起不接受字符串参数，必须传对象
   let doc;
   try {
     doc = await task.promise;
@@ -3081,6 +3164,11 @@ async function loadPdf(url, opts = {}) {
   // 换了文档（换论文 / 原文↔译文）：查找索引按文档对象缓存，这里必须作废，
   // 否则会拿旧文档的页码去定位新文档（页数不同时直接跳错页）。
   if (find.doc !== pdfDoc) findReset();
+  // 扫描件：CCITT/JBIG2 图像解码在 pdf.js 6 里依赖 wasm；插件改用纯 JS 兜底，
+  // 页面照样由 pdf.js 渲染，只额外提示「只能查看」并禁用文本功能。
+  const scanned = await docLooksScanned(doc);
+  if (seq !== pdfLoadSeq) return false;
+  if (scanned) enterScannedView(url); // Web/Electron 同一条路：pdf.js + 纯 JS 图像解码
   $('empty').style.display = 'none';
   // 翻页控件与模式切换按钮：文档就绪后才出现
   $('pager').style.display = '';
@@ -3162,7 +3250,7 @@ function loadViewDoc(key) {
   if (viewLoads.has(key)) return viewLoads.get(key)
   const seq = ++viewLoadSeq
   const variant = key === 'orig' ? null : key
-  const task = pdfjsLib.getDocument({ url: pdfUrl(variant) })
+  const task = pdfjsLib.getDocument({ url: pdfUrl(variant), ...PDFJS_IMAGE_OPTS })
   const p = (async () => {
     const doc = await task.promise
     if (seq !== viewLoadSeq) { try { await task.destroy(); } catch { /* stale */ } return null }
@@ -3320,7 +3408,7 @@ async function preloadView(key) {
  *  ③ 排期本身走 requestIdleCallback（拿不到 idle 的老浏览器退回 setTimeout），
  *  timeout 放宽到 4s：真的长期不空闲就延后，而不是 2.5s 强行插队。 */
 function schedulePreload() {
-  if (openingPaper) return
+  if (openingPaper || scannedPdfMode) return
   const key = zhState.zh ? 'zh' : zhState.dual ? 'dual' : null
   if (!key || key === activeKey || viewCache.has(key) || (viewDocs.has(key) && viewCache.has(key))) return
   cancelPreload()
@@ -5363,6 +5451,7 @@ async function renderSplit() {
 
 /** 进入分屏（或 openPaper 恢复分屏）：拉原文 + -zh.pdf 两个文档，两列同渲。 */
 async function openSplit() {
+  if (scannedPdfMode) return; // 扫描件只作查看，不参与分屏/译文渲染
   if (!current || !zhState.zh) return;
   if (window.innerWidth < SPLIT_MIN_WIDTH) {
     toast('面板太窄，请把阅读器拉宽后再用分屏对照', 4000);
@@ -5385,7 +5474,7 @@ async function openSplit() {
   if (pdfDocZh) { await destroyPdfDoc(pdfDocZh); pdfDocZh = null; }
   let task = null;
   try {
-    task = pdfjsLib.getDocument({ url: pdfUrl('zh') });
+    task = pdfjsLib.getDocument({ url: pdfUrl('zh'), ...PDFJS_IMAGE_OPTS });
     const doc = await task.promise;
     if (seq !== splitLoadSeq) { try { await task.destroy(); } catch { /* 已被新请求/teardown 取代 */ } return; }
     pdfDocZh = doc;
@@ -5397,6 +5486,14 @@ async function openSplit() {
     return;
   }
   await loadPdf(pdfUrl(null), { deferRender: true }); // 原文列（pdfDoc 恒指原文），本函数自己安排渲染
+  if (scannedPdfMode) {
+    // loadPdf 判定扫描件（统一 pdf.js + 纯 JS 兜底）：撤掉刚刚打开的分屏壳，别留一列空白。
+    teardownSplit();
+    viewMode = 'orig';
+    zhVariant = null;
+    updateViewButtons();
+    return;
+  }
   // 分屏适宽：按较窄的那一列算一次（等价于 fitToWidth，但不让它触发一次多余的单列渲染）
   const w = fitPaneWidth();
   if (w > 0 && pdfDoc) {

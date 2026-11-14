@@ -34,7 +34,7 @@ The study profile lives beside each paper as `<paper>.study.json`, storing the p
 
 By default text is extracted locally with pdf.js — **plain text-native PDFs need no configuration at all**. Two scenarios need MinerU:
 
-- **Scanned PDFs** (old papers, book chapters, scanned handouts): no text layer, pdf.js can't read them; MinerU (OCR) can
+- **Scanned PDFs** (old papers, book chapters, scanned handouts): no text layer, pdf.js can't read them; MinerU (OCR) can. The reader switches to view-only: Web and Electron desktop take the same path — pdf.js with pure-JS image decoding (no built-in browser PDF plugin, no wasm), paging/zoom work in both, and it says "Scanned file: view only" — text selection, notes, full-text search and translation are unavailable in that view; after MinerU transcription, search/Q&A works but the PDF stays view-only
 - **Click to cite a formula**: formulas in PDFs are graphical garbage — unselectable and unsearchable. Once MinerU recovers them as LaTeX, **clicking a formula in the PDF puts its LaTeX into the ask bubble** (send it and the formula is cited with your question); formula queries like `QK^T` hit search; the "∑ 公式" (Formulas) panel lists every formula by page
 
 **You need to set this up yourself (pick one)**, configured under **Settings → Paper Reader → "MinerU parser"**:
