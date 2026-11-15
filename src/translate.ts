@@ -8,7 +8,7 @@
 // 直接把这两行 import 换成本地类型即可（形状是兼容子集）。
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, closeSync, fstatSync, openSync, readSync } from 'node:fs';
-import { mkdir, rename, rm, readdir } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, readdir } from 'node:fs/promises';
 import { join, dirname, basename, extname, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
@@ -294,6 +294,56 @@ export async function restartTranslation(ref: TranslatePaperRef, dataDir: string
 /** 驱动脚本：包装 babeldoc（加结构化进度事件 + 解除单次请求的输出长度限制）。 */
 const DRIVER_PATH = fileURLToPath(new URL('../runtime/babeldoc-driver.py', import.meta.url));
 
+/**
+ * issue #31-1：Harness 会在子进程 NO_PROXY 里补 `[::1]`，httpx 0.28 的 URLPattern
+ * 解析它直接抛 `Invalid port: ':1]'`——babeldoc 初始化即崩，模型都没调到。
+ * 只摘掉独立的 `[::1]` 项（裸 `::1` 是合法的，其余条目一律保留），不动父进程环境。
+ */
+export function stripBracketedIpv6Loopback(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const out = { ...env };
+    for (const key of ['NO_PROXY', 'no_proxy']) {
+        const v = out[key];
+        if (typeof v !== 'string' || !v.includes('[')) continue;
+        out[key] = v.split(',').map((s) => s.trim()).filter((s) => s && s !== '[::1]').join(',');
+    }
+    return out;
+}
+
+/**
+ * issue #31-3：babeldoc 段落翻译全败时退出码仍是 0，会把纯英文的「译文 PDF」当成功发布。
+ * 发布前抽检产物的中文含量：采样首 3 页 + 中间 + 末页，数 CJK 字符（正常译文是数千级）。
+ * 引擎无关、不信任退出码——比解析 babeldoc 日志稳。
+ */
+export async function countCjkInPdf(pdfPath: string): Promise<number> {
+    const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const data = new Uint8Array(await readFile(pdfPath));
+    const loadingTask = getDocument({ data, disableFontFace: true, verbosity: 0 });
+    const doc = await loadingTask.promise;
+    try {
+        const probes = new Set([1, 2, 3].filter((n) => n <= doc.numPages));
+        probes.add(Math.max(1, Math.ceil(doc.numPages / 2)));
+        probes.add(doc.numPages);
+        let cjk = 0;
+        for (const i of probes) {
+            try {
+                const page = await doc.getPage(i);
+                const tc = await page.getTextContent();
+                for (const item of tc.items) {
+                    const str = (item as { str?: unknown }).str;
+                    if (typeof str === 'string') cjk += (str.match(/[一-鿿]/g) ?? []).length;
+                }
+                page.cleanup();
+            } catch { /* 单页读不出：跳过继续采样 */ }
+        }
+        return cjk;
+    } finally {
+        await loadingTask.destroy().catch(() => { /* 已销毁 */ });
+    }
+}
+
+/** 中文含量低于此值判定「译文实际为空」（5 页采样，正常译文数千 CJK 字符）。 */
+const ZH_EMPTY_THRESHOLD = 20;
+
 /** babeldoc 报「Scanned PDF detected」时附带的处理指引（issue #26）：
  *  扫描件没有文字层，babeldoc 拒绝翻译属预期行为；插件不自带 OCR，
  *  如实告诉用户先 OCR 再来，而不是只甩一行英文错误。 */
@@ -437,6 +487,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
             return;
         }
         const stages: StageWeight[] = [];
+        let paraErrs = 0; // babeldoc 的「Error translating paragraph.」计数（issue #31-3）
         let tail = '';
         let settled = false;
         // 子进程输出写文件而不是管道：①DSH 沙箱里 node 拿不到子进程管道（spawn EPERM）
@@ -454,7 +505,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
             ? null
             : spawn(cmd, args, {
                 env: {
-                    ...process.env,
+                    ...stripBracketedIpv6Loopback(process.env),
                     HF_ENDPOINT: 'https://hf-mirror.com',
                     PYTHONIOENCODING: 'utf-8',
                     DPR_SPLIT_TOKENS: String(options.splitTokens),
@@ -483,6 +534,8 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                 return;
             if (!raw.startsWith('@@DPR@@ ')) {
                 // babeldoc 自己的输出（错误/warning）：留最后一段当失败原因
+                // issue #31-3：段落失败要单独计数——babeldoc 段落全败时退出码仍是 0
+                if (/^Error translating paragraph/i.test(raw)) paraErrs++;
                 tail = `${tail}\n${raw}`.slice(-MAX_TAIL_CHARS);
                 return;
             }
@@ -587,6 +640,24 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                 try {
                     // 不用 glob：其 pattern 里反斜杠是转义符，win32 的 join 路径会踩雷；readdir + 前后缀匹配全平台稳
                     const files = await readdir(tmpDir);
+                    // issue #31-3：发布前抽检中文含量——段落全败时 babeldoc 退出码 0、产物是纯英文，
+                    // 绝不能当成功发布；产物留在 tmp 供排查，日志路径一并给出
+                    const mono = files.find((f) => f.startsWith(stem) && f.endsWith('.zh-CN.mono.pdf'));
+                    const dual = mono ? null : files.find((f) => f.startsWith(stem) && f.endsWith('.zh-CN.dual.pdf'));
+                    const probe = mono ?? dual ? join(tmpDir, (mono ?? dual)!) : null;
+                    if (probe) {
+                        // -1 = 抽检自身失败(产物连解析都过不去,交给既有产物校验),绝不拦截发布
+                        let cjk = -1;
+                        try { cjk = await countCjkInPdf(probe); } catch { /* 抽检失败不拦 */ }
+                        if (cjk >= 0 && cjk < ZH_EMPTY_THRESHOLD) {
+                            console.error(`[dsh-paper-reader] 译文中文含量异常(${cjk} CJK/采样5页,段落失败 ${paraErrs} 次): ${ref.name}`);
+                            setTaskBusy(ref, task, {
+                                error: `翻译实际未产出中文（采样仅 ${cjk} 个中文字符${paraErrs > 0 ? `，${paraErrs} 个段落翻译失败` : ''}）。产物未发布，完整日志：${logPath}`,
+                            });
+                            resolveDone();
+                            return;
+                        }
+                    }
                     for (const f of files) {
                         if (f.startsWith(stem) && f.endsWith('.zh-CN.mono.pdf'))
                             await rename(join(tmpDir, f), dstStem + '-zh.pdf');
@@ -599,6 +670,8 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                         resolveDone();
                         return;
                     }
+                    if (paraErrs > 0)
+                        console.warn(`[dsh-paper-reader] babeldoc done（含 ${paraErrs} 个段落失败，对应段落保留原文）: ${ref.name}，日志：${logPath}`);
                     if (tasks.get(ref.pdfPath) === task) busy.delete(ref.pdfPath);
                     console.log(`[dsh-paper-reader] babeldoc done: ${ref.name}`);
                 }

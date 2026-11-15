@@ -58,6 +58,20 @@ export interface HarnessTranslationBridge {
   close(): Promise<void>
 }
 
+/**
+ * issue #31-4：翻译桥的错误状态映射。原来上游连接错误/超时没有 status 时一律兜 400，
+ * Python SDK 会把它当 BadRequestError，自带的 5xx 退避重试全被绕过。
+ * 映射：取消 499；上游真实状态保留（status/statusCode）；超时 504；其余无状态 502。
+ */
+export function bridgeErrorStatus(err: unknown, aborted: boolean): number {
+  if (aborted) return 499
+  const e = err as { status?: unknown; statusCode?: unknown }
+  if (typeof e.status === 'number') return e.status
+  if (typeof e.statusCode === 'number') return e.statusCode
+  const msg = err instanceof Error ? err.message : String(err ?? '')
+  return /timed?\s*out|timeout|ETIMEDOUT/i.test(msg) ? 504 : 502
+}
+
 export function currentHarnessModel(
   defaults: AgentDefaultModelLike | undefined,
   llm: HarnessLlmLike | undefined,
@@ -165,7 +179,9 @@ export async function openHarnessTranslationBridge(
           model: selected.model,
           messages,
           ...(system !== undefined ? { system } : {}),
-          ...(typeof body['temperature'] === 'number' ? { temperature: body['temperature'] } : {}),
+          // issue #31-2：不转发 temperature——babeldoc 默认发 0，而 GPT-6.1-Sol 等模型
+          // 直接拒绝该参数（Unsupported parameter），所有段落跟着失败。统一用模型默认值，
+          // 比按提供商白名单适配稳，不用追模型能力表。
           ...(typeof body['max_tokens'] === 'number' ? { maxTokens: body['max_tokens'] } : {}),
           ...(typeof body['stop'] === 'string' ? { stop: [body['stop']] } : Array.isArray(body['stop']) ? { stop: body['stop'].filter((s): s is string => typeof s === 'string') } : {}),
           signal: controller.signal,
@@ -206,7 +222,7 @@ export async function openHarnessTranslationBridge(
       } catch (err) {
         if (res.writableEnded) return
         const aborted = controller.signal.aborted && !closing
-        const status = aborted ? 499 : typeof (err as { status?: unknown }).status === 'number' ? Number((err as { status: number }).status) : 400
+        const status = bridgeErrorStatus(err, aborted)
         const message = closing || controller.signal.aborted ? '翻译已取消' : err instanceof Error ? err.message : String(err)
         sendJson(res, status, openAiError(status, message.slice(0, 500)))
       } finally {

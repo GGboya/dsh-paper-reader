@@ -142,6 +142,7 @@ Two toolbar buttons; switch any time and **click again to return to the original
 - **Synchronised scrolling**: scrolling either pane moves the other to the **same page + same in-page ratio**; whichever pane you are scrolling leads, so the two never fight each other. In paged mode (`▣`) both panes show the same page. **If the Chinese PDF has a different page count, the panes are mapped proportionally** and a one-off notice appears in the status bar.
 - **Width**: the split view needs a panel at least **640px** wide; narrower, clicking "分屏" only explains and does **not** switch. Shrinking below 640px while split falls back to the original automatically.
 - **Interaction with existing features**: while split, the left pane is the ordinary original view — **formula hotspots stay clickable** (the right pane neither participates in hit-testing nor gets a hotspot layer), the formula panel keeps working, and the "中" toggle is disabled during split (to avoid conflicting semantics). Switching to the Chinese / dual view still disables hotspots, exactly as before (the bbox only holds for original pages).
+- **An empty translation is never published**: before publishing, the artifact is spot-checked for Chinese content — when every paragraph failed (babeldoc still exits 0), the all-English "translation" is no longer published as success; the error is reported honestly with the full log path kept (issue #31).
 
 ## PDF dark mode
 
