@@ -1,8 +1,11 @@
 // babeldoc-install.ts — 无 Python 环境用户的 babeldoc 自动安装（纯函数，不依赖 Cordis）。
 //
 // 链路：uv 独立二进制（GitHub Releases，带 sha256 校验）
-//   → `uv venv`（uv 自动下载托管 Python，系统没有 Python 也能跑）
-//   → `uv pip install babeldoc`（失败时退到 pip + 国内镜像自举）
+//   → `uv venv`（系统有 ≥3.10 的 Python 就直接用，省 ~30MB 托管 Python 的 GitHub 下载；
+//     没有才让 uv 下载托管版）
+//   → `uv pip install babeldoc`（官方/镜像探速取快者；官方失败 → 清华镜像续装；
+//     再失败退到 pip + 国内镜像轮询自举——uv 通道默认走 pypi.org，
+//     babeldoc 依赖树 ~200MB 在国内裸连会顶死超时，这是安装超时的第一根因）
 // 使用前后各做一次 `babeldoc --version` 自检：venv 残缺（依赖被杀软/中断搞掉一半，
 // exe 还在但一跑就 ModuleNotFoundError）会被当场抓住并自动走重装修复，而不是让用户
 // 在翻译时对着 import 报错干瞪眼。
@@ -87,6 +90,51 @@ async function findUv(home: string): Promise<string | null> {
 
 interface GhAsset { id: number; name: string; digest?: string }
 
+/**
+ * GitHub 加速前缀:统一用于 uv 二进制(api.github.com 资产)与 uv 托管 Python 下载
+ * (UV_PYTHON_INSTALL_MIRROR)。选择顺序:DSH_PR_GH_MIRROR 显式指定 > 直连探通 GitHub(海外用户,不用)
+ * > 候选社区代理逐个探活取首个可达。
+ * 为什么敢走社区代理:传输层只转发,完整性有两道独立校验——uv 二进制对 GitHub API 的
+ * digest 做 sha256(见 downloadUv),uv 对托管 Python 自带 manifest 哈希校验(实测喂
+ * 「合法 gzip 但内容被换」的假包,uv 报 `Hash mismatch` 直接拒装)。代理挂了/作恶都只会失败,
+ * 不会装进坏东西。背景:Node fetch 不读系统代理,挂代理的国内用户直连 GitHub 必超时;
+ * 裸 Windows 用户(无 Python)又必须从 GitHub 下托管 Python——这是安装超时的最后一根硬骨头。
+ */
+const GH_PROXY_CANDIDATES = ['https://gh-proxy.com/', 'https://ghfast.top/']
+let ghPrefixCache: string | undefined
+
+async function probeReachable(url: string, ms: number): Promise<boolean> {
+  try {
+    const r = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(ms) })
+    return r.ok || r.status === 405 // 有些代理不支持 HEAD,405 也算通
+  } catch {
+    return false
+  }
+}
+
+async function ghMirrorPrefix(): Promise<string> {
+  if (ghPrefixCache !== undefined) return ghPrefixCache
+  const forced = process.env.DSH_PR_GH_MIRROR
+  if (forced) {
+    ghPrefixCache = forced.replace(/\/?$/, '/')
+    return ghPrefixCache
+  }
+  if (await probeReachable('https://api.github.com/repos/astral-sh/uv', 3_000)) {
+    ghPrefixCache = '' // 直连可达(海外/专线),不用代理
+    return ghPrefixCache
+  }
+  for (const p of GH_PROXY_CANDIDATES) {
+    const prefix = p.replace(/\/?$/, '/')
+    if (await probeReachable(`${prefix}https://api.github.com/repos/astral-sh/uv`, 4_000)) {
+      ghPrefixCache = prefix
+      console.warn(`[dsh-paper-reader] GitHub 直连不可达,使用加速前缀 ${prefix}(完整性由 sha256/uv manifest 校验保障)`)
+      return ghPrefixCache
+    }
+  }
+  ghPrefixCache = '' // 代理也全挂:维持直连,靠 fetchWithRetry 兜底
+  return ghPrefixCache
+}
+
 /** GitHub API 请求头：有 GITHUB_TOKEN/GH_TOKEN 就带上——匿名限流 60/h 按出口 IP 算，
  * CI runner 和企业 NAT 都是共享 IP,极易撞 403;带 token 后按账号 5000/h。 */
 function ghHeaders(accept: string): Record<string, string> {
@@ -128,12 +176,18 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
       `当前平台（${process.platform}/${process.arch}）暂不支持自动安装：请手动安装 uv（https://docs.astral.sh/uv/）后重试`,
     )
   }
+  // GitHub 加速前缀(探活/DSH_PR_GH_MIRROR 见 ghMirrorPrefix):api 与资产都走 `<前缀><原URL>` 转发
+  const gh = (url: string) => {
+    const p = ghPrefixCache
+    return p ? p + url : url
+  }
   const want = isWin ? `uv-${triple}.zip` : `uv-${triple}.tar.gz`
   const tmp = join(home, '.dsh-paper-reader', 'bin', `.uv-install-${Date.now()}`)
   await mkdir(tmp, { recursive: true })
   try {
     onPhase('正在安装翻译引擎（1/3 下载 uv）…')
-    const rel = await fetchWithRetry('https://api.github.com/repos/astral-sh/uv/releases/latest', {
+    await ghMirrorPrefix()
+    const rel = await fetchWithRetry(gh('https://api.github.com/repos/astral-sh/uv/releases/latest'), {
       headers: ghHeaders('application/vnd.github+json'),
       signal: AbortSignal.timeout(30_000),
     })
@@ -144,9 +198,10 @@ async function downloadUv(home: string, onPhase: PhaseFn): Promise<string> {
     const sumAsset = assets.find((a) => a.name === want + '.sha256')
 
     const download = async (a: GhAsset): Promise<Buffer> => {
-      const r = await fetchWithRetry(`https://api.github.com/repos/astral-sh/uv/releases/assets/${a.id}`, {
+      // 单次 120s 快速失败(GitHub 国内不稳,3 次重试已够;180s×3 会把用户晾 9 分钟才报错)
+      const r = await fetchWithRetry(gh(`https://api.github.com/repos/astral-sh/uv/releases/assets/${a.id}`), {
         headers: ghHeaders('application/octet-stream'),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(120_000),
       })
       if (!r.ok) throw new Error(`下载 ${a.name} 失败：HTTP ${r.status}`)
       return Buffer.from(await r.arrayBuffer())
@@ -220,6 +275,35 @@ const CN_MIRRORS = [
   'https://mirrors.cloud.tencent.com/pypi/simple',
 ]
 
+/** uv 通道的镜像。与 CN_MIRRORS[0] 同值(改动时一起改)。 */
+const UV_MIRROR = 'https://pypi.tuna.tsinghua.edu.cn/simple'
+
+/**
+ * 选 PyPI 源,返回给 uv 通道的环境变量:
+ * DSH_PR_PYPI_MIRROR 显式指定 > 官方/镜像各 3s 探速取快者(官方快/镜像挂 → 空,维持官方)。
+ * 背景:uv pip 默认走 pypi.org,babeldoc 依赖树 ~200MB,国内裸连 200KB/s ≈ 17min,
+ * 正好顶死 20min 超时——「安装老是超时」的第一根因。镜像下同样体积 <1min。
+ */
+async function pickIndexEnv(): Promise<Record<string, string>> {
+  const forced = process.env.DSH_PR_PYPI_MIRROR
+  if (forced) return { UV_DEFAULT_INDEX: forced, UV_INDEX_URL: forced }
+  const probe = async (base: string): Promise<number> => {
+    const t0 = Date.now()
+    try {
+      const r = await fetch(base, { method: 'HEAD', signal: AbortSignal.timeout(3_000) })
+      return r.ok ? Date.now() - t0 : Number.POSITIVE_INFINITY
+    } catch {
+      return Number.POSITIVE_INFINITY
+    }
+  }
+  const [official, mirror] = await Promise.all([
+    probe('https://pypi.org/simple/'),
+    probe(`${UV_MIRROR}/`),
+  ])
+  if (official === Number.POSITIVE_INFINITY && mirror === Number.POSITIVE_INFINITY) return {}
+  return mirror < official ? { UV_DEFAULT_INDEX: UV_MIRROR, UV_INDEX_URL: UV_MIRROR } : {}
+}
+
 // babeldoc 依赖 bitstring>=4.3.0 无上界，而 bitstring 5.0（2026-10 发布）删除了 BitStream，
 // babeldoc 的 pdf_creater.py 仍在 `from bitstring import BitStream` —— 裸装必装出残缺 venv。
 // 上游修掉该 import 或锁上界后可移除此 pin。
@@ -242,7 +326,43 @@ async function pipInstallBabeldoc(py: string): Promise<void> {
 }
 
 /**
- * 建 venv + 装 babeldoc（或修复残缺安装）。uv 没有可用 Python 时会自己下载托管版。
+ * 探测系统 Python,返回解释器绝对路径(给 uv venv --python 直接吃),找不到返回 null。
+ * 候补序:python3(macOS/Linux)→ python → py -3(Windows 官方 launcher)。
+ * Windows 陷阱:商店的 python/python3「应用执行别名」是个弹商店的假 stub,
+ * 跑 -c 会非零退出 → 探活自动跳过,零风险;真 Python(含商店正版)都过得了探活。
+ * 返回 sys.executable 而非命令名,是怕 PATH 里的别名/同壳名误导 uv 的解析。
+ * 用系统 Python 可省掉 ~30MB 托管 Python 的 GitHub 下载(国内慢且是超时第二根因);
+ * DSH_PR_MANAGED_UV_ONLY=1 时跳过(CI 强制走托管下载链路)。
+ */
+async function findSystemPython(): Promise<string | null> {
+  const candidates: Array<[cmd: string, pre: string[]]> = [
+    ['python3', []],
+    ['python', []],
+    ['py', ['-3']],
+  ]
+  for (const [cmd, pre] of candidates) {
+    const ok = await new Promise<boolean>((res) => {
+      execFile(
+        cmd,
+        [...pre, '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'],
+        { timeout: 15_000 },
+        (err) => res(!err),
+      )
+    })
+    if (!ok) continue
+    const exe = await new Promise<string>((res) => {
+      execFile(cmd, [...pre, '-c', 'import sys; print(sys.executable)'], { timeout: 15_000 }, (err, stdout) => {
+        if (err) return res('')
+        res(stdout.trim().split(/\r?\n/)[0] ?? '')
+      })
+    })
+    if (exe) return exe
+  }
+  return null
+}
+
+/**
+ * 建 venv + 装 babeldoc（或修复残缺安装）。
  * venv 已存在时跳过 `uv venv`——它会清空重建，毁掉 pip 修复过的包，直接补依赖即可
  * （`uv pip install` 对缺失的依赖是幂等补装）。
  */
@@ -250,9 +370,28 @@ async function installBabeldoc(uv: string, venvDir: string, onPhase: PhaseFn): P
   const py = venvPython(venvDir)
   const bin = venvBabeldoc(venvDir)
   if (!existsSync(join(venvDir, 'pyvenv.cfg'))) {
-    onPhase('正在安装翻译引擎（2/3 安装 Python）…')
-    // --python-preference only-managed：不碰用户系统里可能残缺/带 externally-managed 标记的 Python
-    await run(uv, ['venv', venvDir, '--python', '3.12', '--python-preference', 'only-managed'], { timeout: 10 * 60_000 })
+    onPhase('正在安装翻译引擎（2/3 准备 Python）…')
+    // 系统 Python 优先(省 GitHub 下载);建不起来再走托管下载。
+    // only-managed 的原语义(不碰残缺系统 Python)由「先试建、失败即弃」保住。
+    let sysPy: Awaited<ReturnType<typeof findSystemPython>> = null
+    if (process.env.DSH_PR_MANAGED_UV_ONLY !== '1') sysPy = await findSystemPython()
+    let usedSystem = false
+    if (sysPy) {
+      try {
+        await run(uv, ['venv', venvDir, '--python', sysPy], { timeout: 2 * 60_000 })
+        usedSystem = true
+      } catch (e) {
+        console.warn(`[dsh-paper-reader] 系统 Python(${sysPy})建 venv 失败,改用 uv 托管 Python:`, e instanceof Error ? e.message : e)
+      }
+    }
+    if (!usedSystem) {
+      // 托管 Python 走同一加速前缀(UV_PYTHON_INSTALL_MIRROR,uv 会以 manifest 哈希校验,
+      // 见 ghMirrorPrefix 注释)——裸 Windows 用户的 30MB GitHub 下载不再是死路
+      const pyEnv: NodeJS.ProcessEnv = {}
+      const prefix = await ghMirrorPrefix()
+      if (prefix) pyEnv.UV_PYTHON_INSTALL_MIRROR = `${prefix}https://github.com/astral-sh/python-build-standalone/releases/download`
+      await run(uv, ['venv', venvDir, '--python', '3.12', '--python-preference', 'only-managed'], { timeout: 10 * 60_000, env: pyEnv })
+    }
   }
   onPhase('正在安装翻译引擎（3/3 安装 babeldoc，首次约几分钟）…')
   const viaPipFallback = async (cause: unknown) => {
@@ -266,10 +405,26 @@ async function installBabeldoc(uv: string, venvDir: string, onPhase: PhaseFn): P
   //（杀软锁 uv 入口 exe、PyPI 截断时的逃生通道，Windows 上最关键的一条路径）
   if (process.env.DSH_PR_FORCE_PIP_CHANNEL === '1') await viaPipFallback(null)
   else {
+    // 两段式:首段按探速选源、8min 快速失败;官方源失败 → 镜像续装 20min
+    //(uv 的 wheel 缓存让第二段从断点续传,不是从零再来);再失败才落 pip 通道
+    const indexEnv = await pickIndexEnv()
     try {
-      await run(uv, ['pip', 'install', '--python', py, 'babeldoc', BITSTRING_PIN], { timeout: 20 * 60_000 })
-    } catch (uvErr) {
-      await viaPipFallback(uvErr)
+      await run(uv, ['pip', 'install', '--python', py, 'babeldoc', BITSTRING_PIN], { timeout: 8 * 60_000, env: indexEnv })
+    } catch (first) {
+      const firstWasOfficial = Object.keys(indexEnv).length === 0
+      if (!firstWasOfficial) await viaPipFallback(first)
+      else {
+        console.warn('[dsh-paper-reader] 官方源安装失败，镜像续装:', first instanceof Error ? first.message : first)
+        onPhase('正在安装翻译引擎（3/3 镜像续装 babeldoc…）')
+        try {
+          await run(uv, ['pip', 'install', '--python', py, 'babeldoc', BITSTRING_PIN], {
+            timeout: 20 * 60_000,
+            env: { UV_DEFAULT_INDEX: UV_MIRROR, UV_INDEX_URL: UV_MIRROR },
+          })
+        } catch (second) {
+          await viaPipFallback(second)
+        }
+      }
     }
   }
   if (!existsSync(bin)) throw new Error('babeldoc 安装完成但未找到可执行文件')
