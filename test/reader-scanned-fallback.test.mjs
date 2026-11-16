@@ -64,7 +64,7 @@ test('S4 ESP32 一类 TeX 中文 PDF：预定义 CMap 随包提供并接入 getD
 
 test('S5 文献库树自己滚动 + 行高收紧（issue #30-②）', () => {
   const client = readFileSync(join(ROOT, '..', 'lib', 'client.js'), 'utf8')
-  assert.match(client, /treeScroll: \{ flex: '1 1 0', minHeight: 0, overflowY: 'auto'/)
+  assert.match(client, /treeScroll: \{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto'/)
   assert.match(client, /root: \{[^\n]*display: 'flex', flexDirection: 'column', height: '100%', maxHeight: '100%', minHeight: 0/)
   assert.match(client, /role: 'tree', style: S\.treeScroll/)
   assert.match(client, /item: \{[^\n]*minHeight: '24px'/)
