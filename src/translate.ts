@@ -510,6 +510,9 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                     PYTHONIOENCODING: 'utf-8',
                     DPR_SPLIT_TOKENS: String(options.splitTokens),
                     DPR_MAX_OUTPUT_TOKENS: String(options.maxOutputTokens),
+                    // 版面检测推理设备：cpu=维持 babeldoc 原行为；dml/cuda/auto 交给驱动脚本
+                    // 换 GPU provider，运行时缺失时驱动会如实回落 CPU 并写日志。
+                    DPR_ONNX_DEVICE: options.layoutDevice ?? 'cpu',
                     ...openCodeDriverEnv(ep.baseUrl, ocSession),
                 },
                 windowsHide: true,

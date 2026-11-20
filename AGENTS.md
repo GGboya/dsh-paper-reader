@@ -55,7 +55,7 @@ src/
   formulas.ts   纯函数：MinerU 公式索引（LaTeX + bbox → 阅读器热区/面板）
   study.ts      纯函数：学习档案（计划 + 检验成绩）读写
   translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）
-  translation-options.ts 纯函数：整篇翻译的上下文拆段、输出预算与 QPS（默认 100000/32768/16，配置校验）
+  translation-options.ts 纯函数：整篇翻译的上下文拆段、输出预算、QPS 与版面检测设备（默认 100000/32768/16/cpu，配置校验）
   harness-translate.ts Harness 当前模型的只读适配：agentDefaultModel + llm；临时 127.0.0.1 OpenAI 端点供 BabelDOC，任务结束即关闭，不读写 Harness 凭据
   babeldoc-install.ts 纯函数：无 Python 环境时自动安装 babeldoc（uv → 托管 Python → venv）
   translate-selection.ts 纯函数：划词翻译（公式保留——行内公式与 MinerU 块文本对齐还原、提示词契约、逐公式保全校验、内存 LRU）

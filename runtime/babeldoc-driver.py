@@ -19,6 +19,10 @@
   DPR_MAX_OUTPUT_TOKENS  单次请求的 max_tokens 上限，默认 32768；0 = 不传该参数
   DPR_SPLIT_TOKENS       触发拆分的输入上限（估算 token），默认 100000
   DPR_OPENCODE_SESSION   OpenCode Go 的稳定会话 ID；设置后每次 LLM 请求都带 x-opencode-session
+  DPR_ONNX_DEVICE        版面检测（DocLayout-YOLO ONNX）的推理设备：
+                         cpu=不干预，维持 babeldoc 原行为（上游只挑 CPU provider）；
+                         dml=DirectML、cuda=CUDA、auto=按可用性挑（先 CUDA 后 DML）。
+                         运行时缺对应 provider 或 session 建不起来时如实回落 CPU 并打日志。
   DPR_DEBUG=1            额外把补丁动作打到 stderr
 """
 
@@ -54,7 +58,7 @@ def emit(payload: dict) -> None:
 
         _STDOUT_LOCK = threading.Lock()
     try:
-        line = PREFIX + " " + json.dumps(payload, ensure_ascii=False) + "\n"
+        line = PREFIX + " " + json.dumps({"ts": round(time.time(), 3), **payload}, ensure_ascii=False) + "\n"
         with _STDOUT_LOCK:
             sys.stdout.write(line)
             sys.stdout.flush()
@@ -83,6 +87,7 @@ def _env_int(name: str, default: int) -> int:
 MAX_OUT = _env_int("DPR_MAX_OUTPUT_TOKENS", 32768)
 SPLIT_TOKENS = max(200, _env_int("DPR_SPLIT_TOKENS", 100000))
 OPENCODE_SESSION = os.environ.get("DPR_OPENCODE_SESSION", "").strip()
+LAYOUT_DEVICE = (os.environ.get("DPR_ONNX_DEVICE", "") or "cpu").strip().lower()
 DEBUG = os.environ.get("DPR_DEBUG", "") not in ("", "0", "false", "False")
 REPORT_MIN_INTERVAL = 0.35  # 进度事件最小间隔（秒），别把 stdout 刷爆
 
@@ -363,14 +368,77 @@ def install_translation() -> None:
     return stats
 
 
+# --------------------------------------------------------------------------
+# 补丁 3：版面检测走 GPU（可选；DPR_ONNX_DEVICE）
+# babeldoc 的 docvision/doclayout.py 出于稳定性只挑 CPU provider（macOS 除外，
+# CoreML 自动启用），所以装了 onnxruntime-gpu/directml 也只会在 CPU 上推理。
+# 这里按用户显式要求替换 provider 列表；GPU 建不起来就如实退回 CPU，不留半开状态。
+# 注意 babeldoc 逐页推理（batch=1），GPU 吃不满，收益见 docs/evidence/gpu-layout-detection.md。
+# --------------------------------------------------------------------------
+_GPU_PROVIDER_BY_DEVICE = {
+    "cuda": "CUDAExecutionProvider",
+    "dml": "DmlExecutionProvider",
+}
+
+
+def resolve_layout_providers() -> list:
+    """把 DPR_ONNX_DEVICE 折算成 provider 列表；空列表 = 维持 babeldoc 原行为。
+
+    - cpu/未设置：不干预（含 macOS——上游自己会切 CoreML 静态输入路径）。
+    - auto：先 CUDA 后 DirectML，装了哪个用哪个；都没有就回 CPU。
+    - cuda/dml：点名后端；对应运行时没装就如实回落 CPU 并打日志。
+    """
+    if LAYOUT_DEVICE in ("", "cpu"):
+        return []
+    try:
+        import onnxruntime
+    except Exception as exc:
+        note(f"DPR_ONNX_DEVICE={LAYOUT_DEVICE} but onnxruntime import failed ({exc!r}); staying on CPU")
+        return []
+    available = list(onnxruntime.get_available_providers())
+    if LAYOUT_DEVICE == "auto":
+        wanted = [p for p in ("CUDAExecutionProvider", "DmlExecutionProvider") if p in available]
+    else:
+        wanted = [p for p in (_GPU_PROVIDER_BY_DEVICE.get(LAYOUT_DEVICE, ""),) if p in available]
+    if not wanted:
+        note(f"DPR_ONNX_DEVICE={LAYOUT_DEVICE} requested but no GPU provider available ({available}); falling back to CPU")
+        return []
+    note(f"layout detection will use {wanted} (DPR_ONNX_DEVICE={LAYOUT_DEVICE})")
+    return wanted + ["CPUExecutionProvider"]
+
+
+def install_layout_device(providers: list) -> None:
+    if not providers:
+        return
+    import onnxruntime
+
+    real_session = onnxruntime.InferenceSession
+
+    def patched_session(*args, **kwargs):
+        # babeldoc 传进来的 providers 恒为 CPU-only；这里整体替换成 GPU 优先列表。
+        # session 创建失败（驱动/CUDA DLL 缺失等）→ 退回 CPU 原样重试，别把翻译拖死。
+        try:
+            return real_session(*args, **{**kwargs, "providers": providers})
+        except Exception as exc:
+            note(f"GPU InferenceSession failed ({exc!r}); falling back to CPU")
+            return real_session(*args, **{**kwargs, "providers": ["CPUExecutionProvider"]})
+
+    onnxruntime.InferenceSession = patched_session
+    if DEBUG:
+        note(f"layout device patch installed ({providers})")
+
+
 def main() -> int:
     _reconfigure_streams()
-    emit({"kind": "driver", "version": 1, "maxOutputTokens": MAX_OUT, "splitTokens": SPLIT_TOKENS})
+    layout_providers = resolve_layout_providers()
+    emit({"kind": "driver", "version": 1, "maxOutputTokens": MAX_OUT, "splitTokens": SPLIT_TOKENS,
+          "layoutDevice": LAYOUT_DEVICE or "cpu", "layoutProviders": layout_providers})
     import asyncio
 
     try:
         install_progress()
         install_translation()
+        install_layout_device(layout_providers)
     except Exception as exc:  # 补丁失败也要能翻：退回原版 babeldoc
         note(f"patch failed, falling back to plain babeldoc: {exc!r}")
 

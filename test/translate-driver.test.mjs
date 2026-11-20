@@ -139,3 +139,21 @@ test('D2: 配额谓词必须接入 tenacity，不能只定义不使用', () => {
   assert.match(driver, /retry_if_exception\(\s*lambda exc: isinstance\(exc, openai\.RateLimitError\) and not is_quota_exhausted\(exc\)\s*\)/)
   assert.doesNotMatch(driver, /retry_if_exception_type\(openai\.RateLimitError\)/, '不得退回无差别重试所有 429')
 })
+
+test('D3: 版面检测设备补丁——cpu 不干预、GPU 建不起如实回落、Node 侧必须接线', () => {
+  const driver = readFileSync(join(ROOT, '..', 'runtime', 'babeldoc-driver.py'), 'utf8')
+  // 默认（cpu）零行为变化：resolve 对 cpu 返回空列表，install 对空列表直接跳过
+  assert.match(driver, /if LAYOUT_DEVICE in \("", "cpu"\):\s*return \[\]/, 'cpu 必须维持 babeldoc 原行为（不装补丁）')
+  assert.match(driver, /def install_layout_device\(providers: list\) -> None:\s*\n\s*if not providers:\s*\n\s*return/)
+  // 点名后端缺运行时 / session 建不起来：如实回落 CPU（不许静默吞掉或半开）
+  assert.match(driver, /no GPU provider available.*falling back to CPU/, '缺 provider 必须写明回落 CPU')
+  assert.match(driver, /GPU InferenceSession failed.*falling back to CPU/, 'session 失败必须退回 CPU 原样重试')
+  // dml/cuda 两条通道都要有（改一头会直接「装了 GPU 却还在 CPU」）
+  assert.match(driver, /"cuda": "CUDAExecutionProvider"/)
+  assert.match(driver, /"dml": "DmlExecutionProvider"/)
+  // Node 侧接线：translate.ts 必须把 layoutDevice 传进驱动环境变量（断了就是静默 CPU）
+  const compiled = readFileSync(join(ROOT, '..', 'dist', 'translate.js'), 'utf8')
+  assert.match(compiled, /DPR_ONNX_DEVICE/, 'dist/translate.js 必须传 DPR_ONNX_DEVICE 给驱动子进程')
+  const options = readFileSync(join(ROOT, '..', 'dist', 'translation-options.js'), 'utf8')
+  assert.match(options, /layoutDevice/, 'options 序列化必须带 layoutDevice（旧配置由 sanitize 补默认）')
+})
