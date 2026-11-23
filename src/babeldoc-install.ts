@@ -330,6 +330,12 @@ async function pipInstallBabeldoc(py: string): Promise<void> {
  * 候补序:python3(macOS/Linux)→ python → py -3(Windows 官方 launcher)。
  * Windows 陷阱:商店的 python/python3「应用执行别名」是个弹商店的假 stub,
  * 跑 -c 会非零退出 → 探活自动跳过,零风险;真 Python(含商店正版)都过得了探活。
+ * 版本窗口 3.10 ≤ v < 3.14,两处上限硬事实(engine-smoke 2026-11-23 实证):
+ *   · 3.15:onnxruntime 没有 cp315 wheel,uv 解析直接 No solution,镜像兜底同样无解;
+ *   · 3.14:babeldoc 0.6.x 的 priority_thread_pool_executor 用了 CPython 私有 _WorkItem,
+ *     该签名 3.14 已变,import 即 TypeError。
+ * 超界 = 探活不过,自动落回托管 3.12(已知可用窗口)。放开上限前先确认 wheel 与
+ * babeldoc 都已兼容,并同步改 test/ci-flake-guards.test.mjs 的 W1 断言。
  * 返回 sys.executable 而非命令名,是怕 PATH 里的别名/同壳名误导 uv 的解析。
  * 用系统 Python 可省掉 ~30MB 托管 Python 的 GitHub 下载(国内慢且是超时第二根因);
  * DSH_PR_MANAGED_UV_ONLY=1 时跳过(CI 强制走托管下载链路)。
@@ -344,7 +350,7 @@ async function findSystemPython(): Promise<string | null> {
     const ok = await new Promise<boolean>((res) => {
       execFile(
         cmd,
-        [...pre, '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'],
+        [...pre, '-c', 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] < (3, 14) else 1)'],
         { timeout: 15_000 },
         (err) => res(!err),
       )
