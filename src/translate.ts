@@ -13,7 +13,7 @@ import { join, dirname, basename, extname, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { dshHome } from "./library.js";
-import { ensureBabeldoc } from "./babeldoc-install.js";
+import { ensureBabeldoc, ensureOnnxLayoutDevice } from "./babeldoc-install.js";
 import { isOpenCodeEndpoint, openCodeDriverEnv, openCodeSessionId } from "./opencode.js";
 import { DEFAULT_TRANSLATION_RUN_OPTIONS, type TranslationRunOptions } from "./translation-options.js";
 
@@ -259,6 +259,11 @@ async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: Tr
         if (task.cancelled || tasks.get(ref.pdfPath) !== task) return;
         if (!bin)
             throw new Error('找不到 babeldoc 可执行文件');
+        // 版面检测 GPU 运行时按需补装：用户显式选了 dml/auto 才动 venv（win32）。
+        // 失败如实 phase 提示并继续——驱动侧自动回落 CPU，翻译主流程不受影响。
+        // 注意给的是「与 babeldoc 同 venv 的 python」：PATH/用户自管的 babeldoc 不会被碰。
+        await ensureOnnxLayoutDevice(resolveDriverPython(bin), options.layoutDevice, setPhase, dshHome());
+        if (task.cancelled || tasks.get(ref.pdfPath) !== task) return;
         await launch(ref, dataDir, endpoint, bin, task, options);
     }
     catch (e) {
@@ -510,6 +515,9 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                     PYTHONIOENCODING: 'utf-8',
                     DPR_SPLIT_TOKENS: String(options.splitTokens),
                     DPR_MAX_OUTPUT_TOKENS: String(options.maxOutputTokens),
+                    // 版面检测推理设备：cpu=维持 babeldoc 原行为；dml/cuda/auto 交给驱动脚本
+                    // 换 GPU provider，运行时缺失时驱动会如实回落 CPU 并写日志。
+                    DPR_ONNX_DEVICE: options.layoutDevice ?? 'cpu',
                     ...openCodeDriverEnv(ep.baseUrl, ocSession),
                 },
                 windowsHide: true,

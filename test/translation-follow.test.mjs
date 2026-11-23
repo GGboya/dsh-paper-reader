@@ -203,14 +203,19 @@ printf '%%PDF-fake' > "$out/$stem.zh-CN.mono.pdf"
 })
 
 test('H8 翻译参数校验、默认值与端点切换持久化', async () => {
-  assert.deepEqual(OPT.sanitizeTranslationRunOptions(undefined), { splitTokens: 100000, maxOutputTokens: 32768, qps: 16 })
-  assert.deepEqual(OPT.sanitizeTranslationRunOptions({ splitTokens: -5, maxOutputTokens: 999999, qps: 0 }), { splitTokens: 200, maxOutputTokens: 32768, qps: 1 })
+  assert.deepEqual(OPT.sanitizeTranslationRunOptions(undefined), { splitTokens: 100000, maxOutputTokens: 32768, qps: 16, layoutDevice: 'cpu' })
+  assert.deepEqual(OPT.sanitizeTranslationRunOptions({ splitTokens: -5, maxOutputTokens: 999999, qps: 0 }), { splitTokens: 200, maxOutputTokens: 32768, qps: 1, layoutDevice: 'cpu' })
   assert.throws(() => OPT.validateTranslationRunOptions({ splitTokens: '3000' }), /单段上下文上限/)
   assert.throws(() => OPT.validateTranslationRunOptions({ qps: 0 }), /并发请求数/)
+  // 版面检测设备：大小写/空白归一；脏值 sanitize 回落 cpu、validate 拒绝
+  assert.equal(OPT.sanitizeTranslationRunOptions({ layoutDevice: ' DML ' }).layoutDevice, 'dml')
+  assert.equal(OPT.sanitizeTranslationRunOptions({ layoutDevice: 'gpu' }).layoutDevice, 'cpu')
+  assert.equal(OPT.validateTranslationRunOptions({ layoutDevice: 'auto' }).layoutDevice, 'auto')
+  assert.throws(() => OPT.validateTranslationRunOptions({ layoutDevice: 'gpu' }), /版面检测设备/)
   const home = mkdtempSync(join(tmpdir(), 'dpr-translation-options-'))
   try {
-    const options = await CFG.writeTranslateRunOptions({ splitTokens: 1800, maxOutputTokens: 4096, qps: 4 }, home)
-    assert.deepEqual(options, { splitTokens: 1800, maxOutputTokens: 4096, qps: 4 })
+    const options = await CFG.writeTranslateRunOptions({ splitTokens: 1800, maxOutputTokens: 4096, qps: 4, layoutDevice: 'dml' }, home)
+    assert.deepEqual(options, { splitTokens: 1800, maxOutputTokens: 4096, qps: 4, layoutDevice: 'dml' })
     await CFG.saveTranslateEndpoint({ baseUrl: 'https://example.invalid/v1', apiKey: 'k', model: 'm' }, { id: 'new', home })
     await CFG.selectTranslateEndpoint('harness', home)
     const store = await CFG.readTranslateEndpointStore(home)
@@ -238,7 +243,7 @@ case "$1" in
   --version) exit 0 ;;
   --help) echo "--no-watermark"; exit 0 ;;
 esac
-printf '%s' "{\\"split\\":\\"$DPR_SPLIT_TOKENS\\",\\"output\\":\\"$DPR_MAX_OUTPUT_TOKENS\\",\\"args\\":\\"$*\\"}" > "$DPR_TEST_OPTIONS_CAPTURE"
+printf '%s' "{\\"split\\":\\"$DPR_SPLIT_TOKENS\\",\\"output\\":\\"$DPR_MAX_OUTPUT_TOKENS\\",\\"device\\":\\"$DPR_ONNX_DEVICE\\",\\"args\\":\\"$*\\"}" > "$DPR_TEST_OPTIONS_CAPTURE"
 out=""
 files=""
 while [ "$#" -gt 0 ]; do
@@ -254,7 +259,7 @@ printf '%%PDF-fake' > "$out/$stem.zh-CN.mono.pdf"
     chmodSync(bin, 0o755)
     const started = await TR.startTranslation(
       ref, dataDir, { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'k', model: 'm' }, { onFinish: () => { finished = true } },
-      { splitTokens: 1800, maxOutputTokens: 4096, qps: 4 },
+      { splitTokens: 1800, maxOutputTokens: 4096, qps: 4, layoutDevice: 'dml' },
     )
     assert.equal(started.started, true)
     await until(() => existsSync(capture))
@@ -263,6 +268,7 @@ printf '%%PDF-fake' > "$out/$stem.zh-CN.mono.pdf"
     const seen = JSON.parse(readFileSync(capture, 'utf8'))
     assert.equal(seen.split, '1800')
     assert.equal(seen.output, '4096')
+    assert.equal(seen.device, 'dml', '版面检测设备必须随环境变量进入驱动子进程')
     assert.match(seen.args, /--qps 4(?: |$)/)
   } finally {
     if (oldEnsure === undefined) delete process.env.DPR_SKIP_ENGINE_ENSURE

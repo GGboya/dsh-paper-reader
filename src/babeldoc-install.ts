@@ -473,3 +473,146 @@ export function ensureBabeldoc(
   }
   return inflight
 }
+
+// ------------------ GPU 版面检测运行时（按需安装） ------------------
+
+/**
+ * 版面检测 GPU 运行时包名（按设备与平台）：
+ * - dml/auto + win32 → onnxruntime-directml（DirectML 通用 GPU，约 40MB，N/A/I 卡都能用）；
+ * - cuda → 不自动装：onnxruntime-gpu 需要系统级 CUDA + cuDNN（2~3GB），失败率高且排障难，
+ *   留给用户手动装（文档写明）；驱动侧对缺失如实回落 CPU；
+ * - 非 win32 → 不装：Linux 无 DirectML，macOS 上游已自动走 CoreML。
+ */
+export function layoutRuntimePackage(device: string, platform: NodeJS.Platform): string | null {
+  if (platform !== 'win32') return null
+  return device === 'dml' || device === 'auto' ? 'onnxruntime-directml' : null
+}
+
+/**
+ * 是否需要补装 DML 运行时。providers 为 null（探测不了）时一律不装——
+ * 宁可让驱动回落 CPU，也不在状态未知的 venv 上盲动。
+ * auto 已有任何 GPU provider（如用户手动装过 onnxruntime-gpu）就不装。
+ */
+export function needsDmlInstall(device: string, providers: string[] | null, platform: NodeJS.Platform): boolean {
+  if (layoutRuntimePackage(device, platform) === null) return false
+  if (providers === null) return false
+  if (device === 'auto' && providers.includes('CUDAExecutionProvider')) return false
+  return !providers.includes('DmlExecutionProvider')
+}
+
+/** venv 的 onnxruntime 可用 provider；起不了进程/没有 onnxruntime 时返回 null（不判成错误）。 */
+async function onnxProviders(py: string): Promise<string[] | null> {
+  try {
+    const out = await run(py, ['-c', 'import json, onnxruntime; print(json.dumps(onnxruntime.get_available_providers()))'], { timeout: 30_000 })
+    const parsed: unknown = JSON.parse(out.trim().split(/\r?\n/).pop() ?? 'null')
+    return Array.isArray(parsed) ? parsed.filter((p): p is string => typeof p === 'string') : null
+  } catch {
+    return null
+  }
+}
+
+// 结果缓存（进程内）：present/installed 跳过后续探测；安装失败也缓存——重试按翻译次数
+// 反复烧几分钟下载不值，重启进程即重试。探测失败（null）不缓存，下次翻译再探。
+const layoutRuntimeCache = new Map<string, 'present' | 'installed' | 'failed'>()
+
+// 单例：多论文并发翻译只跑一次安装，其余等待同一条 promise（并发 pip 会互踩文件锁）。
+let dmlInflight: Promise<'present' | 'installed' | 'skipped'> | null = null
+
+/**
+ * 按需确保 GPU 版面检测运行时（用户显式选了 dml/auto 才会真正动 venv）。
+ * - 已就位 → 'present'（零开销快速路径）；
+ * - 缺失 → uv 通道装 onnxruntime-directml（uv 建的 venv 没有 pip，主安装链同理走 uv；
+ *   官方源失败镜像续装；没有 uv 时 ensurepip 自举后 pip 走国内镜像）→ 复核 provider 后返回 'installed'；
+ * - 任何失败（网络/文件锁/装完 provider 仍缺）→ 如实 phase 提示 + 返回 'skipped'，
+ *   驱动侧自动回落 CPU，翻译主流程不受影响。
+ * 只对插件自管 venv 的 python（translate.ts resolveDriverPython 解析出的绝对路径）操作；
+ * PATH/miniconda 里的 babeldoc 不碰——那是用户自己的环境。
+ */
+export async function ensureOnnxLayoutDevice(
+  py: string | null,
+  device: string,
+  onPhase: PhaseFn,
+  home: string,
+): Promise<'present' | 'installed' | 'skipped'> {
+  // DPR_SKIP_ENGINE_ENSURE=1：受限环境/测试钩子，只跑现成引擎，别动 venv
+  if (process.env.DPR_SKIP_ENGINE_ENSURE === '1') return 'skipped'
+  if (!py || !existsSync(py)) return 'skipped'
+  const cacheKey = `${py}\u0000${device}`
+  const cached = layoutRuntimeCache.get(cacheKey)
+  if (cached === 'present' || cached === 'installed') return cached
+  if (cached === 'failed') {
+    onPhase('GPU 版面检测运行时此前安装失败，本次用 CPU 跑版面（重启后重试）…')
+    return 'skipped'
+  }
+  if (!dmlInflight) {
+    dmlInflight = (async (): Promise<'present' | 'installed' | 'skipped'> => {
+      const venvPy = py as string
+      const pkg = layoutRuntimePackage(device, process.platform)
+      if (!pkg) return 'skipped'
+      const providers = await onnxProviders(venvPy)
+      if (!needsDmlInstall(device, providers, process.platform)) {
+        if (providers && providers.includes('DmlExecutionProvider')) {
+          layoutRuntimeCache.set(cacheKey, 'present')
+          return 'present'
+        }
+        return 'skipped'
+      }
+      onPhase(`正在安装 GPU 版面检测运行时（${pkg}，约 40MB）…`)
+      const installViaUv = async (indexEnv: NodeJS.ProcessEnv, timeout: number): Promise<void> => {
+        const uv = await findUv(home)
+        if (!uv) throw new Error('uv 不可用')
+        await run(uv, ['pip', 'install', '--python', venvPy, pkg], { timeout, env: indexEnv })
+      }
+      const installViaPip = async (): Promise<void> => {
+        // uv 建的 venv 默认没有 pip：先 ensurepip 自举再镜像轮询
+        await run(venvPy, ['-m', 'ensurepip', '--upgrade'], { timeout: 5 * 60_000 })
+        let lastErr: unknown = null
+        for (const m of CN_MIRRORS) {
+          try {
+            await run(venvPy, [
+              '-m', 'pip', 'install', '--no-cache-dir', '--timeout', '120', '--retries', '3', '-i', m, pkg,
+            ], { timeout: 15 * 60_000 })
+            return
+          } catch (e) {
+            lastErr = e // 换下一个镜像；已装成功的包 pip 会跳过，重试是断点续传式的
+          }
+        }
+        throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+      }
+      try {
+        try {
+          // 两段式：首段按探速选源、10min 快速失败；官方源失败 → 镜像续装 15min（与主安装链同款）
+          const indexEnv = await pickIndexEnv()
+          await installViaUv(indexEnv, 10 * 60_000)
+        } catch (first) {
+          console.warn('[dsh-paper-reader] GPU 运行时官方/uv 通道失败，镜像续装:', first instanceof Error ? first.message : first)
+          onPhase(`正在安装 GPU 版面检测运行时（${pkg}，镜像通道续装）…`)
+          try {
+            await installViaUv({ UV_DEFAULT_INDEX: UV_MIRROR, UV_INDEX_URL: UV_MIRROR }, 15 * 60_000)
+          } catch (second) {
+            // uv 也没有（findUv 落空）→ venv 自举 pip 走国内镜像
+            await installViaPip()
+          }
+        }
+      } catch (e) {
+        console.warn('[dsh-paper-reader] GPU 版面检测运行时安装失败，本次回落 CPU:', e instanceof Error ? e.message : e)
+        onPhase('GPU 版面检测运行时安装失败，本次用 CPU 跑版面…')
+        layoutRuntimeCache.set(cacheKey, 'failed')
+        return 'skipped'
+      }
+      // 装完复核：provider 真的出现才算成功（不粉饰「pip 说装好了」）
+      const after = await onnxProviders(venvPy)
+      if (after?.includes('DmlExecutionProvider')) {
+        layoutRuntimeCache.set(cacheKey, 'installed')
+        return 'installed'
+      }
+      console.warn('[dsh-paper-reader] onnxruntime-directml 安装完成但 DmlExecutionProvider 未出现（驱动/系统不支持？），本次回落 CPU')
+      onPhase('GPU 版面检测运行时未生效，本次用 CPU 跑版面…')
+      layoutRuntimeCache.set(cacheKey, 'failed')
+      return 'skipped'
+    })().finally(() => {
+      dmlInflight = null
+    })
+  }
+  return dmlInflight
+}

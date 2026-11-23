@@ -139,3 +139,106 @@ test('D2: 配额谓词必须接入 tenacity，不能只定义不使用', () => {
   assert.match(driver, /retry_if_exception\(\s*lambda exc: isinstance\(exc, openai\.RateLimitError\) and not is_quota_exhausted\(exc\)\s*\)/)
   assert.doesNotMatch(driver, /retry_if_exception_type\(openai\.RateLimitError\)/, '不得退回无差别重试所有 429')
 })
+
+test('D3: 版面检测设备补丁——cpu 不干预、GPU 建不起如实回落、Node 侧必须接线', () => {
+  const driver = readFileSync(join(ROOT, '..', 'runtime', 'babeldoc-driver.py'), 'utf8')
+  // 默认（cpu）零行为变化：resolve 对 cpu 返回空列表，install 对空列表直接跳过
+  assert.match(driver, /if LAYOUT_DEVICE in \("", "cpu"\):\s*return \[\]/, 'cpu 必须维持 babeldoc 原行为（不装补丁）')
+  assert.match(driver, /def install_layout_device\(providers: list\) -> None:\s*\n\s*if not providers:\s*\n\s*return/)
+  // 点名后端缺运行时 / session 建不起来：如实回落 CPU（不许静默吞掉或半开）
+  assert.match(driver, /no GPU provider available.*falling back to CPU/, '缺 provider 必须写明回落 CPU')
+  assert.match(driver, /GPU InferenceSession failed.*falling back to CPU/, 'session 失败必须退回 CPU 原样重试')
+  // dml/cuda 两条通道都要有（改一头会直接「装了 GPU 却还在 CPU」）
+  assert.match(driver, /"cuda": "CUDAExecutionProvider"/)
+  assert.match(driver, /"dml": "DmlExecutionProvider"/)
+  // Node 侧接线：translate.ts 必须把 layoutDevice 传进驱动环境变量（断了就是静默 CPU）
+  const compiled = readFileSync(join(ROOT, '..', 'dist', 'translate.js'), 'utf8')
+  assert.match(compiled, /DPR_ONNX_DEVICE/, 'dist/translate.js 必须传 DPR_ONNX_DEVICE 给驱动子进程')
+  const options = readFileSync(join(ROOT, '..', 'dist', 'translation-options.js'), 'utf8')
+  assert.match(options, /layoutDevice/, 'options 序列化必须带 layoutDevice（旧配置由 sanitize 补默认）')
+})
+
+/* ---------- D4: 版面检测设备的降级契约（python 跑不了就 skip） ----------
+ * 覆盖四类机器形态，断言「原有功能不受影响」：
+ *   ① 默认/未设置/cpu —— 补丁完全不装（零行为变化）
+ *   ② 用户选了 dml/auto 但机器没有 GPU 运行时 —— 如实回落 CPU（[]），不抛、不粉饰
+ *   ③ 运行时在但 GPU 会话建不起来 —— 退回 CPU 原样重试成功
+ *   ④ 真有 GPU 的机器 —— resolve 要么给合法列表（GPU 优先 + CPU 兜底在末位）
+ * onnxruntime 缺席（CI 无 GPU 机器）时 ①② 仍可全跑：resolve 捕获 ImportError 回落 CPU。
+ */
+const PY2 = `
+import importlib.util, json, sys, os, types
+DRIVER = ${JSON.stringify(join(ROOT, '..', 'runtime', 'babeldoc-driver.py'))}
+_seq = [0]
+
+def load_driver(env):
+    for k in ("DPR_ONNX_DEVICE",):
+        os.environ.pop(k, None)
+    for k, v in env.items():
+        os.environ[k] = v
+    _seq[0] += 1
+    spec = importlib.util.spec_from_file_location(f"dpr_dev_{_seq[0]}", DRIVER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+def case(name, fn):
+    try: print(json.dumps({"name": name, "ok": True, "value": fn()}, ensure_ascii=False))
+    except Exception as e: print(json.dumps({"name": name, "ok": False, "err": str(e)}, ensure_ascii=False))
+
+case("default_no_patch", lambda: load_driver({}).resolve_layout_providers())
+case("cpu_no_patch", lambda: load_driver({"DPR_ONNX_DEVICE": "cpu"}).resolve_layout_providers())
+
+stub = types.ModuleType("onnxruntime")
+stub.get_available_providers = lambda: ["CPUExecutionProvider"]
+class _FakeSession:
+    def __init__(self, *a, **kw):
+        p = kw.get("providers")
+        if p and p != ["CPUExecutionProvider"]:
+            raise RuntimeError("simulated GPU driver failure")
+        self.used = p or []
+        self.args = a
+stub.InferenceSession = _FakeSession
+sys.modules["onnxruntime"] = stub
+case("dml_missing_runtime_falls_back", lambda: load_driver({"DPR_ONNX_DEVICE": "dml"}).resolve_layout_providers())
+case("auto_missing_runtime_falls_back", lambda: load_driver({"DPR_ONNX_DEVICE": "auto"}).resolve_layout_providers())
+case("cuda_missing_runtime_falls_back", lambda: load_driver({"DPR_ONNX_DEVICE": "cuda"}).resolve_layout_providers())
+
+stub.get_available_providers = lambda: ["DmlExecutionProvider", "CPUExecutionProvider"]
+m5 = load_driver({"DPR_ONNX_DEVICE": "dml"})
+case("dml_resolves_when_present", lambda: m5.resolve_layout_providers())
+m5.install_layout_device(["DmlExecutionProvider", "CPUExecutionProvider"])
+sess = sys.modules["onnxruntime"].InferenceSession(b"fake-model", providers=["CPUExecutionProvider"])
+case("gpu_session_fail_retries_cpu", lambda: {"used": sess.used, "cls": sess.__class__.__name__})
+
+sys.modules.pop("onnxruntime", None)
+r = load_driver({"DPR_ONNX_DEVICE": "dml"}).resolve_layout_providers()
+case("real_env_contract", lambda: r == [] or (r[-1] == "CPUExecutionProvider" and r[0] in ("DmlExecutionProvider", "CUDAExecutionProvider")))
+`
+
+test('D4: 版面检测设备降级契约——无 GPU/缺运行时/会话失败都不影响原有翻译', { skip: runPython('1') === null && '本机无 python：驱动为发行件，CI 三平台自带 python 兜住' }, () => {
+  const r = runPython(PY2)
+  assert.ok(r, 'python 可用性前后一致；若这里翻红说明 python 中途消失')
+  const cases = Object.fromEntries(r.out.trim().split('\n').map((l) => {
+    const j = JSON.parse(l)
+    assert.ok(j.ok, `用例 ${j.name} 抛异常: ${j.err}`)
+    return [j.name, j.value]
+  }))
+  // ① 默认零行为变化：不装补丁
+  assert.deepEqual(cases.default_no_patch, [], '未设置 DPR_ONNX_DEVICE 时不干预（babeldoc 原行为）')
+  assert.deepEqual(cases.cpu_no_patch, [], '显式 cpu 时不干预')
+  // ② 无 GPU 机器 + 用户开了 dml/auto/cuda：如实回落，翻译照常
+  assert.deepEqual(cases.dml_missing_runtime_falls_back, [], '选了 dml 但没装运行时必须回落 CPU 而不是炸')
+  assert.deepEqual(cases.auto_missing_runtime_falls_back, [], 'auto 在无 GPU 机器必须回落 CPU')
+  assert.deepEqual(cases.cuda_missing_runtime_falls_back, [], 'cuda 在无 CUDA 机器必须回落 CPU')
+  // ③ GPU 会话建不起来：退回 CPU 原样重试，不留半开状态
+  {
+    const dml = cases.dml_resolves_when_present
+    assert.deepEqual(dml, ['DmlExecutionProvider', 'CPUExecutionProvider'], '运行时在位时 dml 解析成 GPU 优先列表')
+    const fb = cases.gpu_session_fail_retries_cpu
+    assert.equal(fb.cls, '_FakeSession')
+    assert.deepEqual(fb.used, ['CPUExecutionProvider'], 'GPU 失败后必须用 CPU 列表原样重试成功')
+  }
+  // ④ 真实环境（有 GPU / 无 onnx / 只有 CPU）：契约成立，永不抛
+  assert.equal(cases.real_env_contract, true, '真实环境 resolve 要么空列表要么 GPU 优先 + CPU 兜底')
+})
