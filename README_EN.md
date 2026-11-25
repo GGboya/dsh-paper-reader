@@ -13,7 +13,7 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 
 ## Why
 
-1. **A growing paper library gets messy fast.** Organize papers into topics and subtopics, with each paper's PDF, translations, notes, and study progress kept together. Rename, move, or delete papers from one place — deletions can be recovered from the trash.
+1. **A growing paper library gets messy fast.** Organize papers into topics and subtopics, with each paper's PDF, translations, notes, and study progress kept together. Rename, move, or delete papers from one place, and restore deleted ones from the trash in the sidebar.
 2. **Translation should not interrupt reading.** No copying paragraphs into another app: Chinese is generated directly on the original PDF layout — Chinese-only, bilingual, split-view, and selection translation, formulas included.
 3. **AI answers need verifiable evidence.** Answers cite page numbers that jump straight to the highlighted source. Ask about one paper or an entire topic, so fluent answers never leave you searching for the evidence yourself.
 
@@ -71,14 +71,14 @@ dsh plugin --profile web add @ggboy123/dsh-paper-reader@latest   # same command 
 
 1. **Enter**: click "📚 Paper Reading" at the bottom of the sidebar (click again to restore)
 2. **Add papers**: ＋ create a topic → ⬆ upload PDFs
-3. **Read + ask**: just ask (answers cite pages), or select text for a pop-up question; click "page N" to jump back
+3. **Read + ask**: just ask (answers cite pages), or select text for a pop-up question; click "page N" to jump back; each paper remembers where you stopped reading
 4. **Chinese version**: the "中" button generates a translation; configure a dedicated translation model under **Settings → Paper Reader → Translation model** only when needed
-5. **Manage**: hover a row and open **⋯** to rename inline (Enter saves, Esc cancels), move a paper to another topic, or delete; 🕐 in the chat header shows history, ＋ starts a new chat
+5. **Manage**: hover a row and open **⋯** to rename inline (Enter saves, Esc cancels), move a paper to another topic, or delete (deleted papers go to the trash — the trash button at the top of the sidebar restores them or deletes them forever); 🕐 in the chat header shows history, ＋ starts a new chat
 
 ## Data & safety
 
 - Everything is a local file: the library defaults to `~/.dsh-paper-reader/data` (configurable in the profile); the plugin's own endpoint credentials live in `$DSH_HOME/.dsh-paper-reader/` (mode 0600, masked in the UI)
-- Deletion = **moved to trash** `data/.trash/` (with a manifest; move files back to recover); it handles every artifact of the paper: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, `.notes.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is not deleted
+- Deletion = **moved to trash** `data/.trash/` (with a manifest; the trash button at the top of the sidebar restores entries or deletes them forever); it handles every artifact of the paper: `<paper>.pdf`, `.txt`, `.pages.json`, `.transcript.json`, `.mineru.md`, `.mineru.json`, `.embeddings.json`, `.study.json`, `.notes.json`, plus translation variants `<paper>-en.pdf` / `-zh.pdf` / `-dual.pdf` (including leftover `.tmp-*`); chat history is not deleted
 - Papers with a running session or an in-flight translation are refused up front; path traversal is rejected and mid-way failures roll back
 
 ## Contributing

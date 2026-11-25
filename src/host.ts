@@ -32,14 +32,18 @@ import {
   planTopicClear,
   deletePaper,
   deleteTopic,
+  emptyTrash,
   isManageError,
+  listTrash,
   movePaper,
   planPaperDelete,
   planTopicDelete,
+  purgeTrashItem,
   realDataDir,
   renamePaper,
   renameTopic,
   resolveTopicDir,
+  restoreTrashItem,
   validateName,
   validateTopicPath,
   type TopicClearPaperPlan,
@@ -1093,6 +1097,67 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
           if (!libFail(res, err)) throw err
         }
       })
+      return
+    }
+
+    /* ── 回收站：列表 / 恢复 / 彻底删除 / 清空 ─────────────────────────────
+       删除只是把文献移进 data/.trash/；这里是界面上看得到、点得动的入口。
+       实现全部在 library-manage（listTrash / restoreTrashItem / purgeTrashItem / emptyTrash）：
+       条目只认 id（`<包名>` 或 `<包名>/<子目录名>`），原专题与论文名一律以清单 + 磁盘现状为准。
+       恢复回来的论文目录与删除前同路径 ⇒ 会话 id（内嵌 topic/name）重新对上，
+       历史伴读会话随之回到它名下（会话本体删除时本来就没动）。 */
+    if (sub === '/api/library/trash' && req.method === 'GET') {
+      try {
+        json(res, 200, listTrash(dataDir))
+      } catch (err) {
+        if (!libFail(res, err)) throw err
+      }
+      return
+    }
+
+    if (sub === '/api/library/trash/restore' && req.method === 'POST') {
+      const body = (await readBody(req)) as { id?: unknown }
+      try {
+        const r = restoreTrashItem(dataDir, body.id)
+        // 目录是新建的 ⇒ 指向旧目录的工作区缓存作废，下次建会话时重新注册
+        dropWorkspaceCache(r.topic)
+        let sessions = { total: 0, running: 0 }
+        if (r.kind === 'paper' && r.name !== null) {
+          // 与侧栏树同一份口径（GET /api/sessions）：归档的、被顶替的空白会话不算——
+          // 提示里说的「N 个历史对话重新挂回」必须和用户接着在树上看到的数量一致。
+          const visible = await listPaperSessions({ topic: r.topic, name: r.name })
+          sessions = { total: visible.length, running: visible.filter((s) => s.running).length }
+        }
+        json(res, 200, { ...r, sessions })
+      } catch (err) {
+        if (!libFail(res, err)) throw err
+      }
+      return
+    }
+
+    // 彻底删除不可恢复：必须由用户在回收站里显式确认（前端走 ConfirmDelete）
+    if (sub === '/api/library/trash/purge' && req.method === 'POST') {
+      const body = (await readBody(req)) as { id?: unknown }
+      try {
+        json(res, 200, purgeTrashItem(dataDir, body.id))
+      } catch (err) {
+        if (!libFail(res, err)) throw err
+      }
+      return
+    }
+
+    // 清空回收站同样不可恢复：confirm=empty-trash 是**必需**的（与迁移的 confirm 栅栏同一口径）
+    if (sub === '/api/library/trash/empty' && req.method === 'POST') {
+      const body = (await readBody(req)) as { confirm?: unknown }
+      if (body.confirm !== 'empty-trash') {
+        json(res, 400, { error: '需要 confirm=empty-trash 才允许清空回收站（不可恢复）', code: 'confirm-mismatch' })
+        return
+      }
+      try {
+        json(res, 200, emptyTrash(dataDir))
+      } catch (err) {
+        if (!libFail(res, err)) throw err
+      }
       return
     }
 

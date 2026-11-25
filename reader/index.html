@@ -1015,6 +1015,70 @@ let pageMode = localStorage.getItem('dpr.pageMode') === 'paged' ? 'paged' : 'scr
 // 当前页：paged 是唯一渲染依据；scroll 由 IntersectionObserver 跟随回写（模式切换/跳页共享）
 let curPage = 1;
 
+/* ================= 阅读位置记忆（按篇） =================
+   每篇论文记住「读到哪」：切走再切回、关掉重开，都接着上次的位置，而不是每次从第一页开始。
+   存 `dpr.page.<专题>/<论文名>` = { p: 视口顶端所在页, r: 页内比例 }——与语言版本记忆（dpr.variant.）一样，
+   是按篇的本地记忆；论文/专题改名时由宿主一并搬家（lib/client.js migrateLsKeys）。
+   · 什么时候记：换文献的那一刻（openPaper 开头——此时上一篇还在屏上，位置最准）+ 页面卸载 / 转后台。
+     阅读器不可见时（悬浮层收起、高度 0）**不写**：那时滚动位置不可信，不能拿它覆盖掉好数据。
+   · 怎么恢复：openPaper 没带跳转页码时按记忆定位（带了页码 = 引文跳转，以跳转为准）。
+     翻页模式首帧直接画在那一页；滚动模式等首帧画完再瞬时定位（不平滑、不闪烁）。
+     首帧因悬浮层隐藏被跳过时先留着，等补画（rerender）时再落地。 */
+const posKey = (topic, name) => `dpr.page.${topic}/${name}`;
+function readPos(topic, name) {
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem(posKey(topic, name)) || 'null'); } catch { return null; }
+  if (!v || !Number.isInteger(v.p) || v.p < 1) return null;
+  return { p: v.p, r: Number.isFinite(v.r) ? Math.min(Math.max(v.r, 0), 0.99) : 0 };
+}
+/** 此刻的阅读位置。滚动模式取「视口顶端所在页 + 页内比例」（比观察器回写的 curPage 更准，也不依赖它的时机）；
+ *  翻页模式只有页号。分屏取原文列。 */
+function livePos() {
+  const a = pageMode === 'paged' ? null : anchorOf(columnPages($('pdf-pages')), $('pdf-pane').scrollTop);
+  return { p: a ? a.page : curPage, r: a ? Math.min(Math.max(a.ratio, 0), 0.99) : 0 };
+}
+function savePosNow() {
+  if (!current || !pdfDoc || openingPaper || !current.topic || !current.name) return;
+  if (pageMode !== 'paged' && $('pdf-pane').clientHeight === 0) return; // 不可见：滚动位置不可信
+  try { localStorage.setItem(posKey(current.topic, current.name), JSON.stringify(livePos())); } catch { /* 隐私模式：记不住不影响阅读 */ }
+}
+/** 待落地的阅读位置 { key, p, r }：首帧画完后消费；首帧被隐藏跳过、或页节点还没画出来时，
+ *  留到下一次渲染完成（rerender 的 done）再消费。key = 所属论文，换了论文就作废，不会错落到别的论文上。 */
+let pendingRestore = null;
+const samePaper = (key) => !!current && key === `${current.topic}/${current.name}`;
+function consumeRestore() {
+  const r = pendingRestore;
+  if (!r) return;
+  if (!samePaper(r.key)) { pendingRestore = null; return; }
+  if (!pdfDoc) return;
+  // 翻页模式：openPaper 已经把首帧画在记忆的那一页上，这里只需销账——
+  // 不许再改 curPage（首帧被隐藏跳过的那段时间里用户可能已经翻过页，那才是他要去的地方）
+  if (pageMode === 'paged') { pendingRestore = null; updatePager(); return; }
+  const pane = $('pdf-pane');
+  if (pane.clientHeight === 0) return; // 还不可见：留着，等补画
+  const p = Math.min(Math.max(1, r.p), pdfDoc.numPages);
+  const node = origPageNode(p);
+  if (!node) return; // 页节点还没画出来：留着，下一次渲染完成再试
+  pendingRestore = null;
+  pane.scrollTop = node.offsetTop + r.r * node.offsetHeight;
+  if (lazyView) void ensureLazyPage(p);
+  // 分屏：另一列按「同一页号 + 同一页内比例」跟过来
+  const src = splitCols()[0];
+  if (viewMode === 'split' && src) alignSplit(src);
+  updatePager();
+}
+window.addEventListener('pagehide', savePosNow);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') savePosNow(); });
+/** 阅读过程中顺手落盘（节流）：滚动停顿 / 翻页后 400ms 内写一次。只求「存档永远是最近的」——
+ *  切走的那一刻才写是靠不住的：万一那时阅读器恰好没有布局（悬浮层还没撑开）就写不了，
+ *  有了这一层，最坏也只丢最后一下滚动。不可见时 savePosNow 自己会跳过。 */
+let posSaveTimer = 0;
+function schedulePosSave() {
+  if (posSaveTimer) return;
+  posSaveTimer = setTimeout(() => { posSaveTimer = 0; try { savePosNow(); } catch { /* 记不住不影响阅读 */ } }, 400);
+}
+$('pdf-pane').addEventListener('scroll', schedulePosSave, { passive: true });
+
 /* ================= 打开文献 ================= */
 function pdfUrl(variant) {
   const q = `topic=${encodeURIComponent(current.topic)}&name=${encodeURIComponent(current.name)}`;
@@ -1032,6 +1096,7 @@ function syncTranscribeButton() {
 
 async function openPaper(topic, name, opts = {}) {
   if (!name) return;
+  savePosNow(); // 先记住上一篇读到哪——必须在 current 换人、页节点清空之前
   exitScannedView();
   openingPaper = true;
   // P2：打开/切换文献后先留出静默窗，别让译文预取在这段里挤进来
@@ -1052,7 +1117,11 @@ async function openPaper(topic, name, opts = {}) {
   if (oldPaperDoc) await destroyPdfDoc(oldPaperDoc);
   $('pdf-pages').innerHTML = '';
   localStorage.setItem('dpr.last', JSON.stringify(current));
-  curPage = opts.page || 1; // 换论文从第一页（或跳转目标页）开始；变体切换/重译不走这里，页码保持
+  // 没带跳转页码 = 普通打开 / 切换 ⇒ 接着上次读到的位置；带了页码（引文跳转）以跳转为准。
+  // 变体切换 / 重译不走这里，页码保持。
+  const resume = opts.page ? null : readPos(topic, name);
+  pendingRestore = resume ? { ...resume, key: `${topic}/${name}` } : null;
+  curPage = opts.page || (resume ? resume.p : 1);
   $('status').textContent = '加载 PDF…';
   const q = `topic=${encodeURIComponent(topic)}&name=${encodeURIComponent(name)}`;
   const meta = await api('/paper?' + q);
@@ -1117,6 +1186,7 @@ async function openPaper(topic, name, opts = {}) {
     }
   }
   if (opts.page) jumpTo(opts.page, opts.q); // 不 await：跳转内部自带「等页面渲出来」轮询
+  else consumeRestore(); // 接着上次读到的位置（首帧没画出来时它会先留着，等补画再落地）
   openingPaper = false;
   syncTranscribeButton();
   schedulePreload();
@@ -3544,6 +3614,7 @@ function rerender() {
   const done = () => {
     try { findReapply(); } catch { /* 高亮是装饰，失败不影响阅读 */ }
     try { notesReapply(); } catch { /* 同上 */ }
+    consumeRestore(); // 阅读位置：首帧画完 / 补画完，在这里落地（没 pending 时是空操作）
   };
   const useLazy = pageMode === 'scroll' && pdfDoc && pdfDoc.numPages >= LAZY_MIN_PAGES;
   const p = (viewMode === 'split'
@@ -3896,6 +3967,7 @@ function updatePager() {
   if (document.activeElement !== input) input.value = total ? curPage : '';
   $('page-prev').disabled = pageMode === 'paged' && curPage <= 1;
   $('page-next').disabled = pageMode === 'paged' && curPage >= total;
+  schedulePosSave(); // 页码变了（翻页 / 滚动跨页 / 跳转）：顺手把阅读位置落盘
 }
 
 /** 跳到第 n 页（夹取）：paged 重渲单页+闪烁；scroll 平滑滚到该页。 */

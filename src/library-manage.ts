@@ -4,12 +4,14 @@
 //   · 写路径**只接受** topic + name（不接受 path），逐条做路径穿越防护；
 //   · 删除 = 精确 stem 匹配的产物清单，**移入 `<dataDir>/.trash/`**（可恢复），
 //     移动失败绝不回退 unlink，`.pdf` 最后移（失败时文献仍在库里可见可用）；
+//   · 回收站可列出 / 恢复 / 彻底删除（见文末「回收站」一节）：恢复 = 整个论文目录一次
+//     rename 回原专题，原位置被占就 409、一个字节不动；只有用户显式「彻底删除」才真 unlink；
 //   · 删除专题只允许空目录，非递归语义（rmdir），隐藏条目进回收站而不是销毁；
 //   · 重命名先校验全部前提再动手，中途失败 best-effort 回滚。
 //
 // 本模块不依赖 Cordis，可直接被测试 import（dist/library-manage.js）。
 
-import { lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync, existsSync } from 'node:fs'
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync, existsSync, type Dirent } from 'node:fs'
 // 共享的**边界原语**（上游 #4 的路径穿越修复，逐字保留在 library.ts）：
 // validateEntryName / validateEntryBoundary / realDataDir / assertInside。
 // 注意口径（评审 F-F）：组合层**两套并存**——生产写路径用本模块的 resolveTopicDirChecked
@@ -57,6 +59,12 @@ export type ManageCode =
   // 契约 §5 R5 的并发互斥机器码字面为 `in-progress`；实现统一用更简洁的 `busy`（语义一致），
   // 已在 host.ts 的 withInflight 注释与前端 errText 对齐。见 src/host.ts。
   | 'busy'
+  // 回收站：条目不能一键恢复（缺清单 / 缺 PDF / 原专题位置不合法或建不出来）——409，什么都不动。
+  | 'restore-blocked'
+  // 回收站恢复中途失败且部分文件没能放回：如实点名（极少数，只有旧版平铺条目逐个搬时才可能）。
+  | 'restore-partial'
+  // 回收站彻底删除未完成（文件被占用等）：如实报出没删掉的条目。
+  | 'trash-purge-failed'
 
 /** HTTP 状态与机器可读 code 双携带；`extra` 会并入响应体（前端只认 code，不匹配中文）。 */
 export class ManageError extends Error {
@@ -1064,6 +1072,528 @@ export function clearTopic(dataDir: string, topic: unknown, renameImpl: RenameIm
       },
     )
   }
+}
+
+// ── 回收站：列表 / 恢复 / 彻底删除 ──────────────────────────────────────────
+//
+// 回收站的每个直接子目录是一个「包」（bundle），由三处写入、外加旧版插件，形状不同：
+//   · deletePaper ：`<包>/<论文名>/<文件>`，包根与论文名子目录各有一份清单（kind:'paper'，带 trashSubdir）；
+//   · clearTopic  ：每个专题单元一个包，每篇论文一个子目录（各带清单）；专题目录里的隐藏条目
+//                   （.DS_Store 等）平放在包根，包根清单 kind:'topic-clear' | 'subtree-clear'；
+//   · deleteTopic ：只有隐藏条目平放在包根，清单 kind:'topic-hidden'；
+//   · 旧版插件    ：论文的文件直接平放在包根，清单 kind:'paper'、没有 trashSubdir。
+// 对外统一成「条目」：一篇论文一条（kind:'paper'）；包里不属于任何论文的其余内容合并成一条
+// （kind:'other'——能认出原专题的可以恢复回去，没有清单的只能彻底删除）。
+//
+// 条目 id = `<包名>` 或 `<包名>/<子目录名>`，**只当定位符**：恢复 / 彻底删除一律重新读盘判定，
+// 原专题、论文名以清单 + 磁盘现状为准，不信客户端传来的任何名字。
+//
+// 不变量：
+//   · 只动 `.trash` 直接子目录里经 lstat 确认是**真目录**的包；符号链接只移 / 只删链接本身，绝不跟随；
+//   · 恢复 = 整个论文目录一次 rename（与库同文件系统，原子）；原位置已被占用 ⇒ 409，一个字节不动；
+//   · 恢复出来的必须是 listPapers 认得的论文目录（`<论文名>.pdf` 在里面），否则 409 restore-blocked；
+//   · 日常只有我们自己写的 manifest.json 会被 unlink；真删用户文件只发生在用户显式「彻底删除」时，
+//     且只作用于回收站内。
+
+/** 不能一键恢复的原因（机器码；文案由服务端给，前端按 code 分支）。 */
+export type TrashBlock = 'no-manifest' | 'incomplete' | 'bad-topic' | 'bad-name'
+
+export interface TrashPaperItem {
+  kind: 'paper'
+  id: string
+  /** 原专题路径（相对 dataDir） */
+  topic: string
+  name: string
+  /** 恢复后的位置（相对 dataDir）：`<专题>/<论文名>` */
+  target: string
+  deletedAt: string | null
+  files: number
+  totalBytes: number
+  /** 非空 = 不能一键恢复的原因；null = 可以恢复 */
+  blocked: TrashBlock | null
+}
+
+export interface TrashOtherItem {
+  kind: 'other'
+  id: string
+  /** 清单里记下的原专题；没有清单时为 null（无法一键恢复） */
+  topic: string | null
+  deletedAt: string | null
+  files: number
+  totalBytes: number
+  blocked: TrashBlock | null
+}
+
+export type TrashItem = TrashPaperItem | TrashOtherItem
+
+/** 列表里**只有相对信息**（条目 id、专题路径、论文名、数量、体量），绝不带服务端绝对路径。 */
+export interface TrashListing {
+  items: TrashItem[]
+  count: number
+  totalBytes: number
+}
+
+export interface TrashRestoreResult {
+  ok: true
+  id: string
+  kind: 'paper' | 'other'
+  topic: string
+  /** 论文条目 = 论文名；其它条目 = null */
+  name: string | null
+  /** 论文条目恢复后的目录（相对 dataDir）；其它条目 = null */
+  dirRel: string | null
+  /** 原专题目录已经不在、本次恢复把它重建了 */
+  topicRecreated: boolean
+}
+
+export interface TrashEmptyResult {
+  ok: true
+  /** 删掉的包数 */
+  purged: number
+  /** 没能删掉的包（只给包名与 errno，不给绝对路径） */
+  failed: Array<{ id: string; cause: string }>
+}
+
+/** 条目的内部形态：比对外多出「要搬 / 要删的绝对路径」。 */
+interface TrashEntry {
+  item: TrashItem
+  /** 包名（`.trash` 下的直接子目录名） */
+  bundle: string
+  /** 论文子目录的绝对路径；null = 论文文件平放在包根（旧版布局）或其它条目 */
+  sub: string | null
+  /** 这个条目占用的路径（恢复 / 彻底删除的作用对象；不含我们自己的清单文件） */
+  sources: string[]
+  /** 我们写在论文子目录里的那份清单（整目录恢复前要先摘掉） */
+  ownManifest: string | null
+}
+
+interface TrashManifest {
+  kind: string
+  topic: string | null
+  name: string | null
+  deletedAt: string | null
+  trashSubdir: string | null
+  papers: Array<{ rel?: unknown; name?: unknown }> | null
+}
+
+function readManifest(file: string): TrashManifest | null {
+  let raw: unknown
+  try {
+    if (!lstatSync(file).isFile()) return null
+    const text = readFileSync(file, 'utf8')
+    raw = text.length > 1_000_000 ? null : JSON.parse(text)
+  } catch {
+    return null // 没有 / 读不了 / 不是 JSON：一律当「没有清单」
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const o = raw as Record<string, unknown>
+  if (typeof o.kind !== 'string') return null
+  const str = (k: string): string | null => (typeof o[k] === 'string' && o[k] ? (o[k] as string) : null)
+  return {
+    kind: o.kind,
+    topic: str('topic'),
+    name: str('name'),
+    deletedAt: str('deletedAt'),
+    trashSubdir: str('trashSubdir'),
+    papers: Array.isArray(o.papers)
+      ? (o.papers.filter((p) => p && typeof p === 'object') as Array<{ rel?: unknown; name?: unknown }>)
+      : null,
+  }
+}
+
+const errnoCode = (err: unknown): string => (err as NodeJS.ErrnoException | null)?.code ?? 'unknown'
+
+function isRegularFile(file: string): boolean {
+  try { return lstatSync(file).isFile() } catch { return false }
+}
+
+/**
+ * 一个路径的体量：递归求和，符号链接只按 lstat 计一个条目、**绝不跟随**（防成环与读到库外）。
+ * `skipTop` 只对第一层生效（用来排除我们自己写的清单）。返回 [条目数, 字节数]。
+ */
+function measurePath(abs: string, skipTop?: (name: string) => boolean): [number, number] {
+  let files = 0
+  let bytes = 0
+  const walk = (p: string, top: boolean) => {
+    let st: ReturnType<typeof lstatSync>
+    try { st = lstatSync(p) } catch { return }
+    if (!st.isDirectory() || st.isSymbolicLink()) { files++; bytes += st.size; return }
+    let entries: Dirent[]
+    try { entries = readdirSync(p, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      if (top && skipTop?.(e.name)) continue
+      walk(join(p, e.name), false)
+    }
+  }
+  walk(abs, true)
+  return [files, bytes]
+}
+
+/**
+ * 原专题还能不能作为恢复目标：
+ *   · 专题目录还在 ⇒ 必须是库内的真目录（符号链接 / 真实路径异常 / 越界都不行），且路径上不夹论文目录；
+ *   · 专题目录已不在 ⇒ 恢复时要重建，所以再按**创建侧**的命名规范过一遍——建得出来的才是列表里看得见的专题；
+ *     已存在的祖先段同样必须是库内真目录。
+ * 返回 null = 可以；否则是原因码。
+ */
+function topicBlock(dataDir: string, topic: string): TrashBlock | null {
+  let path: string
+  try { path = validateTopicPath(topic, true) } catch { return 'bad-topic' }
+  const root = realDataDir(dataDir)
+  const segs = path.split('/')
+  // 祖先里夹着论文目录 ⇒ 论文放进去会从列表 / 树里消失（listPapers 在论文目录处停止递归）
+  if (paperDirAncestor(root, segs)) return 'bad-topic'
+  const dir = join(root, ...segs)
+  let st: ReturnType<typeof lstatSync> | null = null
+  try { st = lstatSync(dir) } catch { st = null }
+  if (st) {
+    if (st.isSymbolicLink() || !st.isDirectory()) return 'bad-topic'
+    try {
+      if (realpathSync(dir) !== dir) return 'bad-topic'
+      assertInside(root, dir)
+    } catch { return 'bad-topic' }
+    return null
+  }
+  try { validateTopicPath(path, false) } catch { return 'bad-topic' }
+  for (let i = 1; i < segs.length; i++) {
+    const partial = segs.slice(0, i).join('/')
+    if (!existsSync(join(root, ...segs.slice(0, i)))) break
+    if (topicBlock(dataDir, partial) !== null) return 'bad-topic'
+  }
+  return null
+}
+
+function paperBlock(dataDir: string, topic: string, name: string, pdf: string): TrashBlock | null {
+  try { validateEntryBoundary(name, 'paper') } catch { return 'bad-name' }
+  if (topicBlock(dataDir, topic) !== null) return 'bad-topic'
+  // 缺 PDF 的目录恢复回去不会被认成论文（会变成一个「子专题」）⇒ 不恢复，如实说
+  return isRegularFile(pdf) ? null : 'incomplete'
+}
+
+/** 读一个包，拆成条目。包读不了（竞态 / 权限）⇒ 当空包。 */
+function scanBundle(dataDir: string, trashRoot: string, bundle: string): TrashEntry[] {
+  const bundleAbs = join(trashRoot, bundle)
+  const rootManifest = readManifest(join(bundleAbs, 'manifest.json'))
+  let entries: Dirent[]
+  try { entries = readdirSync(bundleAbs, { withFileTypes: true }) } catch { return [] }
+  // ① 认出论文子目录：自己的清单 / 包根清单的 trashSubdir / 清空清单的 papers[].rel
+  const claimed = new Set<string>()
+  const papers: Array<{ dir: string; topic: string; name: string; deletedAt: string | null }> = []
+  for (const e of entries) {
+    // Dirent.isDirectory() 对符号链接为 false ⇒ 链接目录不会被当成论文目录（进「其它」条目，只动链接本身）
+    if (!e.isDirectory()) continue
+    const sub = readManifest(join(bundleAbs, e.name, 'manifest.json'))
+    if (sub?.kind === 'paper' && sub.topic && sub.name) {
+      papers.push({ dir: e.name, topic: sub.topic, name: sub.name, deletedAt: sub.deletedAt })
+    } else if (rootManifest?.kind === 'paper' && rootManifest.topic && rootManifest.name
+      && (rootManifest.trashSubdir === e.name || rootManifest.name === e.name)) {
+      papers.push({ dir: e.name, topic: rootManifest.topic, name: rootManifest.name, deletedAt: rootManifest.deletedAt })
+    } else if (rootManifest && (rootManifest.kind === 'topic-clear' || rootManifest.kind === 'subtree-clear')
+      && rootManifest.topic && rootManifest.papers) {
+      const p = rootManifest.papers.find((x) => x && x.rel === e.name)
+      if (!p || typeof p.name !== 'string' || !p.name) continue
+      papers.push({ dir: e.name, topic: rootManifest.topic, name: p.name, deletedAt: rootManifest.deletedAt })
+    } else {
+      continue
+    }
+    claimed.add(e.name)
+  }
+  const out: TrashEntry[] = []
+  for (const p of papers) {
+    const subAbs = join(bundleAbs, p.dir)
+    const ownManifest = join(subAbs, 'manifest.json')
+    const hasOwn = isRegularFile(ownManifest)
+    const [files, totalBytes] = measurePath(subAbs, (n) => hasOwn && n === 'manifest.json')
+    out.push({
+      item: {
+        kind: 'paper', id: `${bundle}/${p.dir}`, topic: p.topic, name: p.name, target: `${p.topic}/${p.name}`,
+        deletedAt: p.deletedAt, files, totalBytes, blocked: paperBlock(dataDir, p.topic, p.name, join(subAbs, p.name + '.pdf')),
+      },
+      bundle, sub: subAbs, sources: [subAbs], ownManifest: hasOwn ? ownManifest : null,
+    })
+  }
+  // ② 其余：不属于任何论文的东西（包根清单是我们自己的簿记文件，不算内容）
+  const loose = entries.filter((e) => !claimed.has(e.name) && !(e.isFile() && e.name === 'manifest.json'))
+  if (loose.length === 0) return out
+  const sources = loose.map((e) => join(bundleAbs, e.name))
+  let files = 0
+  let totalBytes = 0
+  for (const s of sources) {
+    const [f, b] = measurePath(s)
+    files += f
+    totalBytes += b
+  }
+  if (papers.length === 0 && rootManifest?.kind === 'paper' && rootManifest.topic && rootManifest.name) {
+    // 旧版布局：论文的文件直接平放在包根（没有论文名子目录）
+    const { topic, name, deletedAt } = rootManifest
+    out.push({
+      item: {
+        kind: 'paper', id: bundle, topic, name, target: `${topic}/${name}`, deletedAt, files, totalBytes,
+        blocked: paperBlock(dataDir, topic, name, join(bundleAbs, name + '.pdf')),
+      },
+      bundle, sub: null, sources, ownManifest: null,
+    })
+    return out
+  }
+  const topic = rootManifest?.topic ?? null
+  out.push({
+    item: {
+      kind: 'other', id: bundle, topic, deletedAt: rootManifest?.deletedAt ?? null, files, totalBytes,
+      blocked: topic === null ? 'no-manifest' : topicBlock(dataDir, topic),
+    },
+    bundle, sub: null, sources, ownManifest: null,
+  })
+  return out
+}
+
+/** 包里只剩我们自己的清单（或已空）⇒ 收掉；回收站根随之空了也一并收掉。全部 best-effort，失败不影响结果。 */
+function pruneBundle(trashRoot: string, bundleAbs: string): void {
+  try {
+    const left = readdirSync(bundleAbs)
+    if (left.length === 0) {
+      rmdirSync(bundleAbs)
+    } else if (left.length === 1 && left[0] === 'manifest.json' && isRegularFile(join(bundleAbs, 'manifest.json'))) {
+      rmSync(join(bundleAbs, 'manifest.json'), { force: true })
+      rmdirSync(bundleAbs)
+    } else {
+      return
+    }
+    try { rmdirSync(trashRoot) } catch { /* 非空：回收站里还有别的条目 */ }
+  } catch { /* 还有别的东西 / 权限 / 占用：留着无害 */ }
+}
+
+/** 回收站根：不存在 ⇒ null；不是库内的真目录（符号链接 / 被换成文件）⇒ 拒绝，绝不把库外内容当回收站。 */
+function trashRootChecked(dataDir: string): string | null {
+  const trashRoot = join(realDataDir(dataDir), TRASH_DIR)
+  let st: ReturnType<typeof lstatSync> | null = null
+  try { st = lstatSync(trashRoot) } catch { st = null }
+  if (!st) return null
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new ManageError('escape-rejected', 400, '回收站目录异常，已拒绝操作')
+  try {
+    if (realpathSync(trashRoot) !== trashRoot) throw new ManageError('escape-rejected', 400, '回收站目录异常，已拒绝操作')
+  } catch (err) {
+    throw isManageError(err) ? err : new ManageError('escape-rejected', 400, '回收站目录异常，已拒绝操作')
+  }
+  return trashRoot
+}
+
+/** 回收站条目 id = `<包名>` 或 `<包名>/<子目录名>`：每段都必须是单个目录名（非空、不是 `.`/`..`、不含分隔符与 NUL）。 */
+function parseTrashId(raw: unknown): { bundle: string; sub: string | null } {
+  const bad = () => new ManageError('bad-request', 400, '回收站条目 id 非法')
+  if (typeof raw !== 'string' || !raw || raw.length > 600) throw bad()
+  const parts = raw.split('/')
+  if (parts.length > 2) throw bad()
+  // 论文名里其它字符原样允许——能删进回收站的就要能从回收站操作
+  for (const p of parts) if (!p || p === '.' || p === '..' || p.length > 255 || /[\u0000\\]/.test(p)) throw bad()
+  return { bundle: parts[0]!, sub: parts.length === 2 ? parts[1]! : null }
+}
+
+/** `abs` 必须是 `parentReal` 里的直接真目录（不是符号链接、真实路径与字面一致）。 */
+function assertBundleDir(parentReal: string, abs: string, label: string): void {
+  let st: ReturnType<typeof lstatSync> | null = null
+  try { st = lstatSync(abs) } catch { st = null }
+  if (!st) throw new ManageError('not-found', 404, `回收站条目不存在：${label}`)
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new ManageError('escape-rejected', 400, '回收站条目不是普通目录，已拒绝操作')
+  let real: string
+  try { real = realpathSync(abs) } catch { throw new ManageError('not-found', 404, `回收站条目不存在：${label}`) }
+  if (real !== abs) throw new ManageError('escape-rejected', 400, '回收站条目真实路径异常，已拒绝操作')
+  assertInside(parentReal, abs)
+}
+
+/** 按 id 重新读盘定位条目：id 非法 400、不存在 404、不是库内真目录 400；返回的条目与列表同源同判定。 */
+function resolveTrashEntry(dataDir: string, id: unknown): TrashEntry {
+  const { bundle, sub } = parseTrashId(id)
+  const trashRoot = trashRootChecked(dataDir)
+  if (!trashRoot) throw new ManageError('not-found', 404, '回收站条目不存在（可能已被恢复或删除）')
+  assertBundleDir(trashRoot, join(trashRoot, bundle), bundle)
+  if (sub) assertBundleDir(trashRoot, join(trashRoot, bundle, sub), `${bundle}/${sub}`)
+  const entry = scanBundle(dataDir, trashRoot, bundle).find((x) => x.item.id === id)
+  if (!entry) throw new ManageError('not-found', 404, '回收站条目不存在（可能已被恢复或删除）')
+  return entry
+}
+
+function blockedError(item: TrashItem): ManageError {
+  const reason: TrashBlock = item.blocked ?? 'no-manifest'
+  const what = item.kind === 'paper' ? `「${item.name}」` : '该条目'
+  const message = reason === 'no-manifest' ? '该条目没有清单，无法确定原来的位置，不能一键恢复（可以彻底删除，或到回收站目录手动处理）'
+    : reason === 'incomplete' ? `回收站里的${what}缺少 PDF，恢复后不会被识别为文献`
+    : reason === 'bad-name' ? `${what}的名字不合法，不能一键恢复`
+    : `原专题「${item.topic ?? ''}」的位置不合法或已删除且无法重建，不能一键恢复`
+  return new ManageError('restore-blocked', 409, message, { id: item.id, reason })
+}
+
+/** 占用类 errno ⇒ 409 file-busy（可执行文案）；其它原样上抛，由 host 的 errno 通道给固定文案（不回显路径）。 */
+function moveError(err: unknown, tail: string): unknown {
+  const code = errnoCode(err)
+  if (code === 'EBUSY' || code === 'EPERM') {
+    return new ManageError('file-busy', 409, `文件被占用（可能正在阅读器或其他程序中打开），关闭后重试；${tail}`, { cause: code })
+  }
+  return err
+}
+
+/**
+ * 把一批条目逐个 rename 进**已存在**的 `destDir`；任一失败 ⇒ 倒序搬回原处再抛。
+ * 回滚也失败的留在目标里，如实点名（restore-partial）——绝不静默、绝不谎报「未生效」。
+ */
+function moveEach(sources: string[], destDir: string, renameImpl: RenameImpl, tail: string): void {
+  const moved: Array<{ from: string; to: string }> = []
+  try {
+    for (const src of sources) {
+      const to = join(destDir, basename(src))
+      renameImpl(src, to)
+      moved.push({ from: src, to })
+    }
+  } catch (err) {
+    const rollbackFailed: string[] = []
+    for (const m of [...moved].reverse()) {
+      try { renameImpl(m.to, m.from) } catch { rollbackFailed.push(basename(m.to)) }
+    }
+    if (rollbackFailed.length > 0) {
+      throw new ManageError('restore-partial', 500,
+        `恢复未完成：${rollbackFailed.length} 个文件未能放回回收站，留在恢复目标里：${rollbackFailed.join('、')}`,
+        { rollbackFailed, cause: errnoCode(err) })
+    }
+    throw moveError(err, tail)
+  }
+}
+
+/** 回收站清单：只含相对信息，按删除时间倒序（时间不明的排最后；同一时刻论文在前）。没有回收站 = 空清单。 */
+export function listTrash(dataDir: string): TrashListing {
+  const trashRoot = trashRootChecked(dataDir)
+  const items: TrashItem[] = []
+  if (trashRoot) {
+    for (const e of readdirSync(trashRoot, { withFileTypes: true })) {
+      // 只认真目录（符号链接 / 散落文件不列；清空回收站时一并清掉）
+      if (!e.isDirectory()) continue
+      const abs = join(trashRoot, e.name)
+      const found = scanBundle(dataDir, trashRoot, e.name)
+      // 只剩我们自己的清单 / 已空的包：顺手收掉，不给用户留看不见的「空记录」
+      if (found.length === 0) pruneBundle(trashRoot, abs)
+      for (const x of found) items.push(x.item)
+    }
+  }
+  const at = (x: TrashItem) => (x.deletedAt && !Number.isNaN(Date.parse(x.deletedAt)) ? Date.parse(x.deletedAt) : -Infinity)
+  // 同一时刻进来的（一次清空专题）论文在前、「其它」条目在后：用户要找回的是论文，不是 .DS_Store
+  const rank = (x: TrashItem) => (x.kind === 'paper' ? 0 : 1)
+  items.sort((a, b) => at(b) - at(a) || rank(a) - rank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return { items, count: items.length, totalBytes: items.reduce((n, x) => n + x.totalBytes, 0) }
+}
+
+/**
+ * 恢复一个条目：
+ *   · 论文 = 整个论文目录一次 rename 回 `<专题>/<论文名>/`（旧平铺布局删掉的那篇也收进论文文件夹——新写入一律落文件夹）；
+ *   · 其它文件 = 各回原专题目录、原文件名。
+ * 全部前提先校验再动手：条目可恢复、原专题位置合法、目标没有被占（同名目录 / 同名文件 / 旧平铺产物 /
+ * 仅大小写不同的变体，与 movePaper 同口径）。任一不满足 ⇒ 409，一个字节都不动。
+ */
+export function restoreTrashItem(dataDir: string, id: unknown, renameImpl: RenameImpl = renameSync): TrashRestoreResult {
+  const entry = resolveTrashEntry(dataDir, id)
+  const { item, sub, sources } = entry
+  if (item.blocked || (item.kind === 'other' && item.topic === null)) throw blockedError(item)
+  const topicPath = validateTopicPath(item.topic, true)
+  const root = realDataDir(dataDir)
+  const trashRoot = join(root, TRASH_DIR)
+  const bundleAbs = join(trashRoot, entry.bundle)
+  const topicAbs = join(root, ...topicPath.split('/'))
+  let topicSt: ReturnType<typeof lstatSync> | null = null
+  try { topicSt = lstatSync(topicAbs) } catch { topicSt = null }
+  const topicRecreated = topicSt === null
+  // ── 全部前提先校验（走到这里为止还没改动任何东西）──
+  let targetDir: string | null = null // 论文条目：恢复后的论文目录
+  if (item.kind === 'paper') {
+    const name = validateEntryBoundary(item.name, 'paper')
+    targetDir = join(topicAbs, name)
+    let occupied = false
+    if (topicSt) { try { lstatSync(targetDir); occupied = true } catch { /* 不存在才可恢复 */ } }
+    const clashes = [...new Set([
+      ...(occupied ? [name] : []),
+      ...(topicSt ? flatArtifactNames(topicAbs, name) : []),
+      ...(topicSt ? caseVariantCollisions(topicAbs, name) : []),
+    ])]
+    if (clashes.length > 0) {
+      throw new ManageError('target-exists', 409,
+        `原专题已存在同名文献：${clashes.join('、')}，无法恢复；请先给现有文献改名或删除它`, { conflicts: clashes })
+    }
+    assertInside(root, targetDir)
+  } else {
+    // 其它文件：各回原文件名；原专题里已经有同名条目就不覆盖
+    const names = sources.map((s) => basename(s))
+    const conflicts = topicSt ? names.filter((n) => existsSync(join(topicAbs, n))) : []
+    if (conflicts.length > 0) {
+      throw new ManageError('target-exists', 409, `原专题已存在同名条目：${conflicts.join('、')}，无法恢复`, { conflicts })
+    }
+  }
+  // ── 动手 ──
+  try {
+    if (topicRecreated) mkdirSync(topicAbs, { recursive: true, mode: 0o700 })
+    if (item.kind === 'paper' && targetDir) {
+      if (sub) {
+        // 整个论文目录一次 rename（原子）；先摘掉我们写在里面的清单
+        if (entry.ownManifest) { try { rmSync(entry.ownManifest, { force: true }) } catch { /* 摘不掉也不影响恢复 */ } }
+        try { renameImpl(sub, targetDir) } catch (err) { throw moveError(err, '本次恢复未生效，文件仍在回收站') }
+      } else {
+        // 旧版布局：文件平放在包根 ⇒ 新建论文目录逐个搬进去；失败即回滚并收掉空目录
+        mkdirSync(targetDir, { mode: 0o700 })
+        try { moveEach(sources, targetDir, renameImpl, '本次恢复未生效，文件仍在回收站') } catch (err) {
+          try { rmdirSync(targetDir) } catch { /* 回滚失败时里面有文件：保留现场 */ }
+          throw err
+        }
+      }
+    } else {
+      moveEach(sources, topicAbs, renameImpl, '本次恢复未生效，文件仍在回收站')
+    }
+  } catch (err) {
+    // 没搬成 ⇒ 这次重建的专题目录若仍为空就收掉，库回到原样
+    if (topicRecreated) { try { rmdirSync(topicAbs) } catch { /* 非空：保留现场 */ } }
+    throw err
+  }
+  pruneBundle(trashRoot, bundleAbs)
+  return {
+    ok: true, id: item.id, kind: item.kind, topic: topicPath,
+    name: item.kind === 'paper' ? item.name : null,
+    dirRel: item.kind === 'paper' ? `${topicPath}/${item.name}` : null,
+    topicRecreated,
+  }
+}
+
+/**
+ * 彻底删除一个条目（用户在回收站里显式选择的操作，不可恢复）：
+ * 只删这个条目占用的路径；符号链接只删链接本身，绝不跟随到库外。
+ * 有条目没删掉 ⇒ 如实报出（占用类给 409 file-busy），不谎报成功。
+ */
+export function purgeTrashItem(dataDir: string, id: unknown): { ok: true; id: string } {
+  const entry = resolveTrashEntry(dataDir, id)
+  const trashRoot = join(realDataDir(dataDir), TRASH_DIR)
+  const failed: string[] = []
+  let cause: string | undefined
+  for (const src of entry.sources) {
+    try { rmSync(src, { recursive: true, force: true }) } catch (err) { failed.push(basename(src)); cause = errnoCode(err) }
+  }
+  pruneBundle(trashRoot, join(trashRoot, entry.bundle))
+  if (failed.length > 0) {
+    const busy = cause === 'EBUSY' || cause === 'EPERM'
+    throw new ManageError(busy ? 'file-busy' : 'trash-purge-failed', busy ? 409 : 500,
+      `彻底删除未完成：${failed.length} 个条目没能删除（${busy ? '文件可能正被占用，关闭后重试' : '没有权限或文件系统错误'}）：${failed.join('、')}`,
+      { failed, cause })
+  }
+  return { ok: true, id: entry.item.id }
+}
+
+/**
+ * 清空回收站：删掉 `.trash` 下的全部直接子条目（论文包、清单、散落文件都在内），
+ * 全部成功后把空的回收站根也收掉。单个包删不掉不挡其余的——如实列进 `failed`（只给包名与 errno）。
+ * 符号链接只删链接本身：链接指向的库外内容一个字节不动。
+ */
+export function emptyTrash(dataDir: string): TrashEmptyResult {
+  const trashRoot = trashRootChecked(dataDir)
+  if (!trashRoot) return { ok: true, purged: 0, failed: [] }
+  const failed: Array<{ id: string; cause: string }> = []
+  let purged = 0
+  for (const e of readdirSync(trashRoot, { withFileTypes: true })) {
+    try { rmSync(join(trashRoot, e.name), { recursive: true, force: true }); purged++ } catch (err) { failed.push({ id: e.name, cause: errnoCode(err) }) }
+  }
+  if (failed.length === 0) { try { rmdirSync(trashRoot) } catch { /* 非空 / 占用：留着无害 */ } }
+  return { ok: true, purged, failed }
 }
 
 // ── 重命名 ──────────────────────────────────────────────────────────────────

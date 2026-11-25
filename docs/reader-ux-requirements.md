@@ -267,7 +267,7 @@ REJECT otherwise
 正例/反例（**验收必须覆盖**）：删 `Attention` 不得删 `Attention Is All You Need.pdf` / `Attention2.pdf` / `Attention-zh.txt`（不存在的后缀不猜）；删 `X-zh` 这种名字要能删掉（虽然 `isPaperPDF` 会让它不出现在库里——**重命名时必须禁止把新名取成 `-en/-zh/-dual` 结尾**，见 §2.5 S12）。
 
 **不该删（白名单外一律不动）**：
-- `<dataDir>/.venv-pdf2zh/`（babeldoc 共享 venv，多篇文献共用；`src/translate.ts:55-65` 的候选路径）。**绝不删。**
+- `<dataDir>` **同级**的 `.venv-pdf2zh/`（babeldoc 共享 venv，多篇文献共用；即 `dirname(dataDir)/.venv-pdf2zh`，`src/babeldoc-install.ts` 的安装位、`src/translate.ts` findBabeldoc 的第一候选。**不在 `data/` 里面**）。**绝不删。**
 - `<dataDir>/.pdf2zh-tmp/`（共享翻译草稿目录，`src/translate.ts:187`）。**默认不删**（别的文献可能正在用；且删除中的文献若有进行中翻译本来就会被 409 拦下）。可选优化：仅当**全库无进行中翻译**时清理以 `<name>.` 开头的文件——标记为可选。
 - 别的文献的任何文件（含同前缀不同 stem）。
 - 专题目录本身（见 C9：不自动删专题目录）。
@@ -300,7 +300,8 @@ REJECT otherwise
    - **失败即回滚**：先把本次已移动的文件 `rename` 回原位（rename，不是 unlink），`rollbackFailed` 非空时必须如实列出并降级文案；
    - **错误响应只回相对 `trashRel`**（+ 文件名），**不**带绝对路径；绝对 `trashDir` 只出现在 **200 成功响应**（O4 裁定：成功响应里那是刻意的恢复线索）。
 5. 本轮**不做自动清理**（回收站不设过期）；`.trash` 不会被 `listTopics`/`listPapers` 看到（隐藏目录）。
-6. 恢复：本轮只提供**文档化的人工恢复**（把文件从 `.trash/…/` 移回专题目录即可）。一键恢复 UI = 后续可选项。
+6. 恢复：**2026-11-25 起有界面入口**——侧栏头部的「回收站」按钮（列表 / 恢复 / 彻底删除 / 清空），契约见 §2.10。
+   此前「只提供文档化的人工恢复、界面留作后续可选项」的决定至此作废；人工恢复（把文件从 `.trash/…/` 移回专题目录）仍然有效。
    【决策 + 源码证据：`listTopics` 跳过 `.` 开头目录】
 
 ## 2.5 重命名 / 移动 —— 范围结论
@@ -382,7 +383,7 @@ dry-run，给确认弹窗用。
   "totalBytes": 7950000, "trashDir": "<dataDir>/.trash",
   "sessions":{"total":2,"running":0},
   "translation":{"busy":false,"hasZh":false,"hasDual":false},
-  "notDeleted":["伴读会话历史（dsh 侧保存，不删）","<dataDir>/.venv-pdf2zh（共享翻译环境）","专题目录本身"]
+  "notDeleted":["伴读会话历史（dsh 侧保存，不删）","<dataDir> 同级的 .venv-pdf2zh（共享翻译环境）","专题目录本身"]
 }
 404 文献不存在 · 400 名称非法/越界(`escape-rejected`)
 ```
@@ -507,6 +508,47 @@ dry-run，给确认弹窗用。
 
 **阅读器侧（`reader/index.html`）的文案目前是中文硬编码**（无 i18n，`#bar` 的按钮 title 等）——新增的公式 UI 沿用中文硬编码，**不要**为此引入 i18n 框架（超范围）。【源码证据：`reader/index.html` 无 i18n 机制】
 
+## 2.10 回收站界面（2026-11-25 增补）
+
+**起因**：删除的确认框写着「可恢复」，但界面上没有任何入口——用户不知道回收站在哪、怎么恢复（维护者本人也没找到）。
+§2.4 第 6 条（界面留作后续可选项）的旧决定至此作废。
+
+**入口**：侧栏文献库头部的回收站按钮（`data-dpr-trash-btn`，与 ⬆ / ＋ / ⟳ 同一排）。回收站里有内容时按钮带数量角标
+（`data-dpr-trash-count`），空回收站只是图标；删除成功的提示里同时指路。
+
+**面板**（页内 portal 弹窗；Electron 渲染进程没有 `window.confirm`）：逐条列出「论文名 / 原专题 / 文件数 / 体量 / 删除时间」，
+每条两个操作——**恢复**、**彻底删除**；底部**清空回收站**。
+
+**条目模型**（实现：`src/library-manage.ts` 文末「回收站」一节）：回收站的每个直接子目录是一个「包」，三种来源外加旧版布局，形状不同——
+单篇删除（`<包>/<论文名>/`）、清空专题（每个专题单元一个包、每篇一个子目录、隐藏条目平放在包根）、删除专题带走的隐藏条目、
+旧版插件把文件直接平放在包根。对外统一成条目：**一篇论文一条**（`kind:'paper'`），包里不属于任何论文的其余内容合并成一条
+（`kind:'other'`：能认出原专题的可恢复，没有清单的只能彻底删除）。
+条目 id = `<包名>` 或 `<包名>/<子目录名>`，**只当定位符**：恢复 / 彻底删除一律重新读盘，原专题与论文名以清单 + 磁盘现状为准，不信客户端。
+
+**接口**（都在 `/paper-reader/api/library/` 下）：
+
+| 方法 | 路径 | 语义 |
+|---|---|---|
+| GET | `/trash` | 清单 `{ items, count, totalBytes }`；只有相对信息，**绝无服务端绝对路径**；按删除时间倒序（同一时刻进来的论文在前、「其它」在后） |
+| POST | `/trash/restore` `{id}` | 恢复；200 `{ok,id,kind,topic,name,dirRel,topicRecreated,sessions}` |
+| POST | `/trash/purge` `{id}` | 彻底删除一条（不可恢复）；200 `{ok,id}` |
+| POST | `/trash/empty` `{confirm:'empty-trash'}` | 清空；缺 `confirm` ⇒ 400 `confirm-mismatch` 且一个字节不动；200 `{ok,purged,failed:[{id,cause}]}` |
+
+**恢复的语义与不变量**（`test/trash-bin.test.mjs` 守着）：
+
+1. 论文 = 整个论文目录一次 `rename` 回 `<专题>/<论文名>/`（与库同文件系统，原子）；旧平铺布局删掉的那篇也收进论文文件夹（新写入一律落文件夹）。
+2. 原专题还在 ⇒ 必须是库内真目录、路径上不夹论文目录；原专题已删 ⇒ 重建（专题名按创建侧规范再校验一次，建不出来就 `restore-blocked`），响应 `topicRecreated:true`。
+3. **不覆盖**：目标处已有同名目录 / 同名文件 / 旧平铺产物 / 仅大小写不同的变体 ⇒ 409 `target-exists`（与移动文献同一套碰撞预检，`conflicts` 点名），一个字节不动。
+4. 恢复出来的必须是 `listPapers` 认得的论文目录（`<论文名>.pdf` 在里面）⇒ 否则 409 `restore-blocked`。原因码 `reason`：`no-manifest` / `incomplete` / `bad-topic` / `bad-name`。
+5. 只动 `.trash` 直接子目录里经 `lstat` 确认是**真目录**的包；符号链接只移 / 只删链接本身，**绝不跟随**；`.trash` 根自己是符号链接 ⇒ 一律 400 `escape-rejected`。
+6. 日常只有我们自己写的 `manifest.json` 会被 unlink；真删用户文件只发生在用户显式「彻底删除 / 清空」时，且只作用于回收站内。这两步在 UI 上必须过 `ConfirmDelete`（`test/trash-bin.test.mjs` U1 守着）。
+7. 恢复回来的论文与删除前同路径 ⇒ 会话 id（内嵌 topic/name）重新对上，历史伴读会话回到它名下（响应 `sessions` 给数量，界面据此提示）。
+8. 失败如实：占用类 ⇒ 409 `file-busy`；清空时有包删不掉 ⇒ 其余照删、`failed` 逐个点名（只给包名与 errno）。
+
+**i18n**：回收站界面的文案键都以 `trash` 开头（`lib/client.js`），zh/en 对齐由 `test/reader-ux.test.mjs` 的 F1 守卫覆盖。
+
+**仍未做**：自动过期清理（回收站不设过期，需手动清空）。
+
 ---
 
 # 第 3 部分：给下游的可执行验收清单
@@ -568,7 +610,7 @@ dry-run，给确认弹窗用。
 **Out of scope（本轮明确不做）**：
 1. 公式切图预览（`imagesAvailable:false`，需要改转录落盘）。
 2. 跨专题移动文献（§2.5）。
-3. 回收站一键恢复 UI 与自动过期清理。
+3. ~~回收站一键恢复 UI~~（2026-11-25 已做，见 §2.10）与自动过期清理（仍未做：回收站不设过期，需手动清空）。
 4. 会话重命名 / 会话历史迁移（无 API）。
 5. `-zh`/`-dual` 视图的 bbox 重投影。
 6. 阅读器 i18n 框架化（阅读器侧保持中文硬编码）。

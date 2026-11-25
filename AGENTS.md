@@ -43,7 +43,8 @@ src/
   host.ts       webServer 路由（/paper-reader/*），connection.requestRejection 鉴权；
                 sessionController.create/prompt + follow SSE 桥（论文入口不默认套用 preset）
   library.ts    纯函数：文献库目录约定与解析（.txt/.pages.json/.transcript.json/.mineru.* 产物路径）
-  library-manage.ts 纯函数：删除/重命名/跨专题移动（回收站、精确 stem、路径穿越防护、批量清空）；嵌套专题边界（boundaryOnly 不查长度上限）、碰撞预检（论文目录祖先/平铺产物/大小写变体）
+  library-manage.ts 纯函数：删除/重命名/跨专题移动（回收站、精确 stem、路径穿越防护、批量清空）；嵌套专题边界（boundaryOnly 不查长度上限）、碰撞预检（论文目录祖先/平铺产物/大小写变体）；
+                文末「回收站」一节 = 列表/恢复/彻底删除/清空（条目只认 id 并重新读盘；恢复 = 整个论文目录 rename 回原专题，不覆盖、不跟随符号链接）
   migrate.ts    纯函数：旧平铺布局 → 按论文分文件夹迁移（干跑报告/先复制后删/幂等可复跑/按日志回滚；CLI 默认 dry-run、退出码契约、坏日志逐行显式报错）
   theme-config.ts 纯函数：PDF 深色模式配置（follow/off/light/dark + 四档强度 + brightness/contrast 滑杆，0600）
   scope.ts      纯函数：按范围提问（专题子树展开、正文+命中预算 40k 逐篇 coverage、同名 omitted-duplicate、cutToCodePoint re-export）
@@ -64,8 +65,10 @@ src/
   origin.ts     纯函数：从插件路由的 Host 头捕获 dsh web 服务外部地址（工具输出链接基址）
   opencode.ts   纯函数：OpenCode Go 端点识别 + x-opencode-session 稳定会话 ID（0600 secret 派生，scope 明文不落盘；非 opencode.ai 端点零行为变化）
 cordis.patch.yml      bundle 声明插件本体 + 可选「论文伴读」agent preset（dsh-agent-preset；persona 完整提示词 + compaction）
-reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）
-lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管) + PDF 页签 + 主面板
+reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）；按篇记住阅读位置 `dpr.page.<专题>/<论文名>`
+                      （换文献时存、首帧画完后恢复；带页码的打开 = 引文跳转，以跳转为准）
+lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管) + PDF 页签 + 主面板 + 回收站面板（入口 = 侧栏头部按钮）；
+                      侧栏树的可用高度是量出来的（顶层纯函数 dprTreeAvailableHeight：从插件根往上找裁切边界 → 给套在树外的容器限高 → 树自己滚、头部固定）
 ```
 
 ## 硬约定（都有测试守着，改了会红）
@@ -75,7 +78,10 @@ lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管)
   - README 里**每一个 `docs/...` 引用**都必须能解析到 git 已跟踪的文件（含 raw.githubusercontent URL 里的路径）。新增 docs 文件记得 `git add`，否则守卫直接红。
 - **文档内容守卫**：用户向细节（MinerU 配置/实测声明、嵌入隐私提示、划词翻译与分屏前提）归口在 `docs/features.md` / `docs/features_EN.md`，由 `library-clear-and-busy.test.mjs` C2、`embed-search.test.mjs` I1、`embed-verification.test.mjs` 4.2/10.2 守住——改这些事实声明时中英两份 docs 一起改。
 - **版本号守卫**（`library-clear-and-busy.test.mjs` C3）：README 必须出现 package.json 当前版本号，且不得残留其它 `vX.Y.Z` / `@X.Y.Z`。
+- **回收站守卫**（`test/trash-bin.test.mjs`）：恢复不覆盖/不越界/不跟随符号链接、彻底删除只作用于回收站内；界面上「彻底删除 / 清空」必须过确认框；两份 README 与两份 `docs/features*.md` 都必须交代回收站入口（不得再写「无一键恢复 UI」）。契约见 `docs/reader-ux-requirements.md` §2.10。
 - **部署校验器**会核对英文侧功能的正式命名（如 "**Click to cite a formula**"），改功能名时中英 README 一起改。
+- **按篇的本地记忆键**：阅读器新增 `dpr.<前缀>.<专题>/<论文名>` 形式的 localStorage 键时（现有 `dpr.variant.` 语言版本、`dpr.page.` 阅读位置；`dpr.sessionN.` 在宿主侧），必须同步加进 `lib/client.js` 的 `migrateLsKeys`（论文/专题改名时跟着搬家），由 `test/reader-resume-position.test.mjs` M1 守着；两份 README 与两份 `docs/features*.md` 都要写到「记住读到哪」。
+- **侧栏树滚动**（`test/sidebar-tree-scroll.test.mjs` + `reader-scanned-fallback.test.mjs` S5）：宿主不给侧栏槽确定高度，树的高度靠 `LibraryTree` 自己量（`treeMax`，量之前先撤掉限高做「探针」）。树元素本身保持 `style: S.treeScroll`；**不要再给树的滚动容器写 `overscroll-behavior: contain`**——树一旦不自己滚，它会把滚轮事件吞掉（2026-11-25「论文一多看不到下面的论文」的根因）。
 - 文档漂移是这个仓库历史上唯一的反复缺陷源——改代码行为时，同步检查 README / docs/features.md / 本文件。
 
 ## 设计原则（评审时按这个把关）
@@ -91,6 +97,7 @@ lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管)
 - 布局：专题可嵌套（`<专题>/<子专题>/…`，上限 16 层）；每篇论文的全部产物收进 `<专题>/<论文>/` 一个文件夹。旧平铺库**兼容读**（`listPapers` 带 `legacy: true`，同名时文件夹优先），新写入一律落论文文件夹；旧库由迁移工具收纳（`npm run migrate`，默认 dry-run）。
 - 文献产物命名：`<文献>.pdf/.txt/.pages.json/.transcript.json/.mineru.md/.mineru.json/.embeddings.json/.study.json/.notes.json`，译文变体 `<文献>-en.pdf/-zh.pdf/-dual.pdf`（中断残留 `.tmp-*`）。
 - 删除 = 移入 `data/.trash/<时间戳>/`（带 manifest，可手工恢复）；路径穿越（`..`/绝对路径/符号链接逃逸）一律拒绝；中途失败自动回滚。
+- 回收站有界面入口：侧栏头部按钮 → 列表 / 恢复 / 彻底删除 / 清空（`/paper-reader/api/library/trash*`，实现全在 `library-manage.ts`）。恢复只认条目 id、服务端重新读盘；回收站不自动清理。
 
 ## 功能细节文档
 
