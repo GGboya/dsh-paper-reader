@@ -134,10 +134,21 @@ import {
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse
 
+/** 准入 Peer 的最小视图：只用来证明「宿主已经做过准入判决」，不读取任何字段。 */
+type AdmittedPeer = { readonly signal?: AbortSignal }
+
 interface RouteSpec {
   kind: 'exact' | 'prefix'
   path: string
-  handler: (req: Req, res: Res) => void
+  /**
+   * dsh 0.2.3-alpha.2 起：路由准入策略。`required`（宿主默认值）= 进入 handler **之前**
+   * 必须由 `connection.authentication` 判决通过，并把准入 Peer 作为第三个参数传入；
+   * 没人判决时宿主返回 503、判决失败返回 401/403，handler 根本不会跑。
+   * 0.2.2-rc.x 的 WebServer 会忽略该字段（只把 route 原样存进 map），那时仍由
+   * `connection.requestRejection` 自行校验——见 `ConnectionLike` 的说明。
+   */
+  auth?: 'anonymous' | 'required' | 'deny'
+  handler: (req: Req, res: Res, peer?: AdmittedPeer) => void
 }
 type WebServer = { register: (spec: RouteSpec) => () => void }
 
@@ -168,10 +179,20 @@ interface SessionControllerLike {
   ): Promise<{ items: ReadonlyArray<{ sessionId: string; updatedAt: number; running: boolean; blank: boolean }> }>
 }
 
-/** dsh web 的连接服务：Host/Origin 围栏 + 浏览器会话认证（token → cookie）。 */
+/**
+ * dsh web 的连接服务：Host/Origin 围栏 + 浏览器会话认证（token → cookie）。
+ *
+ * 两个世代必须同时兼容（否则插件在新宿主上整条路由报废）：
+ *  - 0.2.2-rc.x：`requestRejection(req)` 同步校验，返回 401/403 或 undefined。
+ *  - 0.2.3-alpha.2 起：该方法**被删除**（官方 upgrade-guide「Token Provider 与路由准入迁移」：
+ *    Connection 移除 `requestRejection`，改用 `admit`；准入前移到 `webServer.register` 的
+ *    `auth` 策略，默认 `required`，由 `connection.authentication` 判决）。
+ *    此时 handler 通过第三个参数收到准入 Peer；拿不到 Peer 就说明没人做过判决，
+ *    必须 fail-closed，绝不能把「没有校验函数」当成放行。
+ */
 interface ConnectionLike {
-  /** undefined=放行；401/403=拒绝（与宿主 /api 通道同一套校验） */
-  requestRejection(req: Req): number | undefined
+  /** 0.2.2：undefined=放行；401/403=拒绝（与宿主 /api 通道同一套校验）。0.2.3 起不存在。 */
+  requestRejection?(req: Req): number | undefined
 }
 
 /** 工作区服务：专题目录注册为 dsh 工作区（幂等），让原生输入框可用（否则会话无工作区，composer 锁定）。 */
@@ -2141,12 +2162,31 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
     const dispose = ws.register({
       kind: 'prefix',
       path: '/paper-reader',
-      handler: (req, res) => {
+      // 显式声明准入要求：0.2.3 起宿主据此在**进入 handler 之前**完成认证（默认值也是它，
+      // 写出来是为了钉住契约）；0.2.2 的 register 只是把 route 存进 map，该字段无副作用。
+      auth: 'required',
+      handler: (req, res, peer) => {
         // 认证+Host 围栏（与宿主 /api 通道同一套校验）：插件路由不在宿主 index
         // 鉴权路径上，必须自己校验。本路由暴露 PDF 读取和会话注入，不能裸奔。
-        const rejection = connection.requestRejection(req)
+        //
+        // 这里**绝不能抛**：dsh-host-webserver 会把 handler 抛出的异常兜底成空 body 的
+        // 400（0.2.2-rc.5 第 481 行 / 0.2.3-alpha.2 第 525 行都是 `res.writeHead(400);
+        // res.end()`），前端 `r.json()` 解析失败后只能显示「HTTP 400」，真实原因全丢。
+        // 历史上 `connection.requestRejection` 在 0.2.3 被删除，正是一次 TypeError 把
+        // 整条 /paper-reader/* 变成「上传失败: HTTP 400」。
+        const legacyCheck = typeof connection?.requestRejection === 'function'
+        const rejection = legacyCheck ? connection!.requestRejection!(req) : undefined
         if (rejection !== undefined) {
           json(res, rejection, { error: rejection === 401 ? 'unauthorized' : 'forbidden' })
+          return
+        }
+        // 新宿主：有准入 Peer = 网关已判决通过；没有 = 没人判决过（旧测试壳 / 未挂
+        // authentication provider），fail-closed 并给出可读原因，而不是静默放行。
+        if (!legacyCheck && peer === undefined) {
+          json(res, 503, {
+            error: '宿主未完成路由准入：dsh 0.2.3+ 需要 authentication provider，旧版本需要 connection.requestRejection',
+            code: 'unauthenticated',
+          })
           return
         }
         // 借浏览器请求的 Host 头记录服务 origin（工具结果里的 readerUrl 链接基址靠它拼）
