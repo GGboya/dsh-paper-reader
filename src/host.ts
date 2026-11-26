@@ -65,6 +65,7 @@ import {
 import { MineruError, sanitizeDetail } from './mineru.ts'
 import { readTranscript, transcribePaper, ScannedPdfError, ShortTextError, type SourceArg } from './transcribe.ts'
 import { cancelTranslation, pdfVariantPath, restartTranslation, startTranslation, zhStatus } from './translate.ts'
+import { activateTranslationVersion, deleteTranslationVersion, listTranslationVersions } from './translation-versions.ts'
 import {
   clearTranslateConfig,
   deleteTranslateEndpoint,
@@ -1485,11 +1486,19 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
 
     if (sub === '/api/pdf' && req.method === 'GET') {
       const ref = locate(url)
-      const pdfPath = pdfVariantPath(ref, url.searchParams.get('variant'))
+      const variant = url.searchParams.get('variant')
+      const requestedVersion = url.searchParams.get('version')
+      let pdfPath: string
+      try {
+        pdfPath = pdfVariantPath(ref, variant, requestedVersion)
+      } catch (err) {
+        json(res, 404, { error: err instanceof Error ? err.message : String(err), code: 'version-not-found' })
+        return
+      }
+      const versionTag = variant ? requestedVersion || listTranslationVersions(ref).activeId || 'none' : 'orig'
       const st = await stat(pdfPath) // 变体不存在时 404/500 由外层兜底
-      // ETag = 文件 mtime + size：重新翻译/替换 PDF 后自动变化；客户端带 If-None-Match 直接 304。
-      // 之前是 cache-control: no-cache 且无校验器，切语言/缩放都会把整份 PDF 重传一遍。
-      const etag = `"${Math.trunc(st.mtimeMs).toString(16)}-${st.size.toString(16)}"`
+      // ETag = 版本指针 + 文件 mtime+size：切换版本时即使大小/时间相同也不会误用旧缓存。
+      const etag = `"${versionTag}-${Math.trunc(st.mtimeMs).toString(16)}-${st.size.toString(16)}"`
       const cacheHeaders: Record<string, string> = {
         etag,
         'last-modified': st.mtime.toUTCString(),
@@ -1507,7 +1516,8 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
         ...cacheHeaders,
       }
       if (url.searchParams.get('download') === '1') {
-        const name = basename(pdfPath)
+        // 归档文件内部统一叫 zh.pdf/dual.pdf；导出仍使用用户熟悉的 <论文>-zh.pdf 命名。
+        const name = variant ? `${ref.name}-${variant}.pdf` : basename(ref.pdfPath)
         headers['content-disposition'] =
           `attachment; filename="paper.pdf"; filename*=UTF-8''${encodeURIComponent(name)}`
       }
@@ -1531,7 +1541,37 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       return
     }
 
-    // 启动后台翻译（幂等；force=true 为重翻：先删已有译文再启动）。默认 Harness，显式 file/profile 为翻译专用覆盖。
+    if (sub === '/api/zh/versions' && req.method === 'GET') {
+      const ref = locate(url)
+      json(res, 200, { ...listTranslationVersions(ref), busy: zhStatus(ref).busy })
+      return
+    }
+
+    if (sub === '/api/zh/versions/activate' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; id?: string }
+      const ref = locateForWrite(body)
+      try {
+        const state = await activateTranslationVersion(ref, String(body.id ?? ''))
+        json(res, 200, { ok: true, ...state })
+      } catch (err) {
+        json(res, 409, { error: err instanceof Error ? err.message : String(err), code: 'version-activate-failed' })
+      }
+      return
+    }
+
+    if (sub === '/api/zh/versions/delete' && req.method === 'POST') {
+      const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; id?: string }
+      const ref = locateForWrite(body)
+      try {
+        const state = await deleteTranslationVersion(ref, String(body.id ?? ''))
+        json(res, 200, { ok: true, ...state })
+      } catch (err) {
+        json(res, 409, { error: err instanceof Error ? err.message : String(err), code: 'version-delete-failed' })
+      }
+      return
+    }
+
+    // 启动后台翻译（幂等；force=true 为新建候选版本，成功后自动切换，绝不先删当前版本）。
     if (sub === '/api/zh/generate' && req.method === 'POST') {
       const body = (await readBody(req)) as { topic?: string; name?: string; path?: string; force?: boolean; endpointId?: string }
       let ref: PaperRef
@@ -1558,9 +1598,14 @@ export function registerRoutes(ctx: Context, config: PluginConfig) {
       const runOptions = (await readTranslateEndpointStore()).options
       try {
         // 整篇 PDF 在任务开始时固定 provider/model；运行期间换 Harness 模型不会把任务切成两套模型。
+        const versionMeta = {
+          provider: followed?.providerName ?? (source === 'harness' ? 'Harness' : null),
+          endpointId: body.endpointId ?? source,
+        }
+        const endpointForRun = bridge?.endpoint ?? endpoint
         const r = body.force
-          ? await restartTranslation(ref, dataDir, bridge?.endpoint ?? endpoint, hooks, runOptions)
-          : await startTranslation(ref, dataDir, bridge?.endpoint ?? endpoint, hooks, runOptions)
+          ? await restartTranslation(ref, dataDir, endpointForRun, hooks, runOptions, versionMeta)
+          : await startTranslation(ref, dataDir, endpointForRun, hooks, runOptions, versionMeta)
         if (!r.started) await bridge?.close()
         json(res, r.started ? 200 : 409, r)
       } catch (err) {

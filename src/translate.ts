@@ -8,7 +8,8 @@
 // 直接把这两行 import 换成本地类型即可（形状是兼容子集）。
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, closeSync, fstatSync, openSync, readSync } from 'node:fs';
-import { mkdir, readFile, rename, rm, readdir } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
+import { listTranslationVersions, publishTranslationVersion, translationVariantPath } from './translation-versions.js';
 import { join, dirname, basename, extname, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +32,12 @@ export interface TranslateEndpoint {
     model?: string;
 }
 
+/** 任务级版本元数据；与端点配置分离，避免把版本信息写回凭据存储。 */
+export interface TranslationVersionMetadata {
+    provider?: string | null;
+    endpointId?: string | null;
+}
+
 /** 一条翻译进度（驱动脚本事件折算后的前端可画形态）。 */
 export interface TranslateProgress {
     stage: string | null;
@@ -50,6 +57,7 @@ export interface ZhStatus {
     zh: boolean;
     dual: boolean;
     busy: boolean;
+    activeId: string | null;
     error?: string;
     phase?: string;
     progress?: TranslateProgress;
@@ -132,13 +140,14 @@ const TRANSLATE_TIMEOUT_MS = 45 * 60 * 1000;
 const MAX_TAIL_CHARS = 1200;
 
 export function zhStatus(ref: TranslatePaperRef): ZhStatus {
-    const zh = existsSync(zhPdfPath(ref));
-    const dual = existsSync(dualPdfPath(ref));
+    const state = listTranslationVersions(ref);
+    const active = state.versions.find((v) => v.id === state.activeId);
     const b = busy.get(ref.pdfPath);
     return {
-        zh,
-        dual,
+        zh: Boolean(active?.variants.zh),
+        dual: Boolean(active?.variants.dual),
         busy: b === null || Boolean(b && !b.error),
+        activeId: active?.id ?? null,
         ...(b?.error ? { error: b.error } : {}),
         ...(b && !b.error && b.phase ? { phase: b.phase } : {}),
         ...(b && !b.error && b.progress ? { progress: b.progress } : {}),
@@ -217,7 +226,7 @@ export interface TranslationHooks {
     onFinish?: () => void | Promise<void>;
 }
 
-export async function startTranslation(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks = {}, options: TranslationRunOptions = DEFAULT_TRANSLATION_RUN_OPTIONS): Promise<StartResult> {
+export async function startTranslation(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks = {}, options: TranslationRunOptions = DEFAULT_TRANSLATION_RUN_OPTIONS, metadata: TranslationVersionMetadata = {}): Promise<StartResult> {
     const st = zhStatus(ref);
     if (st.zh || st.dual)
         return { started: false, reason: 'already-exists' };
@@ -227,7 +236,7 @@ export async function startTranslation(ref: TranslatePaperRef, dataDir: string, 
     if (pre)
         return pre;
     const firstRun = !(await findBabeldoc(dataDir));
-    void runPipeline(ref, dataDir, endpoint, hooks, options);
+    void runPipeline(ref, dataDir, endpoint, hooks, options, metadata);
     return { started: true, firstRun };
 }
 
@@ -245,7 +254,7 @@ function precheck(endpoint: TranslateEndpoint): StartResult | null {
 }
 
 /** 后台流水线：确保 babeldoc 可用（缺失则自动安装）→ 拉起翻译。 */
-async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks, options: TranslationRunOptions): Promise<void> {
+async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks, options: TranslationRunOptions, metadata: TranslationVersionMetadata): Promise<void> {
     const task: TranslationTask = { cancelled: false, kill: null };
     tasks.set(ref.pdfPath, task);
     const setPhase = (phase: string) => setTaskBusy(ref, task, { phase });
@@ -264,7 +273,7 @@ async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: Tr
         // 注意给的是「与 babeldoc 同 venv 的 python」：PATH/用户自管的 babeldoc 不会被碰。
         await ensureOnnxLayoutDevice(resolveDriverPython(bin), options.layoutDevice, setPhase, dshHome());
         if (task.cancelled || tasks.get(ref.pdfPath) !== task) return;
-        await launch(ref, dataDir, endpoint, bin, task, options);
+        await launch(ref, dataDir, endpoint, bin, task, options, metadata);
     }
     catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -279,20 +288,18 @@ async function runPipeline(ref: TranslatePaperRef, dataDir: string, endpoint: Tr
 }
 
 /**
- * 重新翻译：删除已有译文产物后再启动（换模型/翻得不好时用）。
- * 先预检再删——端点不齐时不动旧译文，免得删完才发现跑不起来。
+ * 重新翻译：保留全部已有版本，新任务作为候选版本运行。
+ * 只有完整产物通过校验并成功发布后，activeId 才自动指向新版本；失败/取消不影响当前版本。
  * babeldoc 的段落缓存 key 含模型名，换模型自然失效，无需 --ignore-cache。
  */
-export async function restartTranslation(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks = {}, options: TranslationRunOptions = DEFAULT_TRANSLATION_RUN_OPTIONS): Promise<StartResult> {
+export async function restartTranslation(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, hooks: TranslationHooks = {}, options: TranslationRunOptions = DEFAULT_TRANSLATION_RUN_OPTIONS, metadata: TranslationVersionMetadata = {}): Promise<StartResult> {
     if (zhStatus(ref).busy)
         return { started: false, reason: 'busy' };
     const pre = precheck(endpoint);
     if (pre)
         return pre;
-    await rm(zhPdfPath(ref), { force: true });
-    await rm(dualPdfPath(ref), { force: true });
     const firstRun = !(await findBabeldoc(dataDir));
-    void runPipeline(ref, dataDir, endpoint, hooks, options);
+    void runPipeline(ref, dataDir, endpoint, hooks, options, metadata);
     return { started: true, firstRun };
 }
 
@@ -435,15 +442,14 @@ function resolveDriverPython(bin: string | null): string | null {
     return candidates.find((c) => existsSync(c)) ?? null;
 }
 
-/** 真正拉起 babeldoc 子进程（bin 已就绪、产物不存在/已删）。 */
-async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, bin: string, task: TranslationTask, options: TranslationRunOptions): Promise<void> {
+/** 真正拉起 babeldoc 子进程（bin 已就绪；新产物只进入候选目录，不覆盖当前版本）。 */
+async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: TranslateEndpoint, bin: string, task: TranslationTask, options: TranslationRunOptions, metadata: TranslationVersionMetadata): Promise<void> {
     // 走到这里之前 precheck 已保证三项齐全；收窄一次，后续按 string 用
     const ep = endpoint as Required<TranslateEndpoint>;
     const tmpDir = join(dataDir, '.pdf2zh-tmp');
     await mkdir(tmpDir, { recursive: true });
-    setTaskBusy(ref, task, null); // 清掉安装阶段说明，回到「翻译进行中」
+    setTaskBusy(ref, task, { phase: '翻译进行中（等待引擎进度…）' }); // 清掉安装阶段说明；无驱动事件时也如实保持不确定进度
     const stem = basename(ref.pdfPath, extname(ref.pdfPath));
-    const dstStem = ref.pdfPath.slice(0, -extname(ref.pdfPath).length);
     // OpenCode Go：整篇翻译是一个「会话」，同一篇论文（含之后的划词翻译）共用一个稳定 ID，
     // 经环境变量交给驱动脚本，由它加进每次 LLM 请求的 x-opencode-session。其它端点不加任何东西。
     const ocSession = isOpenCodeEndpoint(ep.baseUrl)
@@ -644,7 +650,7 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                     resolveDone();
                     return;
                 }
-                // 产出从 scratch 挪回文献目录：<名>.zh-CN.mono.pdf → -zh.pdf，.dual.pdf → -dual.pdf
+                // 产物从 scratch 发布为新的不可变版本：<名>.zh-CN.mono.pdf → vN/zh.pdf，.dual.pdf → vN/dual.pdf
                 try {
                     // 不用 glob：其 pattern 里反斜杠是转义符，win32 的 join 路径会踩雷；readdir + 前后缀匹配全平台稳
                     const files = await readdir(tmpDir);
@@ -666,18 +672,25 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
                             return;
                         }
                     }
+                    const outputs: Array<{ source: string; variant: 'zh' | 'dual' }> = [];
                     for (const f of files) {
-                        if (f.startsWith(stem) && f.endsWith('.zh-CN.mono.pdf'))
-                            await rename(join(tmpDir, f), dstStem + '-zh.pdf');
-                        if (f.startsWith(stem) && f.endsWith('.zh-CN.dual.pdf'))
-                            await rename(join(tmpDir, f), dstStem + '-dual.pdf');
+                        if (f.startsWith(stem) && f.endsWith('.zh-CN.mono.pdf')) outputs.push({ source: join(tmpDir, f), variant: 'zh' });
+                        if (f.startsWith(stem) && f.endsWith('.zh-CN.dual.pdf')) outputs.push({ source: join(tmpDir, f), variant: 'dual' });
                     }
-                    if (!existsSync(zhPdfPath(ref)) && !existsSync(dualPdfPath(ref))) {
+                    if (!outputs.length) {
                         const why = tail.trim().split('\n').pop() ?? '';
                         setTaskBusy(ref, task, { error: `babeldoc 未产出译文 PDF${why ? `：${why}` : ''}${scannedHint(tail)}` });
                         resolveDone();
                         return;
                     }
+                    // 先完整发布到新的不可变版本目录，再一次切换 activeId；当前版本在翻译/校验期间始终可用。
+                    const version = await publishTranslationVersion(ref, {
+                        model: ep.model,
+                        provider: metadata.provider ?? null,
+                        endpointId: metadata.endpointId ?? null,
+                        files: outputs,
+                    });
+                    if (!version.variants.zh && !version.variants.dual) throw new Error('译文版本发布失败：没有可用变体');
                     if (paraErrs > 0)
                         console.warn(`[dsh-paper-reader] babeldoc done（含 ${paraErrs} 个段落失败，对应段落保留原文）: ${ref.name}，日志：${logPath}`);
                     if (tasks.get(ref.pdfPath) === task) busy.delete(ref.pdfPath);
@@ -698,11 +711,9 @@ async function launch(ref: TranslatePaperRef, dataDir: string, endpoint: Transla
     });
 }
 
-/** 解析 PDF 变体路径（原文/zh/dual）。 */
-export function pdfVariantPath(ref: TranslatePaperRef, variant: string | null): string {
-    if (variant === 'zh')
-        return zhPdfPath(ref);
-    if (variant === 'dual')
-        return dualPdfPath(ref);
+/** 解析 PDF 变体路径（原文 / 当前或指定译文版本）。 */
+export function pdfVariantPath(ref: TranslatePaperRef, variant: string | null, versionId?: string | null): string {
+    if (variant === 'zh' || variant === 'dual')
+        return translationVariantPath(ref, variant, versionId);
     return ref.pdfPath;
 }

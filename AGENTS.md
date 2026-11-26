@@ -55,7 +55,8 @@ src/
   embed.ts      纯函数：/embeddings 客户端 + 分块向量缓存
   formulas.ts   纯函数：MinerU 公式索引（LaTeX + bbox → 阅读器热区/面板）
   study.ts      纯函数：学习档案（计划 + 检验成绩）读写
-  translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）
+  translate.ts  纯函数：babeldoc 调用（中文/中英对照 PDF 生成）；重译只创建候选版本，成功发布后自动切换，不先删旧版
+  translation-versions.ts 纯函数/清单 IO：不可变译文版本（v1 兼容旧 -zh/-dual；vN 目录 + activeId 指针；预览/切换/删除；符号链接与坏清单防护）
   translation-options.ts 纯函数：整篇翻译的上下文拆段、输出预算、QPS 与版面检测设备（默认 100000/32768/16/cpu，配置校验）
   harness-translate.ts Harness 当前模型的只读适配：agentDefaultModel + llm；临时 127.0.0.1 OpenAI 端点供 BabelDOC，任务结束即关闭，不读写 Harness 凭据
   babeldoc-install.ts 纯函数：无 Python 环境时自动安装 babeldoc（uv → 托管 Python → venv）；版面检测选 dml/auto 时按需补装 onnxruntime-directml（uv 两段式 → pip 自举兜底，失败如实回落 CPU）
@@ -66,9 +67,10 @@ src/
   opencode.ts   纯函数：OpenCode Go 端点识别 + x-opencode-session 稳定会话 ID（0600 secret 派生，scope 明文不落盘；非 opencode.ai 端点零行为变化）
 cordis.patch.yml      bundle 声明插件本体 + 可选「论文伴读」agent preset（dsh-agent-preset；persona 完整提示词 + compaction）
 reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）；按篇记住阅读位置 `dpr.page.<专题>/<论文名>`
-                      （换文献时存、首帧画完后恢复；带页码的打开 = 引文跳转，以跳转为准）
+                      （{p 页码, r 页内比例, n 总页数, u 最后阅读时间}；换文献时存、首帧画完后恢复；带页码的打开 = 引文跳转，以跳转为准）
 lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管) + PDF 页签 + 主面板 + 回收站面板（入口 = 侧栏头部按钮）；
-                      侧栏树的可用高度是量出来的（顶层纯函数 dprTreeAvailableHeight：从插件根往上找裁切边界 → 给套在树外的容器限高 → 树自己滚、头部固定）
+                      每篇论文的阅读进度复用 dpr.page（当前页/总页数，细线+百分比，悬停/聚焦详情 portal 到 body）；
+                      专题→论文用低对比竖线+短横线表达从属；侧栏树的可用高度是量出来的（顶层纯函数 dprTreeAvailableHeight：从插件根往上找裁切边界 → 给套在树外的容器限高 → 树自己滚、头部固定）
 ```
 
 ## 硬约定（都有测试守着，改了会红）
@@ -81,6 +83,8 @@ lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管)
 - **回收站守卫**（`test/trash-bin.test.mjs`）：恢复不覆盖/不越界/不跟随符号链接、彻底删除只作用于回收站内；界面上「彻底删除 / 清空」必须过确认框；两份 README 与两份 `docs/features*.md` 都必须交代回收站入口（不得再写「无一键恢复 UI」）。契约见 `docs/reader-ux-requirements.md` §2.10。
 - **部署校验器**会核对英文侧功能的正式命名（如 "**Click to cite a formula**"），改功能名时中英 README 一起改。
 - **按篇的本地记忆键**：阅读器新增 `dpr.<前缀>.<专题>/<论文名>` 形式的 localStorage 键时（现有 `dpr.variant.` 语言版本、`dpr.page.` 阅读位置；`dpr.sessionN.` 在宿主侧），必须同步加进 `lib/client.js` 的 `migrateLsKeys`（论文/专题改名时跟着搬家），由 `test/reader-resume-position.test.mjs` M1 守着；两份 README 与两份 `docs/features*.md` 都要写到「记住读到哪」。
+- **阅读进度**（`test/reading-progress.test.mjs` + `reader-resume-position.test.mjs` P10）：复用 `dpr.page.` 的 `{p,n,u}`，**不另建进度键**；百分比 = 当前页/总页数（回看会下降），旧 `{p,r}` 存档不伪造百分比、单独显示「续读」而非误报未读。细线+百分比、末页绿色、悬停/键盘聚焦详情；详情浮层必须 portal 到 body 并在树滚动时关闭。专题→论文的竖线+短横线由同一测试守住。
+- **译文版本**（`test/translation-versions*.test.mjs`）：`restartTranslation` 绝不先删 `-zh/-dual`；候选完整发布后更新 `.translations/index.json` 的 `activeId` 并自动切换，失败/取消不动当前版本。全部成功版本保留、当前版本不可直接删除；预览不改指针。版本目录随论文改名/移动/删除/恢复（旧平铺 `.<论文>.translations` 收进新布局 `.translations`）；版本元数据不得包含 API Key/baseUrl。准备阶段 `progress:null` 顶栏也必须可见。
 - **侧栏树滚动**（`test/sidebar-tree-scroll.test.mjs` + `reader-scanned-fallback.test.mjs` S5）：宿主不给侧栏槽确定高度，树的高度靠 `LibraryTree` 自己量（`treeMax`，量之前先撤掉限高做「探针」）。树元素本身保持 `style: S.treeScroll`；**不要再给树的滚动容器写 `overscroll-behavior: contain`**——树一旦不自己滚，它会把滚轮事件吞掉（2026-11-25「论文一多看不到下面的论文」的根因）。
 - 文档漂移是这个仓库历史上唯一的反复缺陷源——改代码行为时，同步检查 README / docs/features.md / 本文件。
 
@@ -95,7 +99,7 @@ lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管)
 
 - 文献库默认 `~/.dsh-paper-reader/data`，可在 profile 的 `cordis.patch.yml` 改（可直指 pdfqa 的 `data/` 复用缓存）。
 - 布局：专题可嵌套（`<专题>/<子专题>/…`，上限 16 层）；每篇论文的全部产物收进 `<专题>/<论文>/` 一个文件夹。旧平铺库**兼容读**（`listPapers` 带 `legacy: true`，同名时文件夹优先），新写入一律落论文文件夹；旧库由迁移工具收纳（`npm run migrate`，默认 dry-run）。
-- 文献产物命名：`<文献>.pdf/.txt/.pages.json/.transcript.json/.mineru.md/.mineru.json/.embeddings.json/.study.json/.notes.json`，译文变体 `<文献>-en.pdf/-zh.pdf/-dual.pdf`（中断残留 `.tmp-*`）。
+- 文献产物命名：`<文献>.pdf/.txt/.pages.json/.transcript.json/.mineru.md/.mineru.json/.embeddings.json/.study.json/.notes.json`，译文变体 `<文献>-en.pdf/-zh.pdf/-dual.pdf`（中断残留 `.tmp-*`）。译文版本目录：新布局 `<论文>/.translations/`（旧平铺为 `.<文献>.translations/`），旧 `-zh/-dual` 作为 v1，新版本为 `vN/zh.pdf|dual.pdf` + `index.json`，全部成功版本不自动清理。
 - 删除 = 移入 `data/.trash/<时间戳>/`（带 manifest，可手工恢复）；路径穿越（`..`/绝对路径/符号链接逃逸）一律拒绝；中途失败自动回滚。
 - 回收站有界面入口：侧栏头部按钮 → 列表 / 恢复 / 彻底删除 / 清空（`/paper-reader/api/library/trash*`，实现全在 `library-manage.ts`）。恢复只认条目 id、服务端重新读盘；回收站不自动清理。
 

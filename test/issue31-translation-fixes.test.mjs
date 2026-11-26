@@ -58,7 +58,7 @@ test('④ bridgeErrorStatus:取消 499 / 上游状态保留 / 超时 504 / 连�
 
 test('③ 发布路径守卫:中文含量异常时不得发布(源码契约)', () => {
   const src = readFileSync(join(ROOT, '..', 'src', 'translate.ts'), 'utf8')
-  const publish = src.slice(src.indexOf('// 产出从 scratch 挪回文献目录'), src.indexOf("console.log(`[dsh-paper-reader] babeldoc done"))
+  const publish = src.slice(src.indexOf('// 产物从 scratch 发布为新的不可变版本'), src.indexOf("console.log(`[dsh-paper-reader] babeldoc done"))
   assert.match(publish, /countCjkInPdf\(probe\)/, '发布前必须抽检')
   assert.match(publish, /ZH_EMPTY_THRESHOLD/, '低于阈值必须拦截')
   assert.match(publish, /翻译实际未产出中文/, '拦截文案必须如实说明并给日志路径')

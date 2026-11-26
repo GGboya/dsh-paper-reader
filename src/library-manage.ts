@@ -37,6 +37,7 @@ import {
   validateEntryName,
 } from './library.ts'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { translationStoreEntryName } from './translation-versions.ts'
 import { randomBytes } from 'node:crypto'
 
 // ── 错误 ─────────────────────────────────────────────────────────────────────
@@ -363,6 +364,22 @@ export function listArtifacts(topicDir: string, paperName: string): ManagedFile[
   return out.sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.name.localeCompare(b.name))
 }
 
+/** 把译文版本目录纳入论文产物：目录整体 rename，绝不递归跟随符号链接。 */
+function withTranslationStore(topicDir: string, paperName: string, files: ManagedFile[]): ManagedFile[] {
+  const ref = { pdfPath: join(topicDir, `${paperName}.pdf`) }
+  const name = translationStoreEntryName(ref)
+  if (files.some((f) => f.name === name)) return files
+  const path = join(topicDir, name)
+  try {
+    const st = lstatSync(path)
+    if (!st.isDirectory() && !st.isSymbolicLink()) return files
+    const order: ArtifactKind[] = ['variant', 'mineru', 'embed', 'study', 'note', 'cache', 'tmp', 'pdf']
+    const artifact: ManagedFile = { name, kind: 'variant', bytes: st.size, symlink: st.isSymbolicLink() }
+    return [...files, artifact]
+      .sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.name.localeCompare(b.name))
+  } catch { return files }
+}
+
 /** 校验每个目标文件都不越界（符号链接只校验链接自身所在目录）。 */
 export function assertArtifactsContained(dataDir: string, topicDir: string, files: ManagedFile[]): void {
   const root = realDataDir(dataDir)
@@ -548,7 +565,7 @@ export function planPaperDelete(dataDir: string, topic: unknown, name: unknown):
   // 布局判定（确定性优先级：论文文件夹存在 ⇒ folder；否则只有平铺 `<名>.pdf` ⇒ legacy）
   const layout: 'folder' | 'legacy' = isLegacyPaper(topicDirAbs, paperName) ? 'legacy' : 'folder'
   const paperDirAbs = resolveExistingPaperDir(dataDir, topicName, paperName)
-  const files = listArtifacts(paperDirAbs, paperName)
+  const files = withTranslationStore(paperDirAbs, paperName, listArtifacts(paperDirAbs, paperName))
   assertArtifactsContained(dataDir, paperDirAbs, files)
   // `.pdf` 必须是**常规文件**：符号链接不是文献（listPapers 只看常规文件，故 resolvePaper 找不到它，
   // 以前会以「文献库中找不到」的普通 Error 冒泡成 500）。这里判 404，与「合法名 + 不存在文献」一致。
@@ -829,7 +846,7 @@ function planClearUnit(dataDir: string, topicPath: string, rel: string): TopicCl
     if (!e.isDirectory()) continue
     const childAbs = join(topicDir, e.name)
     if (isPaperDir(childAbs)) {
-      const files = listArtifacts(childAbs, e.name)
+      const files = withTranslationStore(childAbs, e.name, listArtifacts(childAbs, e.name))
       assertArtifactsContained(dataDir, childAbs, files)
       // 与 planPaperDelete 同口径：`.pdf` 必须是常规文件（符号链接不是文献）
       if (!files.some((f) => f.kind === 'pdf' && !f.symlink)) continue
@@ -843,7 +860,7 @@ function planClearUnit(dataDir: string, topicPath: string, rel: string): TopicCl
     if (!e.isFile() || !isPaperPDF(e.name)) continue
     const stem = e.name.slice(0, -4)
     if (existsSync(join(topicDir, stem))) continue
-    const files = listArtifacts(topicDir, stem)
+    const files = withTranslationStore(topicDir, stem, listArtifacts(topicDir, stem))
     assertArtifactsContained(dataDir, topicDir, files)
     if (!files.some((f) => f.kind === 'pdf' && !f.symlink)) continue
     papers.push({ name: stem, topic: topicPath, rel: stem, legacy: true, files, totalBytes: files.reduce((n, f) => n + f.bytes, 0) })
@@ -965,7 +982,8 @@ export function clearTopic(dataDir: string, topic: unknown, renameImpl: RenameIm
       // 隐藏条目：全部文献移完后进**单元**的 bundle 根（隐藏名以 `.` 开头，不会与篇名子目录撞名）
       if (unit.hidden.length > 0) {
         failedPaper = unit.rel ? `${unit.rel}/.hidden` : '.hidden'
-        const files: ManagedFile[] = managedEntries(topicDir, (n) => n.startsWith('.'))
+        const managedHidden = new Set(unit.papers.flatMap((p) => p.files.map((f) => f.name)))
+        const files: ManagedFile[] = managedEntries(topicDir, (n) => n.startsWith('.') && !managedHidden.has(n))
         const res = moveToTrash(bundle, topicDir, files, renameImpl)
         for (const name of res.moved) {
           moved.push({
@@ -1528,6 +1546,9 @@ export function restoreTrashItem(dataDir: string, id: unknown, renameImpl: Renam
     if (topicRecreated) mkdirSync(topicAbs, { recursive: true, mode: 0o700 })
     if (item.kind === 'paper' && targetDir) {
       if (sub) {
+        // 旧平铺删除时版本目录叫 .<论文>.translations；恢复统一收进新布局的 .translations。
+        const legacyStore = join(sub, `.${item.name}.translations`)
+        if (existsSync(legacyStore)) renameImpl(legacyStore, join(sub, '.translations'))
         // 整个论文目录一次 rename（原子）；先摘掉我们写在里面的清单
         if (entry.ownManifest) { try { rmSync(entry.ownManifest, { force: true }) } catch { /* 摘不掉也不影响恢复 */ } }
         try { renameImpl(sub, targetDir) } catch (err) { throw moveError(err, '本次恢复未生效，文件仍在回收站') }
@@ -1612,6 +1633,7 @@ export interface RenameResult {
  * 与磁盘不符。`listArtifacts` 保证 `f.name` 一定以 `paperName` 开头（精确 stem 匹配）。
  */
 export function renamedName(fileName: string, paperName: string, newName: string): string {
+  if (fileName === `.${paperName}.translations`) return `.${newName}.translations`
   return fileName.startsWith(paperName) ? newName + fileName.slice(paperName.length) : fileName
 }
 
@@ -1677,7 +1699,7 @@ export function renamePaper(dataDir: string, topic: unknown, name: unknown, newN
   // 旧布局（未迁移）：产物平铺在专题目录里 ⇒ 逐个文件改名（原来的实现，行为逐字保留）
   if (isLegacyPaper(topicDir, paperName)) return renameLegacyPaper(dataDir, topicDir, paperName, newName, renameImpl)
   const paperDirAbs = resolveExistingPaperDir(dataDir, topicName, paperName)
-  const files = listArtifacts(paperDirAbs, paperName)
+  const files = withTranslationStore(paperDirAbs, paperName, listArtifacts(paperDirAbs, paperName))
   assertArtifactsContained(dataDir, paperDirAbs, files)
   if (!files.some((f) => f.kind === 'pdf')) throw new ManageError('not-found', 404, `文献不存在：${paperName}.pdf`)
 
@@ -1779,7 +1801,7 @@ export function renamePaper(dataDir: string, topic: unknown, name: unknown, newN
  * 新布局走「先整体 rename 论文文件夹、再改文件夹内文件名」的两段式；这段只为未迁移的库保留。
  */
 function renameLegacyPaper(dataDir: string, topicDir: string, paperName: string, newName: string, renameImpl: RenameImpl): RenameResult {
-  const files = listArtifacts(topicDir, paperName)
+  const files = withTranslationStore(topicDir, paperName, listArtifacts(topicDir, paperName))
   assertArtifactsContained(dataDir, topicDir, files)
   if (!files.some((f) => f.kind === 'pdf')) throw new ManageError('not-found', 404, `文献不存在：${paperName}.pdf`)
   // C3（评审 C3）：逐文件预检只查「目标文件」，漏掉了「目标名已是一个**目录**」——
@@ -1898,7 +1920,9 @@ export function movePaper(dataDir: string, topic: unknown, name: unknown, toTopi
     try {
       for (const f of plan.files) {
         const from = join(sourceDir, f.name)
-        const to = join(targetDir, f.name)
+        // 旧平铺的 .<论文>.translations 收进新论文文件夹后统一改名为 .translations。
+        const targetName = f.name === `.${plan.name}.translations` ? '.translations' : f.name
+        const to = join(targetDir, targetName)
         renameImpl(from, to)
         moved.push({ from, to })
       }

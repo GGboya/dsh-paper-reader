@@ -29,6 +29,8 @@ A [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) plug
 - 🔒 **Local-first**: PDFs, translations, notes, and study records are plain files inside each paper's folder — copy the `data/` directory and they all come along; with no optional endpoint configured, the plugin sends no requests to any external service (chat history and endpoint settings live on the dsh side and do not follow the folder)
 - ➕ **Optional add-ons, off by default**: MinerU parsing makes scanned PDFs readable and formulas **Click to cite a formula** and searchable; an embeddings endpoint lets plain-language queries hit jargon passages — not a single request until you configure them
 - ⚡ **Smooth on long papers**: only pages near the viewport are painted; original ↔ Chinese switching reloads nothing; reopening a paper re-uploads nothing
+- 📖 **Reading progress at a glance**: every paper has a slim progress bar and percentage in the sidebar (current page / total pages), with distinct unread, in-progress, and last-page states; hover or keyboard-focus a paper for its page number and last-read time
+- 🗂️ **Translation version control**: the current translation stays readable while you retranslate with another model, with persistent toolbar progress; successful versions switch automatically and are all kept for preview, rollback, or manual deletion
 - 🤖 **Optional tutor mode**: the AI makes a step-by-step plan; you read the original and answer, and it advances you only after you demonstrate understanding — progress accumulates across sessions
 - 🌙 **PDF dark mode**: follows the dsh theme with four strength presets (whole-page inversion, so photos desaturate and shift — a known cost, one click to turn off)
 

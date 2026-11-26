@@ -37,7 +37,7 @@ function sectionSource() {
 
 /** 假环境：可控的状态 + 记录调用的桩。geometry = 页几何 [{page, offsetTop, offsetHeight}]。 */
 function makeEnv({ geometry, scrollTop = 0, clientHeight = 600, state = {}, store: init = new Map() } = {}) {
-  const calls = { ensureLazy: [], align: [], pager: 0, writes: [] }
+  const calls = { ensureLazy: [], align: [], pager: 0, writes: [], progress: [] }
   const winHandlers = new Map()
   const docHandlers = new Map()
   const document = { addEventListener: (t, h) => docHandlers.set(t, h), visibilityState: 'visible' }
@@ -61,7 +61,7 @@ return {
   arm: (r) => { pendingRestore = r },
   curPage: () => curPage,
 }`
-  const api = new Function('S', 'localStorage', '$', 'anchorOf', 'columnPages', 'origPageNode', 'ensureLazyPage', 'splitCols', 'alignSplit', 'updatePager', 'window', 'document', 'setTimeout', body)(
+  const api = new Function('S', 'localStorage', '$', 'anchorOf', 'columnPages', 'origPageNode', 'ensureLazyPage', 'splitCols', 'alignSplit', 'updatePager', 'window', 'document', 'setTimeout', 'postToParent', 'Date', body)(
     S,
     { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => { store.set(k, String(v)); calls.writes.push(k) } },
     (id) => (id === 'pdf-pane' ? pane : pages),
@@ -75,6 +75,8 @@ return {
     { addEventListener: (t, h) => winHandlers.set(t, h) },
     document,
     (fn, ms) => { timers.push({ fn, ms }); return timers.length }, // 假定时器：由用例决定什么时候到点
+    (msg) => calls.progress.push(msg),
+    { now: () => NOW },
   )
   return { api, calls, store, pane, winHandlers, docHandlers, document, timers, paneHandlers, flush: () => { for (const t of timers.splice(0)) t.fn() } }
 }
@@ -84,6 +86,8 @@ const ANCHOR_SRC = READER.slice(READER.indexOf('function anchorOf('), READER.ind
 const anchorOfImpl = new Function(`${ANCHOR_SRC}\nreturn anchorOf`)()
 
 const GEO = [1, 2, 3, 4].map((p) => ({ page: p, offsetTop: (p - 1) * 1000, offsetHeight: 1000 }))
+const NOW = 1764200000000
+const savedPos = (p, r, n = 4) => ({ p, r, n, u: NOW })
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P. 行为
@@ -123,13 +127,13 @@ test('P1 readPos：只认 {p ≥ 1 的整数, r}；脏值一律当没有；页�
 test('P2 滚动模式记「视口顶端所在页 + 页内比例」（不是观察器回写的 curPage）；翻页模式只记页号', () => {
   let env = makeEnv({ geometry: GEO, scrollTop: 2350, state: { curPage: 1 } })
   env.api.savePosNow()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 3, r: 0.35 }, '顶端在第 3 页 35% 处——与 curPage 的旧值无关')
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(3, 0.35), '顶端在第 3 页 35% 处——与 curPage 的旧值无关')
   env = makeEnv({ geometry: GEO, scrollTop: 0, state: { curPage: 2 } })
   env.api.savePosNow()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 1, r: 0 })
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(1, 0))
   env = makeEnv({ geometry: GEO, scrollTop: 2350, state: { curPage: 4, pageMode: 'paged' } })
   env.api.savePosNow()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 4, r: 0 }, '翻页模式：页号 + 比例 0')
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(4, 0), '翻页模式：页号 + 比例 0')
 })
 
 test('P3 不该记的时候不记：还没打开文献 / 没有文档 / 正在换文献 / 滚动模式下阅读器不可见——不许拿坏数据覆盖好数据', () => {
@@ -144,11 +148,12 @@ test('P3 不该记的时候不记：还没打开文献 / 没有文档 / 正在�
     env.api.savePosNow()
     assert.equal(env.store.get('dpr.page.T/A'), before, `${what}：不得写`)
     assert.deepEqual(env.calls.writes, [], `${what}：一次写都不该有`)
+    assert.deepEqual(env.calls.progress, [], `${what}：也不该向文献树广播进度`)
   }
   // 翻页模式下不可见也记：页号不依赖滚动位置，是可信的
   const env = makeEnv({ geometry: GEO, scrollTop: 0, clientHeight: 0, state: { pageMode: 'paged', curPage: 4 } })
   env.api.savePosNow()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 4, r: 0 })
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(4, 0))
 })
 
 test('P4 滚动模式恢复：瞬时定位到「同一页 + 同一页内比例」，懒渲染补画该页，分屏时另一列跟着对齐', () => {
@@ -239,11 +244,11 @@ test('P8 页面卸载 / 转后台时落盘；保持可见时不写', () => {
   assert.equal(env.store.get('dpr.page.T/A'), undefined, '可见时不写')
   env.document.visibilityState = 'hidden'
   onVis()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 2, r: 0.25 }, '转后台：落盘')
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(2, 0.25), '转后台：落盘')
   env.store.clear()
   env.pane.scrollTop = 3100
   onHide()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 4, r: 0.1 }, '页面卸载：落盘')
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(4, 0.1), '页面卸载：落盘')
 })
 
 test('P9 阅读过程中顺手落盘（节流）：连着滚很多次也只在停顿后写一次，写的是最新位置；不可见时到点也不写', () => {
@@ -255,17 +260,24 @@ test('P9 阅读过程中顺手落盘（节流）：连着滚很多次也只在�
   assert.equal(env.timers[0].ms, 400)
   assert.equal(env.calls.writes.length, 0, '到点之前不写')
   env.flush()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 2, r: 0.5 }, '写的是到点那一刻的位置')
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(2, 0.5), '写的是到点那一刻的位置')
   env.pane.scrollTop = 2500
   onScroll()
   env.flush()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 3, r: 0.5 }, '下一次滚动 → 再写一次')
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(3, 0.5), '下一次滚动 → 再写一次')
   // 排队期间面板没了布局：到点也不写，旧存档原样保留（不许拿 scrollTop=0 把进度冲掉）
   env.pane.clientHeight = 0
   env.pane.scrollTop = 0
   onScroll()
   env.flush()
-  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), { p: 3, r: 0.5 })
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(3, 0.5))
+})
+
+test('P10 落盘同时带上总页数 / 时间，并通知宿主刷新侧栏进度；消息与存档使用同一份位置', () => {
+  const env = makeEnv({ geometry: GEO, scrollTop: 2350 })
+  env.api.savePosNow()
+  assert.deepEqual(env.calls.progress, [{ type: 'dpr:reading-progress', topic: 'T', name: 'A', ...savedPos(3, 0.35) }])
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(3, 0.35))
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

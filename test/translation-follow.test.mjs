@@ -193,7 +193,8 @@ printf '%%PDF-fake' > "$out/$stem.zh-CN.mono.pdf"
     const r = await TR.startTranslation(ref, dataDir, { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'k', model: 'm' }, { onFinish: () => { finished += 1 } })
     assert.equal(r.started, true)
     await until(() => finished === 1)
-    assert.equal(existsSync(join(dataDir, 'paper-zh.pdf')), true)
+    assert.equal(existsSync(TR.pdfVariantPath(ref, 'zh')), true, '首个版本发布后 activeId 指向可读的 v1')
+    assert.match(TR.pdfVariantPath(ref, 'zh'), /\.translations[\\/]v1[\\/]zh\.pdf$/)
     assert.equal(TR.zhStatus(ref).busy, false)
   } finally {
     if (oldEnsure === undefined) delete process.env.DPR_SKIP_ENGINE_ENSURE
