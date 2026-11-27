@@ -1074,9 +1074,9 @@ let curPage = 1;
 
 /* ================= 阅读位置记忆（按篇） =================
    每篇论文记住「读到哪」：切走再切回、关掉重开，都接着上次的位置，而不是每次从第一页开始。
-   存 `dpr.page.<专题>/<论文名>` = { p: 视口顶端所在页, r: 页内比例, n: 总页数, u: 最后阅读时间 }——与语言版本记忆（dpr.variant.）一样，
+   存 `dpr.page.<专题>/<论文名>` = { p: 恢复用视口顶端页, r: 页内比例, d: 展示用当前页（滚到底为末页）, n: 总页数, u: 最后阅读时间 }——与语言版本记忆（dpr.variant.）一样，
    是按篇的本地记忆；论文/专题改名时由宿主一并搬家（lib/client.js migrateLsKeys）。
-   n/u 同时供侧栏文献树显示「当前页 / 总页数」进度；旧版只有 p/r 的存档仍可恢复，下一次落盘自动补齐。
+   d/n 同时供侧栏文献树显示进度；旧版只有 p/r 的存档仍可恢复，下一次落盘自动补齐。
    · 什么时候记：换文献的那一刻（openPaper 开头——此时上一篇还在屏上，位置最准）+ 页面卸载 / 转后台。
      阅读器不可见时（悬浮层收起、高度 0）**不写**：那时滚动位置不可信，不能拿它覆盖掉好数据。
    · 怎么恢复：openPaper 没带跳转页码时按记忆定位（带了页码 = 引文跳转，以跳转为准）。
@@ -1098,7 +1098,11 @@ function livePos() {
 function savePosNow() {
   if (!current || !pdfDoc || openingPaper || !current.topic || !current.name) return;
   if (pageMode !== 'paged' && $('pdf-pane').clientHeight === 0) return; // 不可见：滚动位置不可信
-  const pos = { ...livePos(), n: pdfDoc.numPages, u: Date.now() };
+  const live = livePos();
+  const pane = $('pdf-pane');
+  // 恢复位置仍用视口顶端页；展示进度单独记 d：滚到最底部时，高视口会让顶端停在前一页，但用户确实已到末页。
+  const atBottom = pageMode !== 'paged' && pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 1;
+  const pos = { ...live, d: atBottom ? pdfDoc.numPages : live.p, n: pdfDoc.numPages, u: Date.now() };
   try {
     localStorage.setItem(posKey(current.topic, current.name), JSON.stringify(pos));
     // 同源宿主收到后只刷新文献树里的进度；存储仍是唯一事实来源，改名/移动沿用 dpr.page. 搬家。

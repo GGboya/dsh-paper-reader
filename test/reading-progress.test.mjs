@@ -28,6 +28,8 @@ const clean = (v) => JSON.parse(JSON.stringify(v))
 test('P1 进度只认当前页 + 总页数；旧版 {p,r} 可继续恢复位置但不伪造百分比', () => {
   assert.deepEqual(clean(pure.progress('{"p":7,"r":0.35,"n":13,"u":1764200000000}')), { p: 7, n: 13, u: 1764200000000, percent: 54 })
   assert.deepEqual(clean(pure.progress({ p: 11, n: 11, u: 0 })), { p: 11, n: 11, u: 0, percent: 100 })
+  assert.deepEqual(clean(pure.progress({ p: 70, d: 71, n: 71, u: 0 })), { p: 71, n: 71, u: 0, percent: 100 }, '高视口滚到底：展示页 d 优先于恢复页 p')
+  assert.deepEqual(clean(pure.progress({ p: 70, d: '71', n: 71, u: 0 })), { p: 70, n: 71, u: 0, percent: 99 }, '坏 d 忽略并回退 p')
   assert.deepEqual(clean(pure.progress({ p: 99, n: 20 })), { p: 20, n: 20, u: 0, percent: 100 }, 'PDF 换过、旧页码超界时夹到末页')
   assert.equal(pure.progress('{"p":7,"r":0.35}'), null, '旧存档缺总页数：不伪造百分比')
   assert.equal(pure.legacy('{"p":7,"r":0.35}'), true, '旧存档单独标成“续读”，不能误称未读')
@@ -57,8 +59,10 @@ test('P3 行尾已有百分比时不提供重复信息的悬停弹窗', () => {
   assert.ok(!CLIENT.includes('onMouseEnter'))
 })
 
-test('S1 阅读器落盘 {p,r,n,u} 并广播；宿主只接受本插件 iframe 的合法进度消息', () => {
-  assert.match(READER, /const pos = \{ \.\.\.livePos\(\), n: pdfDoc\.numPages, u: Date\.now\(\) \}/)
+test('S1 阅读器落盘 {p,r,d,n,u} 并广播；宿主只接受本插件 iframe 的合法进度消息', () => {
+  assert.match(READER, /const live = livePos\(\);/)
+  assert.match(READER, /const atBottom = pageMode !== 'paged' && pane\.scrollTop \+ pane\.clientHeight >= pane\.scrollHeight - 1;/)
+  assert.match(READER, /d: atBottom \? pdfDoc\.numPages : live\.p, n: pdfDoc\.numPages, u: Date\.now\(\)/)
   assert.match(READER, /postToParent\(\{ type: 'dpr:reading-progress', topic: current\.topic, name: current\.name, \.\.\.pos \}\)/)
   assert.match(CLIENT, /if \(!win \|\| e\.source !== win\) return/)
   assert.match(CLIENT, /d\.type === 'dpr:reading-progress'[\s\S]{0,300}dprReadingProgress\(d\)/)

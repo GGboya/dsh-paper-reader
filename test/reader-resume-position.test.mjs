@@ -45,7 +45,7 @@ function makeEnv({ geometry, scrollTop = 0, clientHeight = 600, state = {}, stor
   const nodes = new Map((geometry ?? []).map((g) => [g.page, { offsetTop: g.offsetTop, offsetHeight: g.offsetHeight }]))
   const paneHandlers = new Map()
   const timers = []
-  const pane = { scrollTop, clientHeight, addEventListener: (t, h) => paneHandlers.set(t, h) }
+  const pane = { scrollTop, clientHeight, scrollHeight: Math.max(clientHeight, ...(geometry ?? []).map((g) => g.offsetTop + g.offsetHeight), 0), addEventListener: (t, h) => paneHandlers.set(t, h) }
   const S = {
     pageMode: 'scroll', curPage: 1, current: { topic: 'T', name: 'A' }, pdfDoc: { numPages: (geometry ?? []).length },
     openingPaper: false, lazyView: null, viewMode: 'orig', ...state,
@@ -87,7 +87,7 @@ const anchorOfImpl = new Function(`${ANCHOR_SRC}\nreturn anchorOf`)()
 
 const GEO = [1, 2, 3, 4].map((p) => ({ page: p, offsetTop: (p - 1) * 1000, offsetHeight: 1000 }))
 const NOW = 1764200000000
-const savedPos = (p, r, n = 4) => ({ p, r, n, u: NOW })
+const savedPos = (p, r, n = 4, d = p) => ({ p, r, d, n, u: NOW })
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P. 行为
@@ -278,6 +278,14 @@ test('P10 落盘同时带上总页数 / 时间，并通知宿主刷新侧栏进�
   env.api.savePosNow()
   assert.deepEqual(env.calls.progress, [{ type: 'dpr:reading-progress', topic: 'T', name: 'A', ...savedPos(3, 0.35) }])
   assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(3, 0.35))
+})
+
+test('P11 高视口滚到最底部：恢复仍记顶端页，展示进度单独记末页（70/71 不再停在 99%）', () => {
+  const env = makeEnv({ geometry: GEO, scrollTop: 2000, clientHeight: 2000 })
+  env.api.savePosNow()
+  // 顶端在第 3 页，恢复位置必须仍是 3；scrollHeight=4000、clientHeight=2000，已经到底 ⇒ d=4。
+  assert.deepEqual(JSON.parse(env.store.get('dpr.page.T/A')), savedPos(3, 0, 4, 4))
+  assert.deepEqual(env.calls.progress[0], { type: 'dpr:reading-progress', topic: 'T', name: 'A', ...savedPos(3, 0, 4, 4) })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

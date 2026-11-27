@@ -67,7 +67,7 @@ src/
   opencode.ts   纯函数：OpenCode Go 端点识别 + x-opencode-session 稳定会话 ID（0600 secret 派生，scope 明文不落盘；非 opencode.ai 端点零行为变化）
 cordis.patch.yml      bundle 声明插件本体 + 可选「论文伴读」agent preset（dsh-agent-preset；persona 完整提示词 + compaction）
 reader/index.html      阅读器页面（pdf.js，独立于 React 宿主，iframe 承载）；按篇记住阅读位置 `dpr.page.<专题>/<论文名>`
-                      （{p 页码, r 页内比例, n 总页数, u 最后阅读时间}；换文献时存、首帧画完后恢复；带页码的打开 = 引文跳转，以跳转为准）
+                      （{p 恢复用顶端页, r 页内比例, d 展示用当前页（滚到底为末页）, n 总页数, u 最后阅读时间}；换文献时存、首帧画完后恢复；带页码的打开 = 引文跳转，以跳转为准）
 lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管) + PDF 页签 + 主面板 + 回收站面板（入口 = 侧栏头部按钮）；
                       每篇论文的阅读进度复用 dpr.page（当前页/总页数，24px 紧凑行、行尾百分比，**无悬停弹窗**）；
                       专题→论文用 VSCode 式浅灰层级竖线 + 论文图标/名字右移（当前论文只用背景选中）；侧栏树的可用高度是量出来的（顶层纯函数 dprTreeAvailableHeight：从插件根往上找裁切边界 → 给套在树外的容器限高 → 树自己滚、头部固定）
@@ -83,7 +83,7 @@ lib/client.js          浏览器半边：文献库树(sidebar.workspaces 接管)
 - **回收站守卫**（`test/trash-bin.test.mjs`）：恢复不覆盖/不越界/不跟随符号链接、彻底删除只作用于回收站内；界面上「彻底删除 / 清空」必须过确认框；两份 README 与两份 `docs/features*.md` 都必须交代回收站入口（不得再写「无一键恢复 UI」）。契约见 `docs/reader-ux-requirements.md` §2.10。
 - **部署校验器**会核对英文侧功能的正式命名（如 "**Click to cite a formula**"），改功能名时中英 README 一起改。
 - **按篇的本地记忆键**：阅读器新增 `dpr.<前缀>.<专题>/<论文名>` 形式的 localStorage 键时（现有 `dpr.variant.` 语言版本、`dpr.page.` 阅读位置；`dpr.sessionN.` 在宿主侧），必须同步加进 `lib/client.js` 的 `migrateLsKeys`（论文/专题改名时跟着搬家），由 `test/reader-resume-position.test.mjs` M1 守着；两份 README 与两份 `docs/features*.md` 都要写到「记住读到哪」。
-- **阅读进度**（`test/reading-progress.test.mjs` + `reader-resume-position.test.mjs` P10）：复用 `dpr.page.` 的 `{p,n,u}`，**不另建进度键**；百分比 = 当前页/总页数（回看会下降），旧 `{p,r}` 存档不伪造百分比、单独显示「续读」而非误报未读。24px 紧凑行、只留行尾百分比（**不画标题下方的进度条、不做重复信息弹窗**）、末页绿色。专题→论文用 VSCode 式浅灰层级竖线 + 名字右移，**不画短横线或短蓝色当前指示条**，由同一测试守住。
+- **阅读进度**（`test/reading-progress.test.mjs` + `reader-resume-position.test.mjs` P10/P11）：复用 `dpr.page.` 的 `{p,d,n,u}`，**不另建进度键**；百分比 = 展示页 d/总页数（回看会下降），高视口滚到最底部时 d=末页（恢复用 p 不变），旧 `{p,r}` 存档不伪造百分比、单独显示「续读」而非误报未读。24px 紧凑行、只留行尾百分比（**不画标题下方的进度条、不做重复信息弹窗**）、末页绿色。专题→论文用 VSCode 式浅灰层级竖线 + 名字右移，**不画短横线或短蓝色当前指示条**，由同一测试守住。
 - **译文版本**（`test/translation-versions*.test.mjs`）：`restartTranslation` 绝不先删 `-zh/-dual`；候选完整发布后更新 `.translations/index.json` 的 `activeId` 并自动切换，失败/取消不动当前版本。全部成功版本保留、当前版本不可直接删除；预览不改指针。版本目录随论文改名/移动/删除/恢复（旧平铺 `.<论文>.translations` 收进新布局 `.translations`）；版本元数据不得包含 API Key/baseUrl。准备阶段 `progress:null` 顶栏也必须可见。
 - **侧栏树滚动**（`test/sidebar-tree-scroll.test.mjs` + `reader-scanned-fallback.test.mjs` S5）：宿主不给侧栏槽确定高度，树的高度靠 `LibraryTree` 自己量（`treeMax`，量之前先撤掉限高做「探针」）。树元素本身保持 `style: S.treeScroll`；**不要再给树的滚动容器写 `overscroll-behavior: contain`**——树一旦不自己滚，它会把滚轮事件吞掉（2026-11-25「论文一多看不到下面的论文」的根因）。
 - 文档漂移是这个仓库历史上唯一的反复缺陷源——改代码行为时，同步检查 README / docs/features.md / 本文件。
